@@ -1,0 +1,34 @@
+[package]
+name = "minimap2-rs"
+version = "0.1.0"
+edition = "2021"
+description = "Pure Rust reimplementation of minimap2 sequence aligner"
+license = "MIT"
+
+[[bin]]
+name = "minimap2-rs"
+path = "src/main.rs"
+
+[lib]
+name = "minimap2"
+path = "src/lib.rs"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+rayon = "1.10"
+hashbrown = "0.15"
+bitflags = "2"
+log = "0.4"
+env_logger = "0.11"
+thiserror = "2"
+flate2 = "1"
+memchr = "2"
+
+[dev-dependencies]
+criterion = "0.5"
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
