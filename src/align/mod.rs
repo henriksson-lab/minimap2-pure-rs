@@ -139,6 +139,67 @@ fn do_align(
     }
 }
 
+/// Trim bad chain ends where anchors have large diagonal deviations.
+/// Matches mm_fix_bad_ends() from align.c.
+/// Returns (new_as, new_cnt) trimming the start and end of the chain.
+fn fix_bad_ends(as1: usize, cnt1: usize, a: &[Mm128], bw: i32, min_match: i32, mlen: i32) -> (usize, usize) {
+    if cnt1 < 3 { return (as1, cnt1); }
+    let mut new_as = as1;
+    let mut new_cnt = cnt1;
+
+    // Trim from the start
+    let mut m = ((a[as1].y >> 32) & 0xff) as i32;
+    let mut l = m;
+    for i in 1..cnt1 - 1 {
+        let q_span = ((a[as1 + i].y >> 32) & 0xff) as i32;
+        if a[as1 + i].y & crate::flags::SEED_LONG_JOIN != 0 { break; }
+        let lr = (a[as1 + i].x as i32) - (a[as1 + i - 1].x as i32);
+        let lq = (a[as1 + i].y as i32) - (a[as1 + i - 1].y as i32);
+        let min_d = lr.min(lq);
+        let max_d = lr.max(lq);
+        if max_d - min_d > l >> 1 { new_as = as1 + i; }
+        l += min_d;
+        m += min_d.min(q_span);
+        if l >= bw << 1 || (m >= min_match && m >= bw) || m >= mlen >> 1 { break; }
+    }
+    new_cnt = as1 + cnt1 - new_as;
+
+    // Trim from the end
+    m = ((a[as1 + cnt1 - 1].y >> 32) & 0xff) as i32;
+    l = m;
+    let mut i = as1 + cnt1 - 2;
+    while i > new_as {
+        let q_span = ((a[i + 1].y >> 32) & 0xff) as i32;
+        if a[i + 1].y & crate::flags::SEED_LONG_JOIN != 0 { break; }
+        let lr = (a[i + 1].x as i32) - (a[i].x as i32);
+        let lq = (a[i + 1].y as i32) - (a[i].y as i32);
+        let min_d = lr.min(lq);
+        let max_d = lr.max(lq);
+        if max_d - min_d > l >> 1 { new_cnt = i + 1 - new_as; }
+        l += min_d;
+        m += min_d.min(q_span);
+        if l >= bw << 1 || (m >= min_match && m >= bw) || m >= mlen >> 1 { break; }
+        if i == 0 { break; }
+        i -= 1;
+    }
+    (new_as, new_cnt)
+}
+
+/// Filter bad seeds: mark seeds with large gaps for ignoring.
+/// Simplified version of mm_filter_bad_seeds() from align.c.
+fn filter_bad_seeds(as1: usize, cnt1: usize, a: &mut [Mm128], min_gap: i32, max_ext_len: i32) {
+    if cnt1 < 3 { return; }
+    // Find seeds with large diagonal gaps
+    for i in 1..cnt1 {
+        let gap = ((a[as1 + i].y as i32) - (a[as1 + i - 1].y as i32))
+                - ((a[as1 + i].x as i32) - (a[as1 + i - 1].x as i32));
+        if (gap > min_gap || gap < -min_gap) && (gap > max_ext_len || gap < -max_ext_len) {
+            // Mark for long join — the gap-filling will use wider bandwidth
+            a[as1 + i].y |= crate::flags::SEED_LONG_JOIN;
+        }
+    }
+}
+
 /// Perform anchor-based gap-filling alignment for a single region.
 ///
 /// Follows mm_align1() from align.c:
@@ -152,12 +213,21 @@ fn align1(
     qseq_fwd: &[u8],
     qseq_rev: &[u8],
     r: &mut AlignReg,
-    a: &[Mm128],
+    a: &mut [Mm128],
     mat: &[i8],
 ) {
     if r.cnt == 0 { return; }
-    let as1 = r.as_ as usize;
-    let cnt1 = r.cnt as usize;
+    let raw_as = r.as_ as usize;
+    let raw_cnt = r.cnt as usize;
+
+    // Filter bad seeds and trim bad ends
+    filter_bad_seeds(raw_as, raw_cnt, a, 10, opt.max_gap >> 1);
+    let (as1, cnt1) = if !(opt.flag.contains(crate::flags::MapFlags::NO_END_FLT)) {
+        fix_bad_ends(raw_as, raw_cnt, a, opt.bw, opt.min_chain_score * 2, r.mlen)
+    } else {
+        (raw_as, raw_cnt)
+    };
+    if cnt1 == 0 { return; }
     let rid = r.rid as u32;
     let rev = r.rev;
     let qseq = if rev { qseq_rev } else { qseq_fwd };
@@ -469,7 +539,7 @@ pub fn align_skeleton(
     qlen: i32,
     qstr: &[u8], // ASCII query
     regs: &mut Vec<AlignReg>,
-    a: &[Mm128],
+    a: &mut [Mm128],
 ) {
     if regs.is_empty() {
         return;
@@ -496,7 +566,7 @@ pub fn align_skeleton(
     for i in 0..regs.len() {
         // We need to temporarily take the reg out to avoid borrow issues
         let mut r = regs[i].clone();
-        align1(opt, mi, qlen, &qseq_fwd, &qseq_rev, &mut r, a, &mat);
+        align1(opt, mi, qlen, &qseq_fwd, &qseq_rev, &mut r, &mut *a, &mat);
         regs[i] = r;
     }
 

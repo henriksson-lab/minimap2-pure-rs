@@ -102,7 +102,7 @@ pub fn map_query(
         )
     };
 
-    let (chain_anchors, chains) = match chain_result {
+    let (mut chain_anchors, chains) = match chain_result {
         Some(r) => (r.anchors, r.chains),
         None => return MapResult { regs: Vec::new(), rep_len },
     };
@@ -134,7 +134,7 @@ pub fn map_query(
 
     // Step 8: DP alignment for CIGAR (if requested)
     if opt.flag.contains(MapFlags::CIGAR) {
-        align::align_skeleton(opt, mi, qlen, qseq, &mut regs, &chain_anchors);
+        align::align_skeleton(opt, mi, qlen, qseq, &mut regs, &mut chain_anchors);
         // Re-do parent/secondary after alignment refinement
         if !opt.flag.contains(MapFlags::ALL_CHAINS) {
             hit::set_parent(

@@ -283,3 +283,30 @@ fn test_mt_with_cigar() {
     assert!(t_consumed >= r.re - r.rs,
         "CIGAR target consumption {} should be >= re-rs={}", t_consumed, r.re - r.rs);
 }
+
+#[test]
+fn test_x3s_cigar_matches_c() {
+    if !Path::new("minimap2/test/x3s-ref.fa").exists() { return; }
+    let (io, mut mo) = setup_opts(None);
+    mo.flag |= MapFlags::CIGAR | MapFlags::OUT_CG;
+    let mi = MmIdx::build_from_file(
+        "minimap2/test/x3s-ref.fa", io.w as i32, io.k as i32, io.bucket_bits,
+        io.flag, io.mini_batch_size, io.batch_size,
+    ).unwrap().unwrap();
+    mo.mid_occ = mi.cal_max_occ(mo.mid_occ_frac);
+    if mo.mid_occ < mo.min_mid_occ { mo.mid_occ = mo.min_mid_occ; }
+
+    let mut fp = minimap2::bseq::BseqFile::open("minimap2/test/x3s-qry.fa").unwrap();
+    let rec = fp.read_record().unwrap().unwrap();
+    let result = map::map_query(&mi, &mo, &rec.name, &rec.seq);
+    assert!(!result.regs.is_empty());
+    let r = &result.regs[0];
+    // C minimap2 produces: query 134 0 70 - ref 388 258 328 70 70 60 cg:Z:70M
+    assert_eq!(r.qs, 0);
+    assert_eq!(r.qe, 70);
+    assert_eq!(r.rs, 258);
+    assert_eq!(r.re, 328);
+    let extra = r.extra.as_ref().unwrap();
+    assert_eq!(extra.cigar.0.len(), 1, "Should be a single 70M");
+    assert_eq!(extra.cigar.0[0], (70 << 4) | 0, "Should be 70M");
+}
