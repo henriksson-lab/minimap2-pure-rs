@@ -37,7 +37,7 @@ impl KswResult {
 }
 
 /// Push a CIGAR operation, merging with the last if same op.
-fn push_cigar(cigar: &mut Vec<u32>, op: u32, len: i32) {
+pub(crate) fn push_cigar_fn(cigar: &mut Vec<u32>, op: u32, len: i32) {
     if let Some(last) = cigar.last_mut() {
         if (*last & 0xf) == op {
             *last += (len as u32) << 4;
@@ -127,7 +127,7 @@ pub fn ksw_extz2(
 
         // Band bounds
         let j_st = if i > w { (i - w) as usize } else { 0 };
-        let j_en = ((i + w + 1) as usize).min(tlen as usize);
+        let j_en = ((i as i64 + w as i64 + 1) as usize).min(tlen as usize);
 
         let mut f = KSW_NEG_INF; // gap in query (insertion)
 
@@ -287,16 +287,16 @@ pub fn ksw_extz2(
                 }
 
                 match state {
-                    0 => { push_cigar(&mut cigar, 0, 1); i -= 1; j -= 1; }  // M
-                    1 => { push_cigar(&mut cigar, 2, 1); i -= 1; }          // D
-                    _ => { push_cigar(&mut cigar, 1, 1); j -= 1; }          // I
+                    0 => { push_cigar_fn(&mut cigar, 0, 1); i -= 1; j -= 1; }  // M
+                    1 => { push_cigar_fn(&mut cigar, 2, 1); i -= 1; }          // D
+                    _ => { push_cigar_fn(&mut cigar, 1, 1); j -= 1; }          // I
                 }
             }
             if i >= 0 {
-                push_cigar(&mut cigar, 2, i + 1); // leading deletion
+                push_cigar_fn(&mut cigar, 2, i + 1); // leading deletion
             }
             if j >= 0 {
-                push_cigar(&mut cigar, 1, j + 1); // leading insertion
+                push_cigar_fn(&mut cigar, 1, j + 1); // leading insertion
             }
             // Reverse CIGAR unless REV_CIGAR flag
             if !flag.contains(KswFlags::REV_CIGAR) {
@@ -356,7 +356,7 @@ pub fn ksw_extd2(
         let iu = i as usize;
         let qi = query[iu] as usize;
         let j_st = if i > w { (i - w) as usize } else { 0 };
-        let j_en = ((i + w + 1) as usize).min(tlen as usize);
+        let j_en = ((i as i64 + w as i64 + 1) as usize).min(tlen as usize);
         let mut f1 = KSW_NEG_INF;
         let mut f2 = KSW_NEG_INF;
 
@@ -472,13 +472,13 @@ pub fn ksw_extd2(
                 }
                 if state == 0 { state = tmp & 7; }
                 match state {
-                    0 => { push_cigar(&mut cigar, 0, 1); i -= 1; j -= 1; }
-                    1 | 3 => { push_cigar(&mut cigar, 2, 1); i -= 1; }
-                    _ => { push_cigar(&mut cigar, 1, 1); j -= 1; }
+                    0 => { push_cigar_fn(&mut cigar, 0, 1); i -= 1; j -= 1; }
+                    1 | 3 => { push_cigar_fn(&mut cigar, 2, 1); i -= 1; }
+                    _ => { push_cigar_fn(&mut cigar, 1, 1); j -= 1; }
                 }
             }
-            if i >= 0 { push_cigar(&mut cigar, 2, i + 1); }
-            if j >= 0 { push_cigar(&mut cigar, 1, j + 1); }
+            if i >= 0 { push_cigar_fn(&mut cigar, 2, i + 1); }
+            if j >= 0 { push_cigar_fn(&mut cigar, 1, j + 1); }
             if !flag.contains(KswFlags::REV_CIGAR) { cigar.reverse(); }
             ez.cigar = cigar;
         }

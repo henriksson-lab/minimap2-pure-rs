@@ -90,6 +90,34 @@ struct Cli {
     #[arg(short = 'Y')]
     softclip: bool,
 
+    /// Use =/X instead of M in CIGAR
+    #[arg(long = "eqx")]
+    eqx: bool,
+
+    /// Only map to forward strand
+    #[arg(long = "for-only")]
+    for_only: bool,
+
+    /// Only map to reverse strand
+    #[arg(long = "rev-only")]
+    rev_only: bool,
+
+    /// Output all chains (no primary/secondary selection)
+    #[arg(short = 'P')]
+    all_chains: bool,
+
+    /// Copy FASTA/FASTQ comments to output
+    #[arg(long = "copy-comment")]
+    copy_comment: bool,
+
+    /// HPC mode (homopolymer compression)
+    #[arg(short = 'H')]
+    hpc: bool,
+
+    /// SDUST threshold (0 to disable)
+    #[arg(long = "sdust-thres", default_value_t = 0)]
+    sdust_thres: i32,
+
     /// Read group line
     #[arg(short = 'R', value_name = "STR")]
     rg: Option<String>,
@@ -155,8 +183,17 @@ fn main() {
     if cli.paf_no_hit {
         mo.flag |= MapFlags::PAF_NO_HIT;
     }
+    if cli.for_only { mo.flag |= MapFlags::FOR_ONLY; }
+    if cli.rev_only { mo.flag |= MapFlags::REV_ONLY; }
+    if cli.all_chains { mo.flag |= MapFlags::ALL_CHAINS; }
+    if cli.copy_comment { mo.flag |= MapFlags::COPY_COMMENT; }
+    if cli.hpc { io.flag |= minimap2::flags::IdxFlags::HPC; }
+    if cli.sdust_thres > 0 { mo.sdust_thres = cli.sdust_thres; }
     if cli.softclip {
         mo.flag |= MapFlags::SOFTCLIP;
+    }
+    if cli.eqx {
+        mo.flag |= MapFlags::EQX;
     }
     if let Some(ref sec) = cli.secondary {
         if sec == "no" {
@@ -229,16 +266,30 @@ fn main() {
         eprintln!("[M::main] mid_occ = {}", mo.mid_occ);
     }
 
-    for qpath in &cli.query {
-        eprintln!("[M::main] mapping {}", qpath);
+    if cli.query.len() == 2 {
+        // Paired-end mode: two query files
+        eprintln!("[M::main] mapping PE: {} + {}", cli.query[0], cli.query[1]);
         let result = if mo.flag.contains(MapFlags::OUT_SAM) {
-            pipeline::map_file_sam(&mi, &mo, qpath, cli.threads, cli.rg.as_deref(), &args)
+            pipeline::map_file_pe_sam(&mi, &mo, &cli.query[0], &cli.query[1], cli.threads, cli.rg.as_deref(), &args)
         } else {
-            pipeline::map_file_paf(&mi, &mo, qpath, cli.threads)
+            pipeline::map_file_pe_paf(&mi, &mo, &cli.query[0], &cli.query[1], cli.threads)
         };
         if let Err(e) = result {
-            eprintln!("[ERROR] mapping failed: {}", e);
+            eprintln!("[ERROR] PE mapping failed: {}", e);
             std::process::exit(1);
+        }
+    } else {
+        for qpath in &cli.query {
+            eprintln!("[M::main] mapping {}", qpath);
+            let result = if mo.flag.contains(MapFlags::OUT_SAM) {
+                pipeline::map_file_sam(&mi, &mo, qpath, cli.threads, cli.rg.as_deref(), &args)
+            } else {
+                pipeline::map_file_paf(&mi, &mo, qpath, cli.threads)
+            };
+            if let Err(e) = result {
+                eprintln!("[ERROR] mapping failed: {}", e);
+                std::process::exit(1);
+            }
         }
     }
 }

@@ -18,6 +18,5 @@ pub mod format;
 pub mod map;
 pub mod pipeline;
 
-// Future: uncomment as implemented
-// pub mod pe;
-// pub mod jump;
+pub mod pe;
+pub mod jump;

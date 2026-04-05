@@ -301,42 +301,62 @@ pub fn collect_matches(
 
 /// Expand seeds into anchor array (Mm128 format) for chaining.
 ///
-/// Each seed with `n` positions generates `n` anchors:
-/// - `a[i].x = rev << 63 | rid << 32 | ref_pos`
-/// - `a[i].y = flags | seg_id << 48 | q_span << 32 | q_pos`
+/// Matches collect_seed_hits() from map.c.
 ///
-/// This is the core of what happens in mm_map_frag() after collect_matches.
-pub fn expand_seeds_to_anchors(mi: &MmIdx, seeds: &[Seed]) -> Vec<Mm128> {
+/// Output encoding:
+/// - `a[i].x = rev << 63 | rid << 32 | ref_pos` (ref_pos has strand bit stripped)
+/// - `a[i].y = flags | seg_id << 48 | q_span << 32 | q_pos` (q_pos has strand bit stripped; reverse strand gets coordinate flip)
+///
+/// `qlen` is needed to flip reverse-strand query coordinates.
+pub fn expand_seeds_to_anchors(mi: &MmIdx, seeds: &[Seed], qlen: i32, flag: crate::flags::MapFlags) -> Vec<Mm128> {
     let mut anchors = Vec::new();
     for seed in seeds {
         if seed.flt {
             continue;
         }
-        let q_pos = seed.q_pos;
+        let q_pos_raw = seed.q_pos; // pos<<1 | strand from minimizer
+        let q_strand = q_pos_raw & 1;
+        let q_pos = q_pos_raw >> 1; // actual query position
         let q_span = seed.q_span;
         let seg_id = seed.seg_id;
 
-        match &seed.positions {
-            SeedPositions::Single(pos) => {
-                let mut y = q_pos as u64 | (q_span as u64) << 32;
-                y |= (seg_id as u64) << 48;
-                if seed.is_tandem {
-                    y |= crate::flags::SEED_TANDEM;
-                }
-                anchors.push(Mm128::new(*pos, y));
-            }
+        let positions: Vec<u64> = match &seed.positions {
+            SeedPositions::Single(pos) => vec![*pos],
             SeedPositions::Multi { offset, count, bucket_idx } => {
                 let bucket = &mi.buckets[*bucket_idx];
-                for k in 0..*count {
-                    let pos = bucket.p[*offset + k];
-                    let mut y = q_pos as u64 | (q_span as u64) << 32;
-                    y |= (seg_id as u64) << 48;
-                    if seed.is_tandem {
-                        y |= crate::flags::SEED_TANDEM;
-                    }
-                    anchors.push(Mm128::new(pos, y));
-                }
+                (0..*count).map(|k| bucket.p[*offset + k]).collect()
             }
+        };
+
+        for &r in &positions {
+            let r_strand = (r as u32) & 1;
+            let is_forward = r_strand == q_strand as u32;
+
+            // Strand filtering
+            if is_forward && flag.contains(crate::flags::MapFlags::REV_ONLY) { continue; }
+            if !is_forward && flag.contains(crate::flags::MapFlags::FOR_ONLY) { continue; }
+
+            let rpos = (r as u32) >> 1;       // strip strand bit from ref position
+            let rid_bits = r & 0xffffffff00000000u64;
+
+            let (x, qp);
+            if is_forward {
+                // Forward strand
+                x = rid_bits | rpos as u64;
+                qp = q_pos;
+            } else {
+                // Reverse strand
+                x = (1u64 << 63) | rid_bits | rpos as u64;
+                // Flip query coordinate for reverse strand
+                qp = (qlen as u32).wrapping_sub(q_pos + 1 - q_span).wrapping_sub(1);
+            }
+
+            let mut y = (q_span as u64) << 32 | qp as u64;
+            y |= (seg_id as u64) << crate::flags::SEED_SEG_SHIFT;
+            if seed.is_tandem {
+                y |= crate::flags::SEED_TANDEM;
+            }
+            anchors.push(Mm128::new(x, y));
         }
     }
     anchors
@@ -406,7 +426,7 @@ mod tests {
             5, 10, 0, false, &mut mv,
         );
         let result = collect_matches(&mi, &mv, 54, 1000, 5000, 500);
-        let anchors = expand_seeds_to_anchors(&mi, &result.seeds);
+        let anchors = expand_seeds_to_anchors(&mi, &result.seeds, 54, crate::flags::MapFlags::empty());
         assert_eq!(anchors.len() as i64, result.n_a);
     }
 

@@ -1,4 +1,6 @@
+use crate::align;
 use crate::chain;
+use crate::esterr;
 use crate::flags::{IdxFlags, MapFlags};
 use crate::format::paf;
 use crate::hit;
@@ -58,7 +60,7 @@ pub fn map_query(
     let rep_len = seed_result.rep_len;
 
     // Step 4: Expand seeds to anchors and sort
-    let mut anchors = seed::expand_seeds_to_anchors(mi, &seed_result.seeds);
+    let mut anchors = seed::expand_seeds_to_anchors(mi, &seed_result.seeds, qlen, opt.flag);
     if anchors.is_empty() {
         return MapResult { regs: Vec::new(), rep_len };
     }
@@ -108,13 +110,18 @@ pub fn map_query(
     // Step 6: Generate alignment regions
     let mut regs = hit::gen_regs(hash, qlen, &chains, &chain_anchors, false);
 
+    // Step 6b: Estimate divergence
+    if !seed_result.mini_pos.is_empty() {
+        esterr::est_err(mi, qlen, &mut regs, &chain_anchors, &seed_result.mini_pos);
+    }
+
     // Step 7: Mark ALT
     if mi.n_alt > 0 {
         let is_alt: Vec<bool> = mi.seqs.iter().map(|s| s.is_alt).collect();
         hit::mark_alt(mi.n_alt, &is_alt, &mut regs);
     }
 
-    // Step 8: Set parent/secondary, select sub
+    // Step 7b: Chain post-processing (set parent/secondary before alignment)
     if !opt.flag.contains(MapFlags::ALL_CHAINS) {
         hit::set_parent(
             opt.mask_level, opt.mask_len,
@@ -123,6 +130,22 @@ pub fn map_query(
             opt.alt_drop,
         );
         hit::select_sub(opt.pri_ratio, mi.k as i32 * 2, opt.best_n, &mut regs);
+    }
+
+    // Step 8: DP alignment for CIGAR (if requested)
+    if opt.flag.contains(MapFlags::CIGAR) {
+        align::align_skeleton(opt, mi, qlen, qseq, &mut regs, &chain_anchors);
+        // Re-do parent/secondary after alignment refinement
+        if !opt.flag.contains(MapFlags::ALL_CHAINS) {
+            hit::set_parent(
+                opt.mask_level, opt.mask_len,
+                &mut regs, opt.a * 2 + opt.b,
+                opt.flag.contains(MapFlags::HARD_MLEVEL),
+                opt.alt_drop,
+            );
+            hit::select_sub(opt.pri_ratio, mi.k as i32 * 2, opt.best_n, &mut regs);
+            hit::set_sam_pri(&mut regs);
+        }
     }
 
     // Step 9: Filter
@@ -143,20 +166,48 @@ pub fn format_paf(
     mi: &MmIdx,
     opt: &MapOpt,
     qname: &str,
-    qlen: i32,
+    qseq: &[u8],
     result: &MapResult,
 ) -> Vec<String> {
+    let qlen = qseq.len() as i32;
     let mut lines = Vec::new();
     if result.regs.is_empty() {
         if opt.flag.contains(MapFlags::PAF_NO_HIT) {
             lines.push(paf::write_paf(mi, qname, qlen, None, opt.flag, result.rep_len, 0, 0));
         }
     } else {
+        // Encode query for cs/MD tag generation
+        let qseq_enc: Vec<u8> = qseq.iter().map(|&b| crate::seq::SEQ_NT4_TABLE[b as usize]).collect();
+        let qseq_rc: Vec<u8> = qseq_enc.iter().rev().map(|&c| if c < 4 { 3 - c } else { 4 }).collect();
+
         for (i, r) in result.regs.iter().enumerate() {
             if i > 0 && opt.flag.contains(MapFlags::NO_PRINT_2ND) {
                 break;
             }
-            lines.push(paf::write_paf(mi, qname, qlen, Some(r), opt.flag, result.rep_len, 0, 0));
+            let mut line = paf::write_paf(mi, qname, qlen, Some(r), opt.flag, result.rep_len, 0, 0);
+
+            // Append cs/MD tags if requested and CIGAR is available
+            if r.extra.is_some() {
+                let aligned_qseq = if r.rev { &qseq_rc } else { &qseq_enc };
+                let qs = if r.rev { qlen - r.qe } else { r.qs };
+                let qe = if r.rev { qlen - r.qs } else { r.qe };
+                if qs >= 0 && qe > qs && (qe as usize) <= aligned_qseq.len() {
+                    let qsub = &aligned_qseq[qs as usize..qe as usize];
+                    if opt.flag.contains(MapFlags::OUT_CS) {
+                        if let Some(cs_str) = crate::format::cs::gen_cs(mi, r, qsub, !opt.flag.contains(MapFlags::OUT_CS_LONG)) {
+                            use std::fmt::Write;
+                            write!(line, "\tcs:Z:{}", cs_str).unwrap();
+                        }
+                    }
+                    if opt.flag.contains(MapFlags::OUT_MD) {
+                        if let Some(md_str) = crate::format::cs::gen_md(mi, r, qsub) {
+                            use std::fmt::Write;
+                            write!(line, "\tMD:Z:{}", md_str).unwrap();
+                        }
+                    }
+                }
+            }
+            lines.push(line);
         }
     }
     lines
@@ -233,7 +284,7 @@ mod tests {
         let (mi, opt) = make_test_data();
         let query = b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT";
         let result = map_query(&mi, &opt, "query1", query);
-        let lines = format_paf(&mi, &opt, "query1", query.len() as i32, &result);
+        let lines = format_paf(&mi, &opt, "query1", query, &result);
         assert!(!lines.is_empty());
         // Check PAF format: should have at least 12 tab-separated fields
         let fields: Vec<&str> = lines[0].split('\t').collect();

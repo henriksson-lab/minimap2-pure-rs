@@ -67,10 +67,12 @@ impl MmIdx {
         }
         let en = en.min(self.seqs[rid as usize].len);
         let offset = self.seqs[rid as usize].offset;
+        let n = (en - st) as usize;
+        if n > buf.len() { return -1; }
         for i in st..en {
             buf[(i - st) as usize] = packed::seq4_get(&self.packed_seq, (offset + i as u64) as usize);
         }
-        (en - st) as i32
+        n as i32
     }
 
     /// Get a reverse-complement subsequence. Matches mm_idx_getseq_rev().
@@ -80,13 +82,15 @@ impl MmIdx {
         }
         let s = &self.seqs[rid as usize];
         let en = en.min(s.len);
+        let n = (en - st) as usize;
+        if n > buf.len() { return -1; }
         let st1 = s.offset + (s.len - en) as u64;
         let en1 = s.offset + (s.len - st) as u64;
         for i in st1..en1 {
             let c = packed::seq4_get(&self.packed_seq, i as usize);
             buf[(en1 - i - 1) as usize] = if c < 4 { 3 - c } else { c };
         }
-        (en - st) as i32
+        n as i32
     }
 
     /// Get a subsequence, forward or reverse complement. Matches mm_idx_getseq2().
