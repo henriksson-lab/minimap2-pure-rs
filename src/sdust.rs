@@ -65,7 +65,7 @@ fn shift_window(
     cw: &mut [i32; SD_WTOT],
     cv: &mut [i32; SD_WTOT],
 ) {
-    if w.len() as i32 >= window - SD_WLEN as i32 + 1 {
+    if w.len() as i32 > window - SD_WLEN as i32 {
         let s = w.pop_front().unwrap();
         cw[s as usize] -= 1;
         *rw -= cw[s as usize];

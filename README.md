@@ -132,11 +132,51 @@ Tags include: `tp` (type), `cm` (minimizer count), `s1`/`s2` (chain scores),
 Standard SAM format compatible with samtools and downstream tools.
 Includes CIGAR, clipping (hard by default, soft with `-Y`), and alignment tags.
 
+## Library API
+
+Use minimap2-rs as a Rust library:
+
+```rust
+use minimap2::aligner::Aligner;
+
+// Build aligner with preset
+let aligner = Aligner::builder()
+    .preset("map-ont")
+    .index("ref.fa")
+    .with_cigar()
+    .build()
+    .unwrap();
+
+// Map a sequence
+let hits = aligner.map(b"ACGTACGT...");
+for hit in &hits {
+    let name = aligner.seq_name(hit.rid as usize);
+    println!("{name}:{}-{} strand={} mapq={}",
+        hit.rs, hit.re,
+        if hit.rev { '-' } else { '+' },
+        hit.mapq);
+}
+```
+
+Or use the lower-level API:
+
+```rust
+use minimap2::prelude::*;
+
+let (io, mut mo) = preset("map-hifi").unwrap();
+let mi = MmIdx::build_from_file("ref.fa", io.w as i32, io.k as i32,
+    io.bucket_bits, io.flag, io.mini_batch_size, io.batch_size).unwrap().unwrap();
+mapopt_update(&mut mo, &mi);
+
+let result = map_query(&mi, &mo, "read1", b"ACGT...");
+```
+
 ## Architecture
 
 ```
 src/
-  lib.rs              Public API
+  lib.rs              Public API + prelude
+  aligner.rs          High-level Aligner builder API
   main.rs             CLI (clap)
   types.rs            Core data types (Mm128, AlignReg, Cigar, ...)
   flags.rs            Bitflags (MapFlags, IdxFlags, KswFlags)

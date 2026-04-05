@@ -330,7 +330,7 @@ pub fn expand_seeds_to_anchors(mi: &MmIdx, seeds: &[Seed], qlen: i32, flag: crat
 
         for &r in &positions {
             let r_strand = (r as u32) & 1;
-            let is_forward = r_strand == q_strand as u32;
+            let is_forward = r_strand == q_strand;
 
             // Strand filtering
             if is_forward && flag.contains(crate::flags::MapFlags::REV_ONLY) { continue; }

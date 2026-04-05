@@ -298,7 +298,7 @@ pub fn set_opt(preset: Option<&str>, io: &mut IdxOpt, mo: &mut MapOpt) -> Result
                 | MapFlags::NO_PRINT_2ND
                 | MapFlags::TWO_IO_THREADS
                 | MapFlags::HEAP_SORT;
-            mo.pe_ori = 0 << 1 | 1; // FR
+            mo.pe_ori = 1; // FR orientation
             mo.a = 2;
             mo.b = 8;
             mo.q = 12;
@@ -361,7 +361,7 @@ pub fn set_opt(preset: Option<&str>, io: &mut IdxOpt, mo: &mut MapOpt) -> Result
                 mo.min_chain_score = 25;
                 mo.min_dp_max = 40;
                 mo.min_ksw_len = 20;
-                mo.pe_ori = 0 << 1 | 1; // FR
+                mo.pe_ori = 1; // FR orientation
                 mo.best_n = 10;
                 mo.mini_batch_size = 100_000_000;
             }
@@ -369,6 +369,27 @@ pub fn set_opt(preset: Option<&str>, io: &mut IdxOpt, mo: &mut MapOpt) -> Result
         Some(unknown) => return Err(unknown.to_string()),
     }
     Ok(())
+}
+
+/// Update mapping options based on the index. Mirrors mm_mapopt_update().
+///
+/// Computes `mid_occ` from the index if not set, and ensures `bw_long >= bw`.
+pub fn mapopt_update(opt: &mut MapOpt, mi: &crate::index::MmIdx) {
+    if opt.flag.contains(MapFlags::SPLICE_FOR) || opt.flag.contains(MapFlags::SPLICE_REV) {
+        opt.flag |= MapFlags::SPLICE;
+    }
+    if opt.mid_occ <= 0 {
+        opt.mid_occ = mi.cal_max_occ(opt.mid_occ_frac);
+        if opt.mid_occ < opt.min_mid_occ {
+            opt.mid_occ = opt.min_mid_occ;
+        }
+        if opt.max_mid_occ > opt.min_mid_occ && opt.mid_occ > opt.max_mid_occ {
+            opt.mid_occ = opt.max_mid_occ;
+        }
+    }
+    if opt.bw_long < opt.bw {
+        opt.bw_long = opt.bw;
+    }
 }
 
 /// Compute max splice score bonus. Mirrors mm_max_spsc_bonus().

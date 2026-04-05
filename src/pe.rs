@@ -81,7 +81,7 @@ pub fn pair(
                 if let (Some(pi), Some(pj)) = (&ri.extra, &qj.extra) {
                     if pi.dp_max + pj.dp_max >= dp_thres {
                         let score = ((pi.dp_max as i64 + pj.dp_max as i64) << 32)
-                            | (ri.hash as i64 + qj.hash as i64) as i64;
+                            | (ri.hash as i64 + qj.hash as i64);
                         if score > max_score {
                             max_score = score;
                             max_idx[ej.seg] = j;

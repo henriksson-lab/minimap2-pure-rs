@@ -22,6 +22,7 @@ pub struct MmIdx {
     pub n_alt: i32,
     pub index_part: i32,
     name_map: Option<HashMap<String, u32>>,
+    pub junc_db: Option<crate::junc::JuncDb>,
 }
 
 impl MmIdx {
@@ -45,6 +46,7 @@ impl MmIdx {
             n_alt: 0,
             index_part: 0,
             name_map: None,
+            junc_db: None,
         }
     }
 
@@ -249,7 +251,7 @@ impl MmIdx {
 
                 if store_seq {
                     // Ensure packed_seq has enough room
-                    let needed = ((sum_len + rec.l_seq as u64 + 7) / 8) as usize;
+                    let needed = ((sum_len + rec.l_seq as u64).div_ceil(8)) as usize;
                     if mi.packed_seq.len() < needed {
                         mi.packed_seq.resize(needed, 0);
                     }
@@ -306,7 +308,7 @@ impl MmIdx {
 
         let sum_len: u64 = seqs.iter().map(|s| s.len() as u64).sum();
         let mut mi = MmIdx::new(w, k, bb, flag);
-        mi.packed_seq = vec![0u32; ((sum_len + 7) / 8) as usize];
+        mi.packed_seq = vec![0u32; (sum_len.div_ceil(8)) as usize];
 
         let mut offset: u64 = 0;
         for (i, &seq) in seqs.iter().enumerate() {

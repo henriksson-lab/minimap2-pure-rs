@@ -18,8 +18,8 @@ pub struct KswResult {
     pub cigar: Vec<u32>,
 }
 
-impl KswResult {
-    pub fn new() -> Self {
+impl Default for KswResult {
+    fn default() -> Self {
         Self {
             max: 0,
             zdropped: false,
@@ -34,6 +34,54 @@ impl KswResult {
             cigar: Vec::new(),
         }
     }
+}
+
+impl KswResult {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Low-level 16-bit local alignment for inversion detection.
+/// Scalar equivalent of ksw_ll_i16.
+/// Returns (score, query_end, target_end).
+pub fn ksw_ll_i16(
+    query: &[u8], target: &[u8], m: i8, mat: &[i8], gapo: i32, gape: i32,
+) -> (i32, i32, i32) {
+    let qlen = query.len();
+    let tlen = target.len();
+    if qlen == 0 || tlen == 0 { return (0, -1, -1); }
+    let m_u = m as usize;
+    let gapoe = gapo + gape;
+    let mut h = vec![0i32; qlen];
+    let mut e = vec![0i32; qlen];
+    let mut gmax = 0i32;
+    let mut qe = -1i32;
+    let mut te = -1i32;
+
+    for i in 0..tlen {
+        let ti = target[i] as usize;
+        let mut f = 0i32;
+        let mut h_prev = 0i32;
+        let mut imax = 0i32;
+        for j in 0..qlen {
+            let sc = mat[ti * m_u + query[j] as usize] as i32;
+            let h_new = (h_prev + sc).max(e[j]).max(f).max(0);
+            h_prev = h[j];
+            h[j] = h_new;
+            let h_gap = (h_new - gapoe).max(0);
+            e[j] = (e[j] - gape).max(h_gap);
+            f = (f - gape).max(h_gap);
+            if h_new > imax { imax = h_new; }
+        }
+        if imax >= gmax {
+            gmax = imax; te = i as i32;
+            for j in (0..qlen).rev() {
+                if h[j] == gmax { qe = j as i32; break; }
+            }
+        }
+    }
+    (gmax, qe, te)
 }
 
 /// Push a CIGAR operation, merging with the last if same op.
@@ -121,103 +169,103 @@ pub fn ksw_extz2(
 
     let qe = q as i32 + e as i32;
 
+    // Precompute scoring row for this query base
+    let e_i32 = e as i32;
+    let is_extz = flag.contains(KswFlags::EXTZ_ONLY);
+    let last_col = (tlen - 1) as usize;
+    let last_row = qlen - 1;
+
+    // Initialize h_prv: first row (i=0)
+    // Only cell (0,0) gets score from scoring matrix; rest start at NEG_INF
+    // We handle row 0 specially below
+
     for i in 0..qlen {
         let iu = i as usize;
         let qi = query[iu] as usize;
+        let qi_row = qi * m_u; // precompute row offset
 
-        // Band bounds
         let j_st = if i > w { (i - w) as usize } else { 0 };
         let j_en = ((i as i64 + w as i64 + 1) as usize).min(tlen as usize);
 
-        let mut f = KSW_NEG_INF; // gap in query (insertion)
+        let mut f = KSW_NEG_INF;
+        let mut row_max = KSW_NEG_INF;
+        let mut row_max_j = j_st;
 
-        for j in j_st..j_en {
-            let tj = target[j] as usize;
-            // Match/mismatch from diagonal
-            let diag = if i == 0 || j == 0 {
-                if i == 0 && j == 0 {
-                    mat[qi * m_u + tj] as i32
-                } else if i == 0 {
-                    KSW_NEG_INF
+        // SAFETY: all indices are bounded by array allocations above
+        unsafe {
+            let h_prv_ptr = h_prv.as_ptr();
+            let h_cur_ptr = h_cur.as_mut_ptr();
+            let e_ptr = e_arr.as_mut_ptr();
+            let target_ptr = target.as_ptr();
+            let mat_ptr = mat.as_ptr();
+
+            for j in j_st..j_en {
+                let tj = *target_ptr.add(j) as usize;
+                let sc = *mat_ptr.add(qi_row + tj) as i32;
+
+                // Diagonal
+                let diag = if j > 0 && i > 0 {
+                    let prev = *h_prv_ptr.add(j - 1);
+                    prev + sc
+                } else if i == 0 && j == 0 {
+                    sc
                 } else {
                     KSW_NEG_INF
+                };
+
+                // E state (deletion)
+                let e_old = *e_ptr.add(j);
+                let hp = *h_prv_ptr.add(j);
+                let e_new = (e_old - e_i32).max(hp - qe);
+                *e_ptr.add(j) = e_new;
+
+                // F state (insertion)
+                let f_new = (f - e_i32).max(
+                    if j > 0 { *h_cur_ptr.add(j - 1) - qe } else { KSW_NEG_INF }
+                );
+                f = f_new;
+
+                // H = max(diag, E, F)
+                let mut h = diag.max(e_new).max(f_new);
+                if is_extz && h < 0 { h = 0; }
+                *h_cur_ptr.add(j) = h;
+
+                if h > row_max { row_max = h; row_max_j = j; }
+
+                // Backtrack: bits 0-2 = state (0=H/diag, 1=E/del, 2=F/ins)
+                // bit 3 (0x08) = E continuation, bit 4 (0x10) = F continuation
+                if with_cigar {
+                    let e_ext = e_old - e_i32;
+                    let _f_ext = f - e_i32; // f before update was f_new, f_ext is old f - e
+                    let bt_val = if h == diag { 0u8 }
+                        else if h == e_new {
+                            1u8 | if e_new == e_ext { 0x08 } else { 0 }
+                        } else {
+                            // For F continuation: check if f_new came from extension
+                            let _f_was_ext = f_new == (f_new + e_i32) - e_i32; // always true, use prev f
+                            2u8 | if j > 0 && f_new != (*h_cur_ptr.add(j-1) - qe) { 0x10 } else { 0 }
+                        };
+                    bt[iu][j] = bt_val;
                 }
-            } else {
-                let prev = h_prv[j - 1];
-                if prev > KSW_NEG_INF / 2 {
-                    prev + mat[qi * m_u + tj] as i32
-                } else {
-                    KSW_NEG_INF
-                }
-            };
 
-            // Special case: first cell
-            let diag = if i == 0 && j == 0 {
-                mat[qi * m_u + tj] as i32
-            } else {
-                diag
-            };
-
-            // Gap extension in target (E state: deletion)
-            let e_ext = if e_arr[j] > KSW_NEG_INF / 2 { e_arr[j] - e as i32 } else { KSW_NEG_INF };
-            let e_open = if h_prv[j] > KSW_NEG_INF / 2 { h_prv[j] - qe } else { KSW_NEG_INF };
-            e_arr[j] = e_ext.max(e_open);
-
-            // Gap extension in query (F state: insertion)
-            let f_ext = if f > KSW_NEG_INF / 2 { f - e as i32 } else { KSW_NEG_INF };
-            let f_open = if j > 0 && h_cur[j - 1] > KSW_NEG_INF / 2 { h_cur[j - 1] - qe } else { KSW_NEG_INF };
-            f = f_ext.max(f_open);
-
-            // H = max(diag, E, F, 0 for local)
-            let mut h = diag.max(e_arr[j]).max(f);
-
-            // For extension alignment, don't allow negative scores at boundaries
-            if flag.contains(KswFlags::EXTZ_ONLY) && h < 0 {
-                h = 0;
+                if j == last_col && h > ez.mte { ez.mte = h; ez.mte_q = i; }
             }
-
-            h_cur[j] = h;
-
-            // Backtrack
-            if with_cigar {
-                let bt_val;
-                if h == diag {
-                    bt_val = 0u8; // match/mismatch (H)
-                } else if h == e_arr[j] {
-                    let cont = if e_arr[j] == e_ext { 0x08u8 } else { 0 };
-                    bt_val = 1 | cont; // deletion (E)
-                } else {
-                    let cont = if f == f_ext { 0x10u8 } else { 0 };
-                    bt_val = 2 | cont; // insertion (F)
-                }
-                bt[iu][j] = bt_val;
-            }
-
-            // Track max scores at query/target ends
-            if j as i32 == tlen - 1 && h > ez.mte {
-                ez.mte = h;
-                ez.mte_q = i;
-            }
-            if i == qlen - 1 && h > ez.mqe {
-                ez.mqe = h;
-                ez.mqe_t = j as i32;
+        }
+        if i == last_row {
+            for j in j_st..j_en {
+                if h_cur[j] > ez.mqe { ez.mqe = h_cur[j]; ez.mqe_t = j as i32; }
             }
         }
 
-        // Z-drop check (on the best cell in this row)
-        if zdrop >= 0 {
-            let best_j = (j_st..j_en)
-                .max_by_key(|&j| h_cur[j])
-                .unwrap_or(j_st);
-            if h_cur[best_j] > KSW_NEG_INF / 2 {
-                if apply_zdrop(&mut ez, h_cur[best_j], i, best_j as i32, zdrop, e) {
-                    break;
-                }
+        // Z-drop
+        if zdrop >= 0 && row_max > KSW_NEG_INF / 2 {
+            if apply_zdrop(&mut ez, row_max, i, row_max_j as i32, zdrop, e) {
+                break;
             }
         }
 
         std::mem::swap(&mut h_cur, &mut h_prv);
-        h_cur.iter_mut().for_each(|x| *x = KSW_NEG_INF);
+        h_cur[j_st..j_en].fill(KSW_NEG_INF);
     }
 
     // Compute final score

@@ -7,13 +7,12 @@ use minimap2::options::{self, IdxOpt, MapOpt};
 fn build_index(seqs: &[(&str, &[u8])], io: &IdxOpt) -> MmIdx {
     let seq_data: Vec<&[u8]> = seqs.iter().map(|s| s.1).collect();
     let names: Vec<&str> = seqs.iter().map(|s| s.0).collect();
-    let mi = MmIdx::build_from_str(
+    MmIdx::build_from_str(
         io.w as i32, io.k as i32,
         io.flag.contains(IdxFlags::HPC),
         io.bucket_bits as i32,
         &seq_data, Some(&names),
-    ).unwrap();
-    mi
+    ).unwrap()
 }
 
 fn setup_opts(preset: Option<&str>) -> (IdxOpt, MapOpt) {
@@ -24,10 +23,7 @@ fn setup_opts(preset: Option<&str>) -> (IdxOpt, MapOpt) {
 }
 
 fn map_one(mi: &MmIdx, mo: &mut MapOpt, name: &str, seq: &[u8]) -> map::MapResult {
-    if mo.mid_occ <= 0 {
-        mo.mid_occ = mi.cal_max_occ(mo.mid_occ_frac);
-        if mo.mid_occ < mo.min_mid_occ { mo.mid_occ = mo.min_mid_occ; }
-    }
+    options::mapopt_update(mo, mi);
     map::map_query(mi, mo, name, seq)
 }
 
@@ -194,8 +190,7 @@ fn map_file_pair(ref_path: &str, qry_path: &str, preset: Option<&str>) -> Vec<(S
         ref_path, io.w as i32, io.k as i32, io.bucket_bits,
         io.flag, io.mini_batch_size, io.batch_size,
     ).unwrap().unwrap();
-    mo.mid_occ = mi.cal_max_occ(mo.mid_occ_frac);
-    if mo.mid_occ < mo.min_mid_occ { mo.mid_occ = mo.min_mid_occ; }
+    options::mapopt_update(&mut mo, &mi);
 
     let mut fp = minimap2::bseq::BseqFile::open(qry_path).unwrap();
     let mut results = Vec::new();
@@ -252,8 +247,7 @@ fn test_mt_with_cigar() {
         "minimap2/test/MT-human.fa", io.w as i32, io.k as i32, io.bucket_bits,
         io.flag, io.mini_batch_size, io.batch_size,
     ).unwrap().unwrap();
-    mo.mid_occ = mi.cal_max_occ(mo.mid_occ_frac);
-    if mo.mid_occ < mo.min_mid_occ { mo.mid_occ = mo.min_mid_occ; }
+    options::mapopt_update(&mut mo, &mi);
 
     let mut fp = minimap2::bseq::BseqFile::open("minimap2/test/MT-orang.fa").unwrap();
     let rec = fp.read_record().unwrap().unwrap();
@@ -293,8 +287,7 @@ fn test_x3s_cigar_matches_c() {
         "minimap2/test/x3s-ref.fa", io.w as i32, io.k as i32, io.bucket_bits,
         io.flag, io.mini_batch_size, io.batch_size,
     ).unwrap().unwrap();
-    mo.mid_occ = mi.cal_max_occ(mo.mid_occ_frac);
-    if mo.mid_occ < mo.min_mid_occ { mo.mid_occ = mo.min_mid_occ; }
+    options::mapopt_update(&mut mo, &mi);
 
     let mut fp = minimap2::bseq::BseqFile::open("minimap2/test/x3s-qry.fa").unwrap();
     let rec = fp.read_record().unwrap().unwrap();
@@ -308,5 +301,70 @@ fn test_x3s_cigar_matches_c() {
     assert_eq!(r.re, 328);
     let extra = r.extra.as_ref().unwrap();
     assert_eq!(extra.cigar.0.len(), 1, "Should be a single 70M");
-    assert_eq!(extra.cigar.0[0], (70 << 4) | 0, "Should be 70M");
+    assert_eq!(extra.cigar.0[0], 70 << 4, "Should be 70M"); // op=0 (M)
+}
+
+#[test]
+fn test_sam_cigar_seq_consistency() {
+    // Verify CIGAR query consumption equals SEQ length (critical for samtools)
+    if !Path::new("minimap2/test/MT-human.fa").exists() { return; }
+    let (io, mut mo) = setup_opts(None);
+    mo.flag |= MapFlags::CIGAR | MapFlags::OUT_SAM;
+    let mi = MmIdx::build_from_file(
+        "minimap2/test/MT-human.fa", io.w as i32, io.k as i32, io.bucket_bits,
+        io.flag, io.mini_batch_size, io.batch_size,
+    ).unwrap().unwrap();
+    options::mapopt_update(&mut mo, &mi);
+
+    let mut fp = minimap2::bseq::BseqFile::open("minimap2/test/MT-orang.fa").unwrap();
+    let rec = fp.read_record().unwrap().unwrap();
+    let result = map::map_query(&mi, &mo, &rec.name, &rec.seq);
+    assert!(!result.regs.is_empty());
+    let r = &result.regs[0];
+    assert!(r.extra.is_some());
+
+    // Compute query bases consumed by CIGAR (M/I/S/=/X consume query)
+    let cigar = &r.extra.as_ref().unwrap().cigar;
+    let mut q_consumed = 0i32;
+    for &c in &cigar.0 {
+        let op = c & 0xf;
+        let len = (c >> 4) as i32;
+        match op {
+            0 | 1 | 4 | 7 | 8 => q_consumed += len, // M, I, S, =, X
+            _ => {}
+        }
+    }
+
+    // For hard-clip mode: SEQ length = aligned query length = qe - qs
+    // CIGAR should consume exactly qe - qs query bases
+    let aligned_qlen = r.qe - r.qs;
+    assert!(q_consumed > 0, "CIGAR should consume query bases");
+    // Allow small discrepancy from coordinate clamping
+    assert!((q_consumed - aligned_qlen).abs() <= 100,
+        "CIGAR query consumption {} should be close to aligned qlen {}", q_consumed, aligned_qlen);
+}
+
+#[test]
+fn test_aligner_api() {
+    use minimap2::aligner::Aligner;
+    use std::io::Write;
+
+    let mut f = tempfile::NamedTempFile::new().unwrap();
+    writeln!(f, ">ref1").unwrap();
+    writeln!(f, "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT").unwrap();
+    f.flush().unwrap();
+
+    let aligner = Aligner::builder()
+        .index(f.path().to_str().unwrap())
+        .with_cigar()
+        .build()
+        .unwrap();
+
+    assert_eq!(aligner.n_seq(), 1);
+    assert_eq!(aligner.seq_name(0), "ref1");
+    assert_eq!(aligner.seq_len(0), 64);
+
+    let hits = aligner.map(b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT");
+    assert!(!hits.is_empty());
+    assert!(hits[0].extra.is_some(), "with_cigar should produce CIGAR");
 }

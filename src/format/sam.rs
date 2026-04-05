@@ -65,8 +65,12 @@ pub fn write_sam_record(
 
     // SAM flag
     let mut sam_flag: u16 = 0;
-    if !r.sam_pri { sam_flag |= 0x100; } // secondary
-    if r.rev { sam_flag |= 0x10; }       // reverse
+    if r.split > 0 && !r.sam_pri {
+        sam_flag |= 0x800; // supplementary
+    } else if !r.sam_pri {
+        sam_flag |= 0x100; // secondary
+    }
+    if r.rev { sam_flag |= 0x10; } // reverse
 
     // RNAME, POS
     let rname = &mi.seqs[r.rid as usize].name;
@@ -128,16 +132,30 @@ pub fn write_sam_record(
     // RNEXT, PNEXT, TLEN
     write!(s, "\t*\t0\t0\t").unwrap();
 
+    // Determine SEQ/QUAL range based on clipping mode
+    let use_softclip = flag.contains(MapFlags::SOFTCLIP);
+    let (seq_start, seq_end) = if use_softclip || r.extra.is_none() {
+        (0usize, qseq.len()) // full sequence for soft clips
+    } else {
+        // Hard clip: output only aligned portion
+        if r.rev {
+            let qs_fwd = (qlen - r.qe).max(0) as usize;
+            let qe_fwd = (qlen - r.qs).min(qlen) as usize;
+            (qs_fwd.min(qseq.len()), qe_fwd.min(qseq.len()))
+        } else {
+            (r.qs.max(0) as usize, r.qe.min(qlen) as usize)
+        }
+    };
+
     // SEQ
     if flag.contains(MapFlags::NO_QUAL) || qseq.is_empty() {
         s.push('*');
     } else if r.rev {
-        // Reverse complement
-        for i in (0..qseq.len()).rev() {
+        for i in (seq_start..seq_end).rev() {
             s.push(SEQ_COMP_TABLE[qseq[i] as usize] as char);
         }
     } else {
-        for &b in qseq { s.push(b as char); }
+        for &b in &qseq[seq_start..seq_end] { s.push(b as char); }
     }
 
     s.push('\t');
@@ -145,10 +163,14 @@ pub fn write_sam_record(
     // QUAL
     if qual.is_empty() || flag.contains(MapFlags::NO_QUAL) {
         s.push('*');
-    } else if r.rev {
-        for i in (0..qual.len()).rev() { s.push(qual[i] as char); }
     } else {
-        for &q in qual { s.push(q as char); }
+        let qual_start = seq_start.min(qual.len());
+        let qual_end = seq_end.min(qual.len());
+        if r.rev {
+            for i in (qual_start..qual_end).rev() { s.push(qual[i] as char); }
+        } else {
+            for &q in &qual[qual_start..qual_end] { s.push(q as char); }
+        }
     }
 
     // Tags
@@ -167,6 +189,27 @@ pub fn write_sam_record(
     }
     if rep_len >= 0 {
         write!(s, "\trl:i:{}", rep_len).unwrap();
+    }
+
+    // SA tag for split/supplementary alignments
+    if r.split > 0 && _regs.len() > 1 {
+        let mut sa_parts: Vec<String> = Vec::new();
+        for other in _regs.iter() {
+            if other.id == r.id { continue; } // skip self
+            if other.split == 0 { continue; } // only include split pieces
+            if other.extra.is_none() { continue; }
+            let other_rname = if (other.rid as usize) < mi.seqs.len() {
+                &mi.seqs[other.rid as usize].name
+            } else { continue; };
+            let strand = if other.rev { '-' } else { '+' };
+            let cigar_str = crate::align::cigar_to_string(&other.extra.as_ref().unwrap().cigar.0);
+            let nm = other.blen - other.mlen + other.extra.as_ref().unwrap().n_ambi as i32;
+            sa_parts.push(format!("{},{},{},{},{},{}", other_rname, other.rs + 1, strand, cigar_str, other.mapq, nm));
+        }
+        if !sa_parts.is_empty() {
+            write!(s, "\tSA:Z:{}", sa_parts.join(";")).unwrap();
+            s.push(';');
+        }
     }
 
     s

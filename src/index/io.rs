@@ -50,7 +50,7 @@ pub fn idx_dump<W: Write>(w: &mut W, mi: &MmIdx) -> io::Result<()> {
     }
     // Packed sequence
     if !mi.flag.contains(IdxFlags::NO_SEQ) {
-        let n_words = ((sum_len + 7) / 8) as usize;
+        let n_words = (sum_len.div_ceil(8)) as usize;
         for i in 0..n_words {
             let val = if i < mi.packed_seq.len() { mi.packed_seq[i] } else { 0 };
             w.write_all(&val.to_le_bytes())?;
@@ -137,7 +137,7 @@ pub fn idx_load<R: Read>(r: &mut R) -> io::Result<Option<MmIdx>> {
 
     // Packed sequence
     if !idx_flags.contains(IdxFlags::NO_SEQ) {
-        let n_words = ((sum_len + 7) / 8) as usize;
+        let n_words = (sum_len.div_ceil(8)) as usize;
         mi.packed_seq = Vec::with_capacity(n_words);
         for _ in 0..n_words {
             let mut buf = [0u8; 4];

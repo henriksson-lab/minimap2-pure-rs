@@ -73,8 +73,8 @@ impl Cigar {
         (op, len)
     }
 
-    /// Format CIGAR as a string (e.g., "10M2I5M").
-    pub fn to_string(&self) -> String {
+    /// Format CIGAR as a human-readable string (e.g., "10M2I5M").
+    pub fn format(&self) -> String {
         let mut s = String::new();
         for &c in &self.0 {
             let (op, len) = Self::decode(c);
@@ -97,8 +97,8 @@ pub struct AlignExtra {
     pub cigar: Cigar,
 }
 
-impl AlignExtra {
-    pub fn new() -> Self {
+impl Default for AlignExtra {
+    fn default() -> Self {
         Self {
             dp_score: 0,
             dp_max: 0,
@@ -258,7 +258,7 @@ mod tests {
         c.push(CigarOp::Ins, 2);
         c.push(CigarOp::Match, 5);
         assert_eq!(c.len(), 3);
-        assert_eq!(c.to_string(), "10M2I5M");
+        assert_eq!(c.format(), "10M2I5M");
 
         let (op, len) = Cigar::decode(c.0[0]);
         assert_eq!(op, CigarOp::Match);

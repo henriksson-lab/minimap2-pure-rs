@@ -117,7 +117,7 @@ pub mod packed {
     /// Pack an ASCII sequence into 4-bit packed u32 array.
     /// Returns the packed array. Each u32 stores 8 bases.
     pub fn pack_seq(seq: &[u8]) -> Vec<u32> {
-        let n_words = (seq.len() + 7) / 8;
+        let n_words = seq.len().div_ceil(8);
         let mut packed = vec![0u32; n_words];
         for (i, &b) in seq.iter().enumerate() {
             let c = super::encode_base(b);

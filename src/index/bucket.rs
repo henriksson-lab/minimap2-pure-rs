@@ -11,6 +11,7 @@ use crate::sort::{radix_sort_mm128, radix_sort_u64};
 /// - `p`: position array for multi-occurrence minimizers
 ///
 /// This matches mm_idx_bucket_s from index.c.
+#[derive(Default)]
 pub struct IdxBucket {
     /// Temporary storage during index building (cleared after post-processing).
     pub build_buf: Vec<Mm128>,
@@ -23,11 +24,7 @@ pub struct IdxBucket {
 
 impl IdxBucket {
     pub fn new() -> Self {
-        Self {
-            build_buf: Vec::new(),
-            p: Vec::new(),
-            h: None,
-        }
+        Self::default()
     }
 
     /// Add a minimizer during index construction.

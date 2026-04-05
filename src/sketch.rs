@@ -54,6 +54,7 @@ impl TinyQueue {
     }
 }
 
+#[allow(clippy::needless_range_loop)]
 /// Find symmetric (w,k)-minimizers on a DNA sequence.
 ///
 /// Faithful port of mm_sketch() from sketch.c.

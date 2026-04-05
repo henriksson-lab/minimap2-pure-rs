@@ -93,6 +93,58 @@ pub fn gen_regs(
     regs
 }
 
+/// Split a region at anchor position `n`. Matches mm_split_reg().
+/// Returns the new second region (the tail), and modifies `r` (the head) in place.
+pub fn split_reg(r: &mut AlignReg, n: i32, qlen: i32, a: &[Mm128]) -> Option<AlignReg> {
+    if n <= 0 || n >= r.cnt { return None; }
+    let mut r2 = r.clone();
+    r2.id = -1;
+    r2.sam_pri = false;
+    r2.extra = None;
+    r2.split_inv = false;
+    r2.cnt = r.cnt - n;
+    r2.score = (r.score as f32 * (r2.cnt as f32 / r.cnt as f32) + 0.499) as i32;
+    r2.as_ = r.as_ + n;
+    if r.parent == r.id { r2.parent = PARENT_TMP_PRI; }
+
+    // Set coordinates for r2 from anchors
+    if (r2.as_ as usize + r2.cnt as usize) <= a.len() {
+        let k = r2.as_ as usize;
+        let q_span = ((a[k].y >> 32) & 0xff) as i32;
+        r2.rev = (a[k].x >> 63) != 0;
+        r2.rid = ((a[k].x << 1) >> 33) as i32;
+        r2.rs = ((a[k].x as i32) + 1 - q_span).max(0);
+        r2.re = (a[k + r2.cnt as usize - 1].x as i32) + 1;
+        if !r2.rev {
+            r2.qs = ((a[k].y as i32) + 1 - q_span).max(0);
+            r2.qe = (a[k + r2.cnt as usize - 1].y as i32) + 1;
+        } else {
+            r2.qs = qlen - ((a[k + r2.cnt as usize - 1].y as i32) + 1);
+            r2.qe = qlen - ((a[k].y as i32) + 1 - q_span);
+        }
+    }
+
+    // Update r (head)
+    r.cnt -= r2.cnt;
+    r.score -= r2.score;
+    if r.cnt > 0 && (r.as_ as usize + r.cnt as usize) <= a.len() {
+        let k = r.as_ as usize;
+        let q_span = ((a[k].y >> 32) & 0xff) as i32;
+        r.rs = ((a[k].x as i32) + 1 - q_span).max(0);
+        r.re = (a[k + r.cnt as usize - 1].x as i32) + 1;
+        if !r.rev {
+            r.qs = ((a[k].y as i32) + 1 - q_span).max(0);
+            r.qe = (a[k + r.cnt as usize - 1].y as i32) + 1;
+        } else {
+            r.qs = qlen - ((a[k + r.cnt as usize - 1].y as i32) + 1);
+            r.qe = qlen - ((a[k].y as i32) + 1 - q_span);
+        }
+    }
+    r.split |= 1;
+    r2.split |= 2;
+    Some(r2)
+}
+
 /// Mark ALT-contig alignments. Matches mm_mark_alt().
 pub fn mark_alt(n_alt: i32, seq_is_alt: &[bool], regs: &mut [AlignReg]) {
     if n_alt == 0 {
@@ -271,6 +323,49 @@ pub fn sync_regs(regs: &mut [AlignReg]) {
         }
     }
     set_sam_pri(regs);
+}
+
+/// Recalibrate dp_max based on divergence for assembly ranking.
+/// Matches mm_update_dp_max() from align.c.
+pub fn update_dp_max(qlen: i32, regs: &mut [AlignReg], frac: f32, a: i32, b: i32) {
+    if regs.len() < 2 { return; }
+    let mut max = -1i32;
+    let mut max2 = -1i32;
+    let mut max_i: i32 = -1;
+    for (i, r) in regs.iter().enumerate() {
+        if let Some(ref p) = r.extra {
+            if p.dp_max > max { max2 = max; max = p.dp_max; max_i = i as i32; }
+            else if p.dp_max > max2 { max2 = p.dp_max; }
+        }
+    }
+    if max_i < 0 || max < 0 || max2 < 0 { return; }
+    let mi = max_i as usize;
+    if (regs[mi].qe - regs[mi].qs) < (qlen as f64 * frac as f64) as i32 { return; }
+    if (max2 as f64) < max as f64 * frac as f64 { return; }
+
+    let identity = if regs[mi].blen > 0 { regs[mi].mlen as f64 / regs[mi].blen as f64 } else { 1.0 };
+    let mut div = 1.0 - identity;
+    if div < 0.02 { div = 0.02; }
+    let mut b2 = 0.5 / div;
+    if b2 * a as f64 > b as f64 { b2 = a as f64 / b as f64; }
+
+    for r in regs.iter_mut() {
+        if let Some(ref mut p) = r.extra {
+            let mut n_gap = 0i32;
+            let mut gap_cost = 0.0f64;
+            for &c in &p.cigar.0 {
+                let op = c & 0xf;
+                let len = (c >> 4) as i32;
+                if op == 1 || op == 2 { // I or D
+                    gap_cost += b2 + crate::chain::mg_log2(1.0 + len as f32) as f64;
+                    n_gap += len;
+                }
+            }
+            let n_mis = r.blen + p.n_ambi as i32 - r.mlen - n_gap;
+            let new_max = (a as f64 * (r.mlen as f64 - b2 * n_mis as f64 - gap_cost) + 0.499) as i32;
+            p.dp_max = new_max.max(0);
+        }
+    }
 }
 
 /// Filter secondary hits. Matches mm_select_sub().

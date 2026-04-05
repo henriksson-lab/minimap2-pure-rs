@@ -35,8 +35,7 @@ pub fn map_file_paf(
         let results: Vec<_> = pool.install(|| {
             batch.par_iter().map(|rec| {
                 let result = map::map_query(mi, opt, &rec.name, &rec.seq);
-                let lines = map::format_paf(mi, opt, &rec.name, &rec.seq, &result);
-                lines
+                map::format_paf(mi, opt, &rec.name, &rec.seq, &result)
             }).collect()
         });
 
@@ -112,6 +111,104 @@ pub fn map_file_sam(
     }
     out.flush()?;
     Ok(())
+}
+
+/// Map interleaved paired-end reads from a single file.
+///
+/// Reads are consumed in pairs (R1, R2, R1, R2, ...).
+pub fn map_file_interleaved_pe_sam(
+    mi: &MmIdx,
+    opt: &MapOpt,
+    path: &str,
+    n_threads: usize,
+    rg: Option<&str>,
+    args: &[String],
+) -> io::Result<()> {
+    let mut fp = BseqFile::open(path)?;
+    let stdout = io::stdout();
+    let mut out = BufWriter::new(stdout.lock());
+
+    let hdr = sam::write_sam_hdr(mi, rg, args);
+    writeln!(out, "{}", hdr)?;
+
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(n_threads)
+        .build()
+        .unwrap();
+
+    loop {
+        // Read pairs from interleaved file
+        let mut pairs: Vec<(BseqRecord, BseqRecord)> = Vec::new();
+        let mut total_len = 0i64;
+        loop {
+            let r1 = fp.read_record()?;
+            let r2 = fp.read_record()?;
+            match (r1, r2) {
+                (Some(rec1), Some(rec2)) => {
+                    total_len += rec1.l_seq as i64 + rec2.l_seq as i64;
+                    pairs.push((rec1, rec2));
+                    if total_len >= opt.mini_batch_size { break; }
+                }
+                _ => break,
+            }
+        }
+        if pairs.is_empty() { break; }
+
+        let results: Vec<_> = pool.install(|| {
+            pairs.par_iter().map(|(rec1, rec2)| {
+                let mut res1 = map::map_query(mi, opt, &rec1.name, &rec1.seq);
+                let mut res2 = map::map_query(mi, opt, &rec2.name, &rec2.seq);
+
+                if !res1.regs.is_empty() && !res2.regs.is_empty()
+                    && res1.regs[0].extra.is_some() && res2.regs[0].extra.is_some()
+                {
+                    let qlens = [rec1.l_seq as i32, rec2.l_seq as i32];
+                    let mut n_regs = [res1.regs.len(), res2.regs.len()];
+                    let mut regs_pair = [
+                        std::mem::take(&mut res1.regs),
+                        std::mem::take(&mut res2.regs),
+                    ];
+                    pe::pair(
+                        opt.max_frag_len.max(opt.max_gap),
+                        opt.pe_bonus, opt.a * 2 + opt.b, opt.a,
+                        &qlens, &mut n_regs, &mut regs_pair,
+                    );
+                    res1.regs = regs_pair[0].clone();
+                    res2.regs = regs_pair[1].clone();
+                }
+
+                let mut lines = Vec::new();
+                // Use base name without /1 /2 suffix
+                let base_name = strip_pe_suffix(&rec1.name);
+                format_pe_sam_records(mi, opt, &BseqRecord {
+                    name: base_name.to_string(), ..rec1.clone()
+                }, &res1, &res2, true, &mut lines);
+                format_pe_sam_records(mi, opt, &BseqRecord {
+                    name: base_name.to_string(), ..rec2.clone()
+                }, &res2, &res1, false, &mut lines);
+                lines
+            }).collect()
+        });
+
+        for lines in &results {
+            for line in lines {
+                writeln!(out, "{}", line)?;
+            }
+        }
+    }
+    out.flush()?;
+    Ok(())
+}
+
+/// Strip /1 or /2 suffix from read name for PE output.
+fn strip_pe_suffix(name: &str) -> &str {
+    if name.len() >= 2 {
+        let bytes = name.as_bytes();
+        if bytes[bytes.len() - 2] == b'/' && (bytes[bytes.len() - 1] == b'1' || bytes[bytes.len() - 1] == b'2') {
+            return &name[..name.len() - 2];
+        }
+    }
+    name
 }
 
 /// Map paired-end FASTQ files against the index and write SAM output.
@@ -355,9 +452,7 @@ mod tests {
         query_file.flush().unwrap();
 
         let mut opt = MapOpt::default();
-        // Compute mid_occ from index
-        opt.mid_occ = mi.cal_max_occ(opt.mid_occ_frac);
-        if opt.mid_occ < opt.min_mid_occ { opt.mid_occ = opt.min_mid_occ; }
+        crate::options::mapopt_update(&mut opt, &mi);
         // Test the core mapping
         let result = map::map_query(&mi, &opt, "read1",
             b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT");

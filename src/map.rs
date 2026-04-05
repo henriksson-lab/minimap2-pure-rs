@@ -129,7 +129,7 @@ pub fn map_query(
             opt.flag.contains(MapFlags::HARD_MLEVEL),
             opt.alt_drop,
         );
-        hit::select_sub(opt.pri_ratio, mi.k as i32 * 2, opt.best_n, &mut regs);
+        hit::select_sub(opt.pri_ratio, mi.k * 2, opt.best_n, &mut regs);
     }
 
     // Step 8: DP alignment for CIGAR (if requested)
@@ -143,7 +143,7 @@ pub fn map_query(
                 opt.flag.contains(MapFlags::HARD_MLEVEL),
                 opt.alt_drop,
             );
-            hit::select_sub(opt.pri_ratio, mi.k as i32 * 2, opt.best_n, &mut regs);
+            hit::select_sub(opt.pri_ratio, mi.k * 2, opt.best_n, &mut regs);
             hit::set_sam_pri(&mut regs);
         }
     }
@@ -246,11 +246,7 @@ mod tests {
         let mut io = crate::options::IdxOpt::default();
         let mut mo = MapOpt::default();
         crate::options::set_opt(None, &mut io, &mut mo).unwrap();
-        // Compute mid_occ from index (equivalent to mm_mapopt_update)
-        if mo.mid_occ <= 0 {
-            mo.mid_occ = mi.cal_max_occ(mo.mid_occ_frac);
-            if mo.mid_occ < mo.min_mid_occ { mo.mid_occ = mo.min_mid_occ; }
-        }
+        crate::options::mapopt_update(&mut mo, &mi);
         (mi, mo)
     }
 
@@ -305,10 +301,7 @@ mod tests {
             &[ref_seq as &[u8]],
             Some(&["chr1"]),
         ).unwrap();
-        if mo.mid_occ <= 0 {
-            mo.mid_occ = mi.cal_max_occ(mo.mid_occ_frac);
-            if mo.mid_occ < mo.min_mid_occ { mo.mid_occ = mo.min_mid_occ; }
-        }
+        crate::options::mapopt_update(&mut mo, &mi);
 
         let query = b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT";
         let result = map_query(&mi, &mo, "read1", query);

@@ -46,6 +46,10 @@ struct Cli {
     #[arg(long = "MD")]
     md: bool,
 
+    /// Output to FILE instead of stdout
+    #[arg(short = 'o', value_name = "FILE")]
+    output: Option<String>,
+
     /// Matching score
     #[arg(short = 'A', default_value_t = 0)]
     match_score: i32,
@@ -74,9 +78,33 @@ struct Cli {
     #[arg(long = "secondary", value_name = "yes|no")]
     secondary: Option<String>,
 
-    /// Min CIGAR score for primary
+    /// Min peak DP alignment score
     #[arg(short = 's', default_value_t = 0)]
     min_dp_score: i32,
+
+    /// Z-drop score [,inversion Z-drop]
+    #[arg(short = 'z', value_name = "INT[,INT]")]
+    zdrop: Option<String>,
+
+    /// Stop chain elongation if no minimizers in NUM bp
+    #[arg(short = 'g', default_value_t = 0)]
+    max_gap: i32,
+
+    /// Min number of minimizers on a chain
+    #[arg(short = 'n', default_value_t = 0)]
+    min_cnt: i32,
+
+    /// Min chaining score
+    #[arg(short = 'm', default_value_t = 0)]
+    min_chain_score: i32,
+
+    /// Min secondary-to-primary score ratio
+    #[arg(short = 'p', default_value_t = -1.0)]
+    pri_ratio: f32,
+
+    /// Skip self and dual mappings (all-vs-all mode)
+    #[arg(short = 'X')]
+    skip_self: bool,
 
     /// Suppress PAF output for unmapped
     #[arg(long = "paf-no-hit")]
@@ -114,6 +142,14 @@ struct Cli {
     #[arg(short = 'H')]
     hpc: bool,
 
+    /// Splice junction BED12 file
+    #[arg(long = "junc-bed", value_name = "FILE")]
+    junc_bed: Option<String>,
+
+    /// Split index prefix for large genomes (multi-pass mapping)
+    #[arg(long = "split-prefix", value_name = "PREFIX")]
+    split_prefix: Option<String>,
+
     /// SDUST threshold (0 to disable)
     #[arg(long = "sdust-thres", default_value_t = 0)]
     sdust_thres: i32,
@@ -125,10 +161,19 @@ struct Cli {
     /// Max intron length (for splice)
     #[arg(short = 'G', long = "max-intron-len", default_value_t = 0)]
     max_intron: i32,
+
+    /// Mini-batch size for mapping (in bases)
+    #[arg(short = 'K', value_name = "NUM")]
+    mini_batch: Option<String>,
+
+    /// Maximum number of secondary alignments to output
+    #[arg(long = "max-occ", default_value_t = 0)]
+    max_occ: i32,
 }
 
 fn main() {
     env_logger::init();
+    let t_start = std::time::Instant::now();
     let cli = Cli::parse();
     let args: Vec<String> = std::env::args().collect();
 
@@ -201,11 +246,27 @@ fn main() {
         }
     }
     if cli.max_intron > 0 {
-        options::MapOpt::default(); // just to reference
         mo.max_gap_ref = cli.max_intron;
         mo.bw = cli.max_intron;
         mo.bw_long = cli.max_intron;
     }
+    if let Some(ref s) = cli.zdrop {
+        let parts: Vec<&str> = s.split(',').collect();
+        mo.zdrop = parts[0].parse().unwrap_or(mo.zdrop);
+        if parts.len() > 1 { mo.zdrop_inv = parts[1].parse().unwrap_or(mo.zdrop_inv); }
+    }
+    if cli.max_gap > 0 { mo.max_gap = cli.max_gap; }
+    if cli.min_cnt > 0 { mo.min_cnt = cli.min_cnt; }
+    if cli.min_chain_score > 0 { mo.min_chain_score = cli.min_chain_score; }
+    if cli.pri_ratio >= 0.0 { mo.pri_ratio = cli.pri_ratio; }
+    if cli.skip_self { mo.flag |= MapFlags::NO_DIAG | MapFlags::NO_DUAL; }
+    if let Some(ref prefix) = cli.split_prefix {
+        mo.split_prefix = Some(prefix.clone());
+    }
+    if let Some(ref kb) = cli.mini_batch {
+        if let Ok(v) = parse_num(kb) { mo.mini_batch_size = v; }
+    }
+    if cli.max_occ > 0 { mo.max_occ = cli.max_occ; }
 
     // Validate options
     if let Err(e) = options::check_opt(&io, &mo) {
@@ -215,7 +276,7 @@ fn main() {
 
     // Build or load index
     let is_idx = index::io::is_idx_file(&cli.target).unwrap_or(false);
-    let mi = if is_idx {
+    let mut mi = if is_idx {
         eprintln!("[M::main] loading index from {}", cli.target);
         let mut f = std::fs::File::open(&cli.target).unwrap();
         match index::io::idx_load(&mut f) {
@@ -245,11 +306,34 @@ fn main() {
 
     mi.stat();
 
+    // Load junction annotations if provided
+    if let Some(ref junc_path) = cli.junc_bed {
+        match minimap2::junc::read_junc_bed(&mut mi, junc_path) {
+            Ok(n) => eprintln!("[M::main] loaded {} junctions from {}", n, junc_path),
+            Err(e) => eprintln!("[WARNING] failed to read junctions: {}", e),
+        }
+    }
+
     // Dump index if requested
     if let Some(ref out_path) = cli.dump_index {
         eprintln!("[M::main] writing index to {}", out_path);
         let mut f = std::fs::File::create(out_path).unwrap();
         index::io::idx_dump(&mut f, &mi).unwrap();
+    }
+
+    if cli.split_prefix.is_some() {
+        eprintln!("[WARNING] --split-prefix is not fully implemented; results may be incomplete for very large genomes");
+    }
+
+    // Redirect output to file if -o specified
+    #[cfg(unix)]
+    if let Some(ref path) = cli.output {
+        use std::os::unix::io::AsRawFd;
+        let file = std::fs::File::create(path).unwrap_or_else(|e| {
+            eprintln!("[ERROR] failed to create output file {}: {}", path, e);
+            std::process::exit(1);
+        });
+        unsafe { libc_dup2(file.as_raw_fd(), 1); }
     }
 
     // Map query files
@@ -258,13 +342,9 @@ fn main() {
         return;
     }
 
-    // Update mid_occ based on index
-    if mo.mid_occ <= 0 {
-        mo.mid_occ = mi.cal_max_occ(mo.mid_occ_frac);
-        if mo.mid_occ < mo.min_mid_occ { mo.mid_occ = mo.min_mid_occ; }
-        if mo.max_mid_occ > mo.min_mid_occ && mo.mid_occ > mo.max_mid_occ { mo.mid_occ = mo.max_mid_occ; }
-        eprintln!("[M::main] mid_occ = {}", mo.mid_occ);
-    }
+    // Update mapping options based on index
+    options::mapopt_update(&mut mo, &mi);
+    eprintln!("[M::main] mid_occ = {}", mo.mid_occ);
 
     if cli.query.len() == 2 {
         // Paired-end mode: two query files
@@ -276,6 +356,18 @@ fn main() {
         };
         if let Err(e) = result {
             eprintln!("[ERROR] PE mapping failed: {}", e);
+            std::process::exit(1);
+        }
+    } else if cli.query.len() == 1 && mo.flag.contains(MapFlags::FRAG_MODE) {
+        // Interleaved paired-end mode: single file with alternating R1/R2
+        eprintln!("[M::main] mapping interleaved PE: {}", cli.query[0]);
+        let result = if mo.flag.contains(MapFlags::OUT_SAM) {
+            pipeline::map_file_interleaved_pe_sam(&mi, &mo, &cli.query[0], cli.threads, cli.rg.as_deref(), &args)
+        } else {
+            pipeline::map_file_paf(&mi, &mo, &cli.query[0], cli.threads)
+        };
+        if let Err(e) = result {
+            eprintln!("[ERROR] mapping failed: {}", e);
             std::process::exit(1);
         }
     } else {
@@ -292,4 +384,46 @@ fn main() {
             }
         }
     }
+    let elapsed = t_start.elapsed();
+    eprintln!("[M::main] Version: {}, pairwise mapping", MM_VERSION);
+    eprintln!("[M::main] CMD: {}", args.join(" "));
+    eprintln!("[M::main] Real time: {:.3} sec; Peak RSS: {:.3} GB",
+        elapsed.as_secs_f64(), peak_rss_gb());
+}
+
+#[cfg(unix)]
+unsafe fn libc_dup2(oldfd: i32, newfd: i32) -> i32 {
+    extern "C" { fn dup2(oldfd: i32, newfd: i32) -> i32; }
+    dup2(oldfd, newfd)
+}
+
+/// Parse a number with optional K/M/G suffix.
+fn parse_num(s: &str) -> Result<i64, std::num::ParseIntError> {
+    let s = s.trim();
+    if s.is_empty() { return Ok(0); }
+    let (num_part, multiplier) = match s.as_bytes().last() {
+        Some(b'k' | b'K') => (&s[..s.len()-1], 1_000i64),
+        Some(b'm' | b'M') => (&s[..s.len()-1], 1_000_000i64),
+        Some(b'g' | b'G') => (&s[..s.len()-1], 1_000_000_000i64),
+        _ => (s, 1i64),
+    };
+    Ok(num_part.parse::<i64>()? * multiplier)
+}
+
+fn peak_rss_gb() -> f64 {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            for line in status.lines() {
+                if line.starts_with("VmHWM:") {
+                    if let Some(kb) = line.split_whitespace().nth(1) {
+                        if let Ok(kb) = kb.parse::<f64>() {
+                            return kb / 1_048_576.0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    0.0
 }
