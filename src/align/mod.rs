@@ -43,7 +43,7 @@ pub fn align_pair_dual(
     end_bonus: i32,
     flag: KswFlags,
 ) -> KswResult {
-    ksw2::ksw_extd2(query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag)
+    ksw2_simd::ksw_extd2_dispatch(query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag)
 }
 
 /// Decode a BAM-style CIGAR u32 into (op, len).

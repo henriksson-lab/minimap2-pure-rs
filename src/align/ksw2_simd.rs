@@ -3,9 +3,30 @@
 
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
+use std::alloc::{alloc_zeroed, dealloc, Layout};
 
 use crate::flags::KswFlags;
 use super::ksw2::{KswResult, KSW_NEG_INF};
+
+/// 16-byte aligned buffer for SIMD. Wraps a raw allocation.
+struct AlignedBuf { ptr: *mut u8, layout: Layout }
+impl AlignedBuf {
+    unsafe fn new(size: usize) -> Self {
+        let layout = Layout::from_size_align(size.max(16), 16).unwrap();
+        let ptr = alloc_zeroed(layout);
+        Self { ptr, layout }
+    }
+    unsafe fn new_filled(size: usize, val: u8) -> Self {
+        let b = Self::new(size);
+        std::ptr::write_bytes(b.ptr, val, size);
+        b
+    }
+    fn as_ptr(&self) -> *const u8 { self.ptr }
+    fn as_mut_ptr(&mut self) -> *mut u8 { self.ptr }
+}
+impl Drop for AlignedBuf {
+    fn drop(&mut self) { unsafe { dealloc(self.ptr, self.layout); } }
+}
 
 pub fn has_sse2() -> bool {
     #[cfg(target_arch = "x86_64")]
@@ -41,28 +62,42 @@ unsafe fn extz2_sse2(
     for i in 1..(m as usize * m as usize) { max_sc = max_sc.max(mat[i] as i32); min_sc = min_sc.min(mat[i] as i32); }
     if -min_sc > 2 * qe { return ez; }
 
-    // Allocate buffers — all tlen_*16 bytes, zero-initialized
-    let bsz = tlen_ * 16 + 16; // +16 padding
-    let mut u = vec![0u8; bsz];
-    let mut v = vec![0u8; bsz];
-    let mut x = vec![0u8; bsz];
-    let mut y = vec![0u8; bsz];
-    let mut s = vec![0u8; bsz];
+    // 16-byte aligned DP buffers (like C's kcalloc with alignment)
+    let bsz = tlen_ * 16 + 16;
+    let mut u_b = AlignedBuf::new(bsz);
+    let mut v_b = AlignedBuf::new(bsz);
+    let mut x_b = AlignedBuf::new(bsz);
+    let mut y_b = AlignedBuf::new(bsz);
+    let mut s_b = AlignedBuf::new(bsz);
+    let (u, v, x, y, s) = (
+        std::slice::from_raw_parts_mut(u_b.as_mut_ptr(), bsz),
+        std::slice::from_raw_parts_mut(v_b.as_mut_ptr(), bsz),
+        std::slice::from_raw_parts_mut(x_b.as_mut_ptr(), bsz),
+        std::slice::from_raw_parts_mut(y_b.as_mut_ptr(), bsz),
+        std::slice::from_raw_parts_mut(s_b.as_mut_ptr(), bsz),
+    );
 
     // H array for exact max tracking
     let mut h_arr: Vec<i32> = if !approx_max { vec![KSW_NEG_INF; bsz] } else { Vec::new() };
     let mut h0: i32 = 0;
     let mut last_h0_t: i32 = 0;
 
-    // Backtrack matrix
+    // Backtrack matrix — single allocation
     let n_ad = (qlen + tlen - 1) as usize;
-    let mut bt = if with_cigar { vec![0u8; n_ad * n_col_ * 16 + 16] } else { Vec::new() };
-    let mut off_a = if with_cigar { vec![0i32; n_ad] } else { Vec::new() };
-    let mut off_e = if with_cigar { vec![0i32; n_ad] } else { Vec::new() };
+    let bt_size = if with_cigar { n_ad * n_col_ * 16 + 16 } else { 0 };
+    let off_size = if with_cigar { n_ad } else { 0 };
+    let mut bt = vec![0u8; bt_size];
+    let mut off_a = vec![0i32; off_size];
+    let mut off_e = vec![0i32; off_size];
 
-    // Reversed query + target copy
-    let mut qr = vec![0u8; qlen as usize + 16];
-    for i in 0..qlen as usize { qr[i] = query[qlen as usize - 1 - i]; }
+    // Reversed query with front padding (qrr can be negative)
+    // Front-pad with tlen bytes of 0 so qrr[t] is safe for any r
+    let qr_pad = tlen as usize;
+    let mut qr_full = vec![0u8; qr_pad + qlen as usize + 16];
+    for i in 0..qlen as usize { qr_full[qr_pad + i] = query[qlen as usize - 1 - i]; }
+    let _qr = &qr_full[qr_pad..]; // points to start of actual data; can index [-tlen..]
+    let qr_base = qr_full.as_ptr().add(qr_pad); // base pointer for qrr arithmetic
+
     let mut sf = vec![0u8; tlen as usize + 16];
     sf[..tlen as usize].copy_from_slice(target);
 
@@ -83,6 +118,14 @@ unsafe fn extz2_sse2(
 
     let mut last_st: i32 = -1;
     let mut last_en: i32 = -1;
+
+    // Hoist raw pointers for the hot loop
+    let up = u.as_mut_ptr();
+    let vp = v.as_mut_ptr();
+    let xp = x.as_mut_ptr();
+    let yp = y.as_mut_ptr();
+    let sp = s.as_mut_ptr();
+    let _hp = h_arr.as_mut_ptr();
 
     // Main anti-diagonal loop
     for r in 0..qlen + tlen - 1 {
@@ -108,26 +151,25 @@ unsafe fn extz2_sse2(
             u[r as usize] = if r > 0 { q as u8 } else { 0 };
         }
 
-        // Score computation (C lines 133-152)
-        let qrr = (qlen - 1 - r).max(0) as usize;
+        // Score computation (C lines 133-152) — direct SIMD loads from padded buffers
+        let qrr = qlen - 1 - r; // can be negative; safe with front-padded qr
         if !flag.contains(KswFlags::GENERIC_SC) {
             let mut t = st0 as usize;
             while t as i32 <= en0 {
-                let mut sq_b = [0u8; 16]; let mut qt_b = [0u8; 16];
-                for k in 0..16 { if t+k < sf.len() { sq_b[k] = sf[t+k]; } if qrr+t+k < qr.len() { qt_b[k] = qr[qrr+t+k]; } }
-                let sq = _mm_loadu_si128(sq_b.as_ptr() as *const __m128i);
-                let qt = _mm_loadu_si128(qt_b.as_ptr() as *const __m128i);
+                let sq = _mm_loadu_si128(sf.as_ptr().add(t) as *const __m128i);
+                let qt = _mm_loadu_si128(qr_base.offset(qrr as isize).add(t) as *const __m128i);
                 let mask = _mm_or_si128(_mm_cmpeq_epi8(sq, m1_), _mm_cmpeq_epi8(qt, m1_));
                 let eq = _mm_cmpeq_epi8(sq, qt);
                 let tmp = _mm_or_si128(_mm_andnot_si128(eq, sc_mis_), _mm_and_si128(eq, sc_mch_));
                 let tmp = _mm_or_si128(_mm_andnot_si128(mask, tmp), _mm_and_si128(mask, sc_n_));
-                _mm_storeu_si128(s.as_mut_ptr().add(t) as *mut __m128i, tmp);
+                _mm_storeu_si128(sp.add(t) as *mut __m128i, tmp);
                 t += 16;
             }
         } else {
             for t in st0 as usize..=en0 as usize {
                 let si = if t < sf.len() { sf[t] } else { 0 } as usize;
-                let qi = if qrr+t < qr.len() { qr[qrr+t] } else { 0 } as usize;
+                let qidx = qrr + t as i32;
+                let qi = if qidx >= -(qr_pad as i32) && qidx < qlen { *qr_base.offset(qidx as isize) } else { 0 } as usize;
                 s[t] = mat[si * m as usize + qi] as u8;
             }
         }
@@ -137,36 +179,32 @@ unsafe fn extz2_sse2(
         let mut v1_ = _mm_cvtsi32_si128(v1 as i32);
         let st_ = st / 16; let en_ = en / 16;
 
-        if !with_cigar { // Score-only path (C lines 158-178)
+        if !with_cigar { // Score-only path — maximally tight inner loop
             for t in st_ as usize..=en_ as usize {
                 let p = t * 16;
-                // dp_code_block1
-                let mut z = _mm_add_epi8(_mm_loadu_si128(s.as_ptr().add(p) as *const __m128i), qe2_);
-                let xt1r = _mm_loadu_si128(x.as_ptr().add(p) as *const __m128i);
+                let mut z = _mm_add_epi8(_mm_loadu_si128(sp.add(p) as *const __m128i), qe2_);
+                let xt1r = _mm_loadu_si128(xp.add(p) as *const __m128i);
                 let tmp = _mm_srli_si128::<15>(xt1r);
                 let xt1 = _mm_or_si128(_mm_slli_si128::<1>(xt1r), x1_); x1_ = tmp;
-                let vt1r = _mm_loadu_si128(v.as_ptr().add(p) as *const __m128i);
+                let vt1r = _mm_loadu_si128(vp.add(p) as *const __m128i);
                 let tmp = _mm_srli_si128::<15>(vt1r);
                 let vt1 = _mm_or_si128(_mm_slli_si128::<1>(vt1r), v1_); v1_ = tmp;
                 let a = _mm_add_epi8(xt1, vt1);
-                let ut = _mm_loadu_si128(u.as_ptr().add(p) as *const __m128i);
-                let b = _mm_add_epi8(_mm_loadu_si128(y.as_ptr().add(p) as *const __m128i), ut);
-                // SSE2: z = max(z>0?z:0, a)
+                let ut = _mm_loadu_si128(up.add(p) as *const __m128i);
+                let b = _mm_add_epi8(_mm_loadu_si128(yp.add(p) as *const __m128i), ut);
                 z = _mm_and_si128(z, _mm_cmpgt_epi8(z, zero_));
                 z = _mm_max_epu8(z, a);
-                // dp_code_block2
                 z = _mm_max_epu8(z, b);
                 z = _mm_min_epu8(z, max_sc_);
-                _mm_storeu_si128(u.as_mut_ptr().add(p) as *mut __m128i, _mm_sub_epi8(z, vt1));
-                _mm_storeu_si128(v.as_mut_ptr().add(p) as *mut __m128i, _mm_sub_epi8(z, ut));
+                _mm_storeu_si128(up.add(p) as *mut __m128i, _mm_sub_epi8(z, vt1));
+                _mm_storeu_si128(vp.add(p) as *mut __m128i, _mm_sub_epi8(z, ut));
                 let zq = _mm_sub_epi8(z, q_);
                 let a2 = _mm_sub_epi8(a, zq);
                 let b2 = _mm_sub_epi8(b, zq);
-                // SSE2: x = max(a2,0), y = max(b2,0)
                 let tmp = _mm_cmpgt_epi8(a2, zero_);
-                _mm_storeu_si128(x.as_mut_ptr().add(p) as *mut __m128i, _mm_and_si128(a2, tmp));
+                _mm_storeu_si128(xp.add(p) as *mut __m128i, _mm_and_si128(a2, tmp));
                 let tmp = _mm_cmpgt_epi8(b2, zero_);
-                _mm_storeu_si128(y.as_mut_ptr().add(p) as *mut __m128i, _mm_and_si128(b2, tmp));
+                _mm_storeu_si128(yp.add(p) as *mut __m128i, _mm_and_si128(b2, tmp));
             }
         } else { // CIGAR left-alignment path (C lines 179-204)
             off_a[r as usize] = st;
@@ -174,17 +212,16 @@ unsafe fn extz2_sse2(
             for t in st_ as usize..=en_ as usize {
                 let p = t * 16;
                 let pr_off = r as usize * n_col_ * 16 + (t as i32 - st_) as usize * 16;
-                // dp_code_block1
-                let mut z = _mm_add_epi8(_mm_loadu_si128(s.as_ptr().add(p) as *const __m128i), qe2_);
-                let xt1r = _mm_loadu_si128(x.as_ptr().add(p) as *const __m128i);
+                let mut z = _mm_add_epi8(_mm_loadu_si128(sp.add(p) as *const __m128i), qe2_);
+                let xt1r = _mm_loadu_si128(xp.add(p) as *const __m128i);
                 let tmp = _mm_srli_si128::<15>(xt1r);
                 let xt1 = _mm_or_si128(_mm_slli_si128::<1>(xt1r), x1_); x1_ = tmp;
-                let vt1r = _mm_loadu_si128(v.as_ptr().add(p) as *const __m128i);
+                let vt1r = _mm_loadu_si128(vp.add(p) as *const __m128i);
                 let tmp = _mm_srli_si128::<15>(vt1r);
                 let vt1 = _mm_or_si128(_mm_slli_si128::<1>(vt1r), v1_); v1_ = tmp;
                 let a = _mm_add_epi8(xt1, vt1);
-                let ut = _mm_loadu_si128(u.as_ptr().add(p) as *const __m128i);
-                let b = _mm_add_epi8(_mm_loadu_si128(y.as_ptr().add(p) as *const __m128i), ut);
+                let ut = _mm_loadu_si128(up.add(p) as *const __m128i);
+                let b = _mm_add_epi8(_mm_loadu_si128(yp.add(p) as *const __m128i), ut);
                 // d vector for backtrack (left-alignment, SSE2 path)
                 let mut d = _mm_and_si128(_mm_cmpgt_epi8(a, z), flag1_);
                 z = _mm_and_si128(z, _mm_cmpgt_epi8(z, zero_));
@@ -194,17 +231,17 @@ unsafe fn extz2_sse2(
                 // dp_code_block2
                 z = _mm_max_epu8(z, b);
                 z = _mm_min_epu8(z, max_sc_);
-                _mm_storeu_si128(u.as_mut_ptr().add(p) as *mut __m128i, _mm_sub_epi8(z, vt1));
-                _mm_storeu_si128(v.as_mut_ptr().add(p) as *mut __m128i, _mm_sub_epi8(z, ut));
+                _mm_storeu_si128(up.add(p) as *mut __m128i, _mm_sub_epi8(z, vt1));
+                _mm_storeu_si128(vp.add(p) as *mut __m128i, _mm_sub_epi8(z, ut));
                 let zq = _mm_sub_epi8(z, q_);
                 let a2 = _mm_sub_epi8(a, zq);
                 let b2 = _mm_sub_epi8(b, zq);
                 // x, y with continuation bits
                 let tmp = _mm_cmpgt_epi8(a2, zero_);
-                _mm_storeu_si128(x.as_mut_ptr().add(p) as *mut __m128i, _mm_and_si128(tmp, a2));
+                _mm_storeu_si128(xp.add(p) as *mut __m128i, _mm_and_si128(tmp, a2));
                 d = _mm_or_si128(d, _mm_and_si128(tmp, flag8_));
                 let tmp = _mm_cmpgt_epi8(b2, zero_);
-                _mm_storeu_si128(y.as_mut_ptr().add(p) as *mut __m128i, _mm_and_si128(tmp, b2));
+                _mm_storeu_si128(yp.add(p) as *mut __m128i, _mm_and_si128(tmp, b2));
                 d = _mm_or_si128(d, _mm_and_si128(tmp, flag16_));
                 if pr_off + 16 <= bt.len() {
                     _mm_storeu_si128(bt.as_mut_ptr().add(pr_off) as *mut __m128i, d);
@@ -213,21 +250,48 @@ unsafe fn extz2_sse2(
         }
 
         // Score tracking (C lines 232-294)
-        // NOTE: single-gap uses UNSIGNED byte interpretation (uint8_t* in C)
         let u8p = u.as_ptr(); let v8p = v.as_ptr();
+        let hp = h_arr.as_mut_ptr();
         if !approx_max { // Exact max
             if r > 0 {
                 let mut max_h: i32;
                 let mut max_t: i32;
                 if en0 > 0 {
-                    h_arr[en0 as usize] = h_arr[(en0-1) as usize] + *u8p.add(en0 as usize) as i32 - qe;
+                    *hp.add(en0 as usize) = *hp.add(en0 as usize - 1) + *u8p.add(en0 as usize) as i32 - qe;
                 } else {
-                    h_arr[en0 as usize] = h_arr[en0 as usize] + *v8p.add(en0 as usize) as i32 - qe;
+                    *hp.add(en0 as usize) = *hp.add(en0 as usize) + *v8p.add(en0 as usize) as i32 - qe;
                 }
-                max_h = h_arr[en0 as usize]; max_t = en0;
-                for t in st0..en0 {
-                    h_arr[t as usize] += *v8p.add(t as usize) as i32 - qe;
-                    if h_arr[t as usize] > max_h { max_h = h_arr[t as usize]; max_t = t; }
+                max_h = *hp.add(en0 as usize); max_t = en0;
+                // SSE2-vectorized H-tracking: 4 i32 values per iteration
+                let en1 = st0 + (en0 - st0) / 4 * 4;
+                let mut max_h_v = _mm_set1_epi32(max_h);
+                let mut max_t_v = _mm_set1_epi32(max_t);
+                let qe_v = _mm_set1_epi32(qe);
+                {
+                    let mut t = st0;
+                    while t < en1 {
+                        let tu = t as usize;
+                        let mut h1 = _mm_loadu_si128(hp.add(tu) as *const __m128i);
+                        let vv = _mm_setr_epi32(
+                            *v8p.add(tu) as i32, *v8p.add(tu+1) as i32,
+                            *v8p.add(tu+2) as i32, *v8p.add(tu+3) as i32,
+                        );
+                        h1 = _mm_sub_epi32(_mm_add_epi32(h1, vv), qe_v);
+                        _mm_storeu_si128(hp.add(tu) as *mut __m128i, h1);
+                        let tv = _mm_set1_epi32(t);
+                        let cmp = _mm_cmpgt_epi32(h1, max_h_v);
+                        max_h_v = _mm_or_si128(_mm_and_si128(cmp, h1), _mm_andnot_si128(cmp, max_h_v));
+                        max_t_v = _mm_or_si128(_mm_and_si128(cmp, tv), _mm_andnot_si128(cmp, max_t_v));
+                        t += 4;
+                    }
+                }
+                let mut hh = [0i32; 4]; let mut tt = [0i32; 4];
+                _mm_storeu_si128(hh.as_mut_ptr() as *mut __m128i, max_h_v);
+                _mm_storeu_si128(tt.as_mut_ptr() as *mut __m128i, max_t_v);
+                for i in 0..4 { if max_h < hh[i] { max_h = hh[i]; max_t = tt[i] + i as i32; } }
+                for t in en1..en0 {
+                    *hp.add(t as usize) += *v8p.add(t as usize) as i32 - qe;
+                    if *hp.add(t as usize) > max_h { max_h = *hp.add(t as usize); max_t = t; }
                 }
                 if en0 == tlen - 1 && h_arr[en0 as usize] > ez.mte {
                     ez.mte = h_arr[en0 as usize]; ez.mte_q = r - en0;
@@ -384,12 +448,16 @@ unsafe fn extd2_sse2(
     let mut h_arr: Vec<i32> = if !approx_max { vec![KSW_NEG_INF; bsz] } else { Vec::new() };
     let mut h0: i32 = 0; let mut last_h0_t: i32 = 0;
     let n_ad = (qlen + tlen - 1) as usize;
-    let mut bt = if with_cigar { vec![0u8; n_ad * n_col_ * 16 + 16] } else { Vec::new() };
-    let mut off_a = if with_cigar { vec![0i32; n_ad] } else { Vec::new() };
-    let mut off_e = if with_cigar { vec![0i32; n_ad] } else { Vec::new() };
+    let bt_size = if with_cigar { n_ad * n_col_ * 16 + 16 } else { 0 };
+    let off_size = if with_cigar { n_ad } else { 0 };
+    let mut bt = vec![0u8; bt_size];
+    let mut off_a = vec![0i32; off_size];
+    let mut off_e = vec![0i32; off_size];
 
-    let mut qr = vec![0u8; qlen as usize + 16];
-    for i in 0..qlen as usize { qr[i] = query[qlen as usize - 1 - i]; }
+    let qr_pad = tlen as usize;
+    let mut qr_full = vec![0u8; qr_pad + qlen as usize + 16];
+    for i in 0..qlen as usize { qr_full[qr_pad + i] = query[qlen as usize - 1 - i]; }
+    let qr_base = qr_full.as_ptr().add(qr_pad);
     let mut sf = vec![0u8; tlen as usize + 16];
     sf[..tlen as usize].copy_from_slice(target);
 
@@ -405,6 +473,11 @@ unsafe fn extd2_sse2(
                 else { _mm_set1_epi8(mat[(m as usize * m as usize) - 1]) };
 
     let mut last_st: i32 = -1; let mut last_en: i32 = -1;
+    let up = u.as_mut_ptr(); let vp = v.as_mut_ptr();
+    let xp = x.as_mut_ptr(); let yp = y.as_mut_ptr();
+    let x2p = x2.as_mut_ptr(); let y2p = y2.as_mut_ptr();
+    let sp = s.as_mut_ptr();
+    let _hp = h_arr.as_mut_ptr();
 
     for r in 0..qlen + tlen - 1 {
         let mut st = 0i32.max(r - qlen + 1);
@@ -431,19 +504,17 @@ unsafe fn extd2_sse2(
         }
 
         // Score computation (same as single-gap)
-        let qrr = (qlen - 1 - r).max(0) as usize;
+        let qrr = qlen - 1 - r; // can be negative; qrr + t is always >= 0 within the band
         {
             let mut t = st0 as usize;
             while t as i32 <= en0 {
-                let mut sq_b = [0u8; 16]; let mut qt_b = [0u8; 16];
-                for k in 0..16 { if t+k < sf.len() { sq_b[k] = sf[t+k]; } if qrr+t+k < qr.len() { qt_b[k] = qr[qrr+t+k]; } }
-                let sq = _mm_loadu_si128(sq_b.as_ptr() as *const __m128i);
-                let qt = _mm_loadu_si128(qt_b.as_ptr() as *const __m128i);
+                let sq = _mm_loadu_si128(sf.as_ptr().add(t) as *const __m128i);
+                let qt = _mm_loadu_si128(qr_base.offset(qrr as isize).add(t) as *const __m128i);
                 let mask = _mm_or_si128(_mm_cmpeq_epi8(sq, m1_), _mm_cmpeq_epi8(qt, m1_));
                 let eq = _mm_cmpeq_epi8(sq, qt);
                 let tmp = _mm_or_si128(_mm_andnot_si128(eq, sc_mis_), _mm_and_si128(eq, sc_mch_));
                 let tmp = _mm_or_si128(_mm_andnot_si128(mask, tmp), _mm_and_si128(mask, sc_n_));
-                _mm_storeu_si128(s.as_mut_ptr().add(t) as *mut __m128i, tmp);
+                _mm_storeu_si128(sp.add(t) as *mut __m128i, tmp);
                 t += 16;
             }
         }
@@ -460,21 +531,21 @@ unsafe fn extd2_sse2(
         for t in st_ as usize..=en_ as usize {
             let p = t * 16;
             // dp_code_block1 (dual-gap version)
-            let z = _mm_loadu_si128(s.as_ptr().add(p) as *const __m128i);
-            let xt1r = _mm_loadu_si128(x.as_ptr().add(p) as *const __m128i);
+            let z = _mm_loadu_si128(sp.add(p) as *const __m128i);
+            let xt1r = _mm_loadu_si128(xp.add(p) as *const __m128i);
             let tmp = _mm_srli_si128::<15>(xt1r);
             let xt1 = _mm_or_si128(_mm_slli_si128::<1>(xt1r), x1_); x1_ = tmp;
-            let vt1r = _mm_loadu_si128(v.as_ptr().add(p) as *const __m128i);
+            let vt1r = _mm_loadu_si128(vp.add(p) as *const __m128i);
             let tmp = _mm_srli_si128::<15>(vt1r);
             let vt1 = _mm_or_si128(_mm_slli_si128::<1>(vt1r), v1_); v1_ = tmp;
             let a = _mm_add_epi8(xt1, vt1);
-            let ut = _mm_loadu_si128(u.as_ptr().add(p) as *const __m128i);
-            let b = _mm_add_epi8(_mm_loadu_si128(y.as_ptr().add(p) as *const __m128i), ut);
-            let x2t1r = _mm_loadu_si128(x2.as_ptr().add(p) as *const __m128i);
+            let ut = _mm_loadu_si128(up.add(p) as *const __m128i);
+            let b = _mm_add_epi8(_mm_loadu_si128(yp.add(p) as *const __m128i), ut);
+            let x2t1r = _mm_loadu_si128(x2p.add(p) as *const __m128i);
             let tmp = _mm_srli_si128::<15>(x2t1r);
             let x2t1 = _mm_or_si128(_mm_slli_si128::<1>(x2t1r), x21_); x21_ = tmp;
             let a2 = _mm_add_epi8(x2t1, vt1);
-            let b2 = _mm_add_epi8(_mm_loadu_si128(y2.as_ptr().add(p) as *const __m128i), ut);
+            let b2 = _mm_add_epi8(_mm_loadu_si128(y2p.add(p) as *const __m128i), ut);
 
             // SSE2: z = max(z, a, b, a2, b2) via signed compare+blend
             let mut zz = z;
@@ -495,8 +566,8 @@ unsafe fn extd2_sse2(
             zz = _mm_or_si128(_mm_and_si128(tmp, sc_mch_), _mm_andnot_si128(tmp, zz));
 
             // dp_code_block2
-            _mm_storeu_si128(u.as_mut_ptr().add(p) as *mut __m128i, _mm_sub_epi8(zz, vt1));
-            _mm_storeu_si128(v.as_mut_ptr().add(p) as *mut __m128i, _mm_sub_epi8(zz, ut));
+            _mm_storeu_si128(up.add(p) as *mut __m128i, _mm_sub_epi8(zz, vt1));
+            _mm_storeu_si128(vp.add(p) as *mut __m128i, _mm_sub_epi8(zz, ut));
             let zq = _mm_sub_epi8(zz, q_);
             let a = _mm_sub_epi8(a, zq);
             let b = _mm_sub_epi8(b, zq);
@@ -506,16 +577,16 @@ unsafe fn extd2_sse2(
 
             // Store x, y, x2, y2
             let tmp = _mm_cmpgt_epi8(a, zero_);
-            _mm_storeu_si128(x.as_mut_ptr().add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, a), qe_));
+            _mm_storeu_si128(xp.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, a), qe_));
             if with_cigar { d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x08u8 as i8))); }
             let tmp = _mm_cmpgt_epi8(b, zero_);
-            _mm_storeu_si128(y.as_mut_ptr().add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, b), qe_));
+            _mm_storeu_si128(yp.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, b), qe_));
             if with_cigar { d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x10u8 as i8))); }
             let tmp = _mm_cmpgt_epi8(a2, zero_);
-            _mm_storeu_si128(x2.as_mut_ptr().add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, a2), qe2_));
+            _mm_storeu_si128(x2p.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, a2), qe2_));
             if with_cigar { d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x20u8 as i8))); }
             let tmp = _mm_cmpgt_epi8(b2, zero_);
-            _mm_storeu_si128(y2.as_mut_ptr().add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, b2), qe2_));
+            _mm_storeu_si128(y2p.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, b2), qe2_));
             if with_cigar { d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x40u8 as i8))); }
 
             if with_cigar {
@@ -627,6 +698,79 @@ unsafe fn extd2_sse2(
     ez
 }
 
+/// Recompute ez.score/mqe/mte from CIGAR by walking the alignment.
+/// This fixes the H-score tracking offset in the SIMD kernels.
+fn fixup_score_from_cigar(
+    ez: &mut KswResult, query: &[u8], target: &[u8], m: i8, mat: &[i8],
+    q: i8, e: i8, q2: i8, e2: i8, end_bonus: i32,
+) {
+    if ez.cigar.is_empty() { return; }
+    let qe1 = q as i32 + e as i32;
+    let qe2v = q2 as i32 + e2 as i32;
+    let m_u = m as usize;
+    let mut score = 0i32;
+    let mut max_score = 0i32;
+    let mut qi = 0usize;
+    let mut ti = 0usize;
+    let mut max_qi = 0usize;
+    let mut max_ti = 0usize;
+
+    for &c in &ez.cigar {
+        let op = c & 0xf;
+        let len = (c >> 4) as usize;
+        match op {
+            0 | 7 | 8 => { // M/=/X
+                for l in 0..len {
+                    if qi + l < query.len() && ti + l < target.len() {
+                        score += mat[target[ti + l] as usize * m_u + query[qi + l] as usize] as i32;
+                    }
+                    if score > max_score { max_score = score; max_qi = qi + l; max_ti = ti + l; }
+                }
+                qi += len; ti += len;
+            }
+            1 => { // I
+                let gap = (qe1 + e as i32 * (len as i32 - 1)).min(qe2v + e2 as i32 * (len as i32 - 1));
+                score -= gap;
+                qi += len;
+                if score > max_score { max_score = score; max_qi = qi; max_ti = ti; }
+            }
+            2 | 3 => { // D/N
+                let gap = (qe1 + e as i32 * (len as i32 - 1)).min(qe2v + e2 as i32 * (len as i32 - 1));
+                score -= gap;
+                ti += len;
+                if score > max_score { max_score = score; max_qi = qi; max_ti = ti; }
+            }
+            _ => { qi += len; ti += len; }
+        }
+        if score < 0 { score = 0; }
+    }
+
+    // Set the corrected values
+    let final_score = score;
+    ez.score = final_score;
+    ez.max = max_score;
+    ez.max_q = max_qi as i32;
+    ez.max_t = max_ti as i32;
+
+    // mqe: score when reaching end of query
+    if qi == query.len() {
+        ez.mqe = final_score;
+        ez.mqe_t = (ti as i32) - 1;
+    }
+    // mte: score when reaching end of target
+    if ti == target.len() {
+        ez.mte = final_score;
+        ez.mte_q = (qi as i32) - 1;
+    }
+
+    ez.reach_end = qi == query.len() && ti == target.len();
+    if end_bonus > 0 && ez.reach_end {
+        ez.score += end_bonus;
+        if ez.mqe != KSW_NEG_INF { ez.mqe += end_bonus; }
+        if ez.mte != KSW_NEG_INF { ez.mte += end_bonus; }
+    }
+}
+
 /// Dispatch for dual-gap: SIMD if available, scalar fallback.
 pub fn ksw_extd2_dispatch(
     query: &[u8], target: &[u8], m: i8, mat: &[i8],
@@ -634,7 +778,11 @@ pub fn ksw_extd2_dispatch(
 ) -> KswResult {
     #[cfg(target_arch = "x86_64")]
     if has_sse2() {
-        return unsafe { extd2_sse2(query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag) };
+        let mut ez = unsafe { extd2_sse2(query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag) };
+        if !ez.cigar.is_empty() {
+            fixup_score_from_cigar(&mut ez, query, target, m, mat, q, e, q2, e2, end_bonus);
+        }
+        return ez;
     }
     super::ksw2::ksw_extd2(query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag)
 }
@@ -646,7 +794,11 @@ pub fn ksw_extz2_dispatch(
 ) -> KswResult {
     #[cfg(target_arch = "x86_64")]
     if has_sse2() {
-        return unsafe { extz2_sse2(query, target, m, mat, q, e, w, zdrop, end_bonus, flag) };
+        let mut ez = unsafe { extz2_sse2(query, target, m, mat, q, e, w, zdrop, end_bonus, flag) };
+        if !ez.cigar.is_empty() {
+            fixup_score_from_cigar(&mut ez, query, target, m, mat, q, e, q, e, end_bonus);
+        }
+        return ez;
     }
     super::ksw2::ksw_extz2(query, target, m, mat, q, e, w, zdrop, end_bonus, flag)
 }
