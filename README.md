@@ -1,4 +1,4 @@
-# minimap2-rs
+# minimap2-pure-rs
 
 A pure Rust reimplementation of [minimap2](https://github.com/lh3/minimap2) v2.30 (commit `de3c6ec`), the versatile sequence alignment program for long and short reads.
 
@@ -24,7 +24,7 @@ Or build from source:
 
 ```bash
 cargo build --release
-# Binary at ./target/release/minimap2-rs
+# Binary at ./target/release/minimap2-pure-rs
 ```
 
 ## Usage
@@ -32,52 +32,52 @@ cargo build --release
 ### Basic mapping (PAF output)
 
 ```bash
-minimap2-rs ref.fa query.fq
+minimap2-pure-rs ref.fa query.fq
 ```
 
 ### With CIGAR string
 
 ```bash
-minimap2-rs -c ref.fa query.fq
+minimap2-pure-rs -c ref.fa query.fq
 ```
 
 ### SAM output
 
 ```bash
-minimap2-rs -a ref.fa query.fq | samtools sort -o aligned.bam
+minimap2-pure-rs -a ref.fa query.fq | samtools sort -o aligned.bam
 ```
 
 ### Paired-end short reads
 
 ```bash
-minimap2-rs -ax sr ref.fa read1.fq read2.fq
+minimap2-pure-rs -ax sr ref.fa read1.fq read2.fq
 ```
 
 ### Using presets
 
 ```bash
-minimap2-rs -x map-ont  ref.fa ont_reads.fq     # Oxford Nanopore
-minimap2-rs -x map-pb   ref.fa pb_reads.fq      # PacBio CLR
-minimap2-rs -x map-hifi ref.fa hifi_reads.fq    # PacBio HiFi
-minimap2-rs -x sr       ref.fa reads.fq         # Short reads
-minimap2-rs -x asm5     ref.fa assembly.fa       # Assembly-to-reference
-minimap2-rs -x splice   ref.fa rna_reads.fq     # Spliced alignment
+minimap2-pure-rs -x map-ont  ref.fa ont_reads.fq     # Oxford Nanopore
+minimap2-pure-rs -x map-pb   ref.fa pb_reads.fq      # PacBio CLR
+minimap2-pure-rs -x map-hifi ref.fa hifi_reads.fq    # PacBio HiFi
+minimap2-pure-rs -x sr       ref.fa reads.fq         # Short reads
+minimap2-pure-rs -x asm5     ref.fa assembly.fa       # Assembly-to-reference
+minimap2-pure-rs -x splice   ref.fa rna_reads.fq     # Spliced alignment
 ```
 
 ### Index management
 
 ```bash
 # Build and save index
-minimap2-rs -d ref.mmi ref.fa
+minimap2-pure-rs -d ref.mmi ref.fa
 
 # Map using prebuilt index
-minimap2-rs ref.mmi query.fq
+minimap2-pure-rs ref.mmi query.fq
 ```
 
 ## Options
 
 ```
-Usage: minimap2-rs [OPTIONS] <TARGET> [QUERY]...
+Usage: minimap2-pure-rs [OPTIONS] <TARGET> [QUERY]...
 
 Arguments:
   <TARGET>    Reference FASTA/index file
@@ -136,7 +136,7 @@ Includes CIGAR, clipping (hard by default, soft with `-Y`), and alignment tags.
 
 ## Library API
 
-Use minimap2-rs as a Rust library:
+Use minimap2-pure-rs as a Rust library:
 
 ```rust
 use minimap2::aligner::Aligner;

@@ -7,7 +7,7 @@ use minimap2::types::MM_VERSION;
 
 
 #[derive(Parser)]
-#[command(name = "minimap2-rs", version = MM_VERSION, about = "Pure Rust minimap2 sequence aligner")]
+#[command(name = "minimap2-pure-rs", version = MM_VERSION, about = "Pure Rust minimap2 sequence aligner")]
 struct Cli {
     /// Reference FASTA/index file
     target: String,
