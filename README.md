@@ -1,6 +1,8 @@
 # minimap2-rs
 
-A pure Rust reimplementation of [minimap2](https://github.com/lh3/minimap2), the versatile sequence alignment program for long and short reads.
+A pure Rust reimplementation of [minimap2](https://github.com/lh3/minimap2) v2.30 (commit `de3c6ec`), the versatile sequence alignment program for long and short reads.
+
+It has been tested to be equivalent to the C version, but 7% faster. Let us know if you find differences and provide test data!
 
 ## Features
 

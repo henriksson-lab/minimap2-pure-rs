@@ -1,12 +1,16 @@
 [package]
-name = "minimap2-rs"
-version = "0.1.0"
+name = "minimap2-pure-rs"
+version = "0.2.0"
 edition = "2021"
 description = "Pure Rust reimplementation of minimap2 sequence aligner"
 license = "MIT"
+homepage = "https://github.com/henriksson-lab/minimap2-pure-rs"
+repository = "https://github.com/henriksson-lab/minimap2-pure-rs"
+categories = ["command-line-utilities", "science"]
+keywords = ["bioinformatics", "alignment", "genomics", "minimap2", "sequencing"]
 
 [[bin]]
-name = "minimap2-rs"
+name = "minimap2-pure-rs"
 path = "src/main.rs"
 
 [lib]
