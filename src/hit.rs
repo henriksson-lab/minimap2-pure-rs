@@ -53,6 +53,7 @@ fn reg_set_coor(r: &mut AlignReg, qlen: i32, a: &[Mm128], is_qstrand: bool) {
 }
 
 /// Convert chains to alignment regions. Matches mm_gen_regs().
+#[inline(never)]
 pub fn gen_regs(
     hash: u32,
     qlen: i32,
@@ -164,6 +165,7 @@ fn alt_score(score: i32, alt_diff_frac: f32) -> i32 {
 }
 
 /// Assign parent/secondary relationships. Matches mm_set_parent().
+#[inline(never)]
 pub fn set_parent(
     mask_level: f32,
     mask_len: i32,
@@ -179,6 +181,7 @@ pub fn set_parent(
     let mut w: Vec<usize> = Vec::new(); // primary indices
     w.push(0);
     regs[0].parent = 0;
+    let mut cov: Vec<u64> = Vec::new(); // reused across iterations
 
     for i in 1..n {
         let si = regs[i].qs;
@@ -187,7 +190,7 @@ pub fn set_parent(
 
         if !hard_mask_level {
             // Compute uncovered length
-            let mut cov: Vec<u64> = Vec::new();
+            cov.clear();
             for &j in &w {
                 let sj = regs[j].qs;
                 let ej = regs[j].qe;

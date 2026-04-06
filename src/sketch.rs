@@ -74,7 +74,8 @@ pub fn mm_sketch(seq: &[u8], w: usize, k: usize, rid: u32, is_hpc: bool, p: &mut
     let mut buf_pos: usize = 0;
     let mut min_pos: usize = 0;
     let mut kmer_span: usize = 0;
-    let mut buf = vec![Mm128 { x: u64::MAX, y: u64::MAX }; w];
+    let mut buf = [Mm128 { x: u64::MAX, y: u64::MAX }; 256];
+    // buf_pos and j are always < w < 256, so all buf accesses are in bounds
     let mut min = Mm128 { x: u64::MAX, y: u64::MAX };
     let mut tq = TinyQueue::new();
 
@@ -83,16 +84,17 @@ pub fn mm_sketch(seq: &[u8], w: usize, k: usize, rid: u32, is_hpc: bool, p: &mut
     let len = seq.len();
     let mut i: usize = 0;
     while i < len {
-        let c = SEQ_NT4_TABLE[seq[i] as usize];
+        // SAFETY: i < len = seq.len(), and SEQ_NT4_TABLE has 256 entries (covers all u8)
+        let c = unsafe { *SEQ_NT4_TABLE.get_unchecked(*seq.get_unchecked(i) as usize) };
         let mut info = Mm128 { x: u64::MAX, y: u64::MAX };
 
         if c < 4 {
             if is_hpc {
                 let mut skip_len: usize = 1;
-                if i + 1 < len && SEQ_NT4_TABLE[seq[i + 1] as usize] == c {
+                if i + 1 < len && unsafe { *SEQ_NT4_TABLE.get_unchecked(*seq.get_unchecked(i + 1) as usize) } == c {
                     skip_len = 2;
                     while i + skip_len < len {
-                        if SEQ_NT4_TABLE[seq[i + skip_len] as usize] != c {
+                        if unsafe { *SEQ_NT4_TABLE.get_unchecked(*seq.get_unchecked(i + skip_len) as usize) } != c {
                             break;
                         }
                         skip_len += 1;
@@ -125,19 +127,18 @@ pub fn mm_sketch(seq: &[u8], w: usize, k: usize, rid: u32, is_hpc: bool, p: &mut
             kmer_span = 0;
         }
 
-        buf[buf_pos] = info;
+        // SAFETY: buf_pos < w < 256 = buf.len()
+        unsafe { *buf.get_unchecked_mut(buf_pos) = info; }
 
         if l == w + k - 1 && min.x != u64::MAX {
             // special case for the first window
             for j in (buf_pos + 1)..w {
-                if min.x == buf[j].x && buf[j].y != min.y {
-                    p.push(buf[j]);
-                }
+                let bj = unsafe { *buf.get_unchecked(j) };
+                if min.x == bj.x && bj.y != min.y { p.push(bj); }
             }
             for j in 0..buf_pos {
-                if min.x == buf[j].x && buf[j].y != min.y {
-                    p.push(buf[j]);
-                }
+                let bj = unsafe { *buf.get_unchecked(j) };
+                if min.x == bj.x && bj.y != min.y { p.push(bj); }
             }
         }
 
@@ -154,28 +155,21 @@ pub fn mm_sketch(seq: &[u8], w: usize, k: usize, rid: u32, is_hpc: bool, p: &mut
             // find new minimum in buffer
             min.x = u64::MAX;
             for j in (buf_pos + 1)..w {
-                if min.x >= buf[j].x {
-                    min = buf[j];
-                    min_pos = j;
-                }
+                let bj = unsafe { *buf.get_unchecked(j) };
+                if min.x >= bj.x { min = bj; min_pos = j; }
             }
             for j in 0..=buf_pos {
-                if min.x >= buf[j].x {
-                    min = buf[j];
-                    min_pos = j;
-                }
+                let bj = unsafe { *buf.get_unchecked(j) };
+                if min.x >= bj.x { min = bj; min_pos = j; }
             }
             if l >= w + k - 1 && min.x != u64::MAX {
-                // write identical k-mers
                 for j in (buf_pos + 1)..w {
-                    if min.x == buf[j].x && min.y != buf[j].y {
-                        p.push(buf[j]);
-                    }
+                    let bj = unsafe { *buf.get_unchecked(j) };
+                    if min.x == bj.x && min.y != bj.y { p.push(bj); }
                 }
                 for j in 0..=buf_pos {
-                    if min.x == buf[j].x && min.y != buf[j].y {
-                        p.push(buf[j]);
-                    }
+                    let bj = unsafe { *buf.get_unchecked(j) };
+                    if min.x == bj.x && min.y != bj.y { p.push(bj); }
                 }
             }
         }

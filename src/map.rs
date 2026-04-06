@@ -47,7 +47,7 @@ pub fn map_query(
 
     // Step 1: Collect minimizers
     let is_hpc = mi.flag.contains(IdxFlags::HPC);
-    let mut mv: Vec<Mm128> = Vec::new();
+    let mut mv: Vec<Mm128> = Vec::with_capacity(qseq.len() / mi.w as usize + 16);
     mm_sketch(qseq, mi.w as usize, mi.k as usize, 0, is_hpc, &mut mv);
 
     // Step 2: Filter by query occurrence

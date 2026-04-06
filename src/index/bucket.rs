@@ -45,26 +45,22 @@ impl IdxBucket {
         // Sort by minimizer hash (x field)
         radix_sort_mm128(&mut self.build_buf);
 
-        // Count distinct keys and total multi-hit positions
+        // Count distinct keys and total positions (singletons + multi-hit all go into p)
         let n = self.build_buf.len();
         let mut n_keys = 0u32;
-        let mut n_multi = 0usize;
         let mut run_len = 1usize;
         for j in 1..=n {
             if j == n || self.build_buf[j].x >> 8 != self.build_buf[j - 1].x >> 8 {
                 n_keys += 1;
-                if run_len > 1 {
-                    n_multi += run_len;
-                }
                 run_len = 1;
             } else {
                 run_len += 1;
             }
         }
 
-        // Build hash table and position array
+        // Build hash table and position array — all entries stored in p
         let mut h: HashMap<u64, u64> = HashMap::with_capacity(n_keys as usize);
-        self.p = vec![0u64; n_multi];
+        self.p = vec![0u64; n]; // all positions go into p (singletons too)
 
         let mut start_a = 0usize;
         let mut start_p = 0usize;
@@ -73,26 +69,23 @@ impl IdxBucket {
             if j == n || self.build_buf[j].x >> 8 != self.build_buf[j - 1].x >> 8 {
                 let last = &self.build_buf[j - 1];
                 let key = (last.x >> 8 >> bucket_bits as u64) << 1;
-                if run_len == 1 {
-                    // Singleton: set LSB of key, value is the position
-                    h.insert(key | 1, last.y);
-                } else {
-                    // Multi-hit: copy positions to p array
-                    for k in 0..run_len {
-                        self.p[start_p + k] = self.build_buf[start_a + k].y;
-                    }
-                    // Sort positions within this group
-                    radix_sort_u64(&mut self.p[start_p..start_p + run_len]);
-                    h.insert(key, ((start_p as u64) << 32) | run_len as u64);
-                    start_p += run_len;
+                // Copy positions to p array (including singletons)
+                for k in 0..run_len {
+                    self.p[start_p + k] = self.build_buf[start_a + k].y;
                 }
+                if run_len > 1 {
+                    radix_sort_u64(&mut self.p[start_p..start_p + run_len]);
+                }
+                // Unified format: value = (offset << 32) | count
+                h.insert(key, ((start_p as u64) << 32) | run_len as u64);
+                start_p += run_len;
                 start_a = j;
                 run_len = 1;
             } else {
                 run_len += 1;
             }
         }
-        debug_assert_eq!(n_multi, start_p);
+        debug_assert_eq!(n, start_p);
 
         self.h = Some(h);
         // Clear build buffer
@@ -102,20 +95,13 @@ impl IdxBucket {
     /// Look up a minimizer. Returns (count, slice of positions).
     ///
     /// Matches mm_idx_get() from index.c.
+    #[inline]
     pub fn get(&self, minier_key: u64) -> (i32, &[u64]) {
         let h = match &self.h {
             Some(h) => h,
             None => return (0, &[]),
         };
-        // Try singleton first (key with LSB set)
-        if let Some(val) = h.get(&(minier_key | 1)) {
-            // Singleton: need to return a reference to the value
-            // This is tricky since we need a &[u64]. Use slice::from_ref for the value in the map.
-            // But we can't get a stable reference to the value inside HashMap easily.
-            // Instead, check both forms.
-            return (1, std::slice::from_ref(val));
-        }
-        // Try multi-hit (key without LSB)
+        // Single lookup — all entries (singletons + multi) use same key format
         if let Some(&val) = h.get(&minier_key) {
             let offset = (val >> 32) as usize;
             let count = (val as u32) as usize;
@@ -132,12 +118,8 @@ impl IdxBucket {
     /// Iterate over all entries, yielding (count) for each minimizer.
     pub fn iter_counts(&self) -> impl Iterator<Item = u32> + '_ {
         self.h.iter().flat_map(|h| {
-            h.iter().map(|(&key, &val)| {
-                if key & 1 != 0 {
-                    1u32 // singleton
-                } else {
-                    val as u32 // count
-                }
+            h.iter().map(|(&_key, &val)| {
+                val as u32 // count is in lower 32 bits
             })
         })
     }
@@ -151,10 +133,17 @@ mod tests {
     fn test_bucket_singleton() {
         let mut b = IdxBucket::new();
         // Add one minimizer: x = (hash << 8 | span), y = position
-        b.add(Mm128::new(0xABCD00 | 15, 42));
+        let hash = 0xABCD00u64 | 15;
+        b.add(Mm128::new(hash, 42));
         b.post_process(14);
         assert!(b.h.is_some());
         assert_eq!(b.n_keys(), 1);
+        // Lookup singleton
+        let key = (hash >> 8 >> 14) << 1;
+        let (n, positions) = b.get(key);
+        assert_eq!(n, 1);
+        assert_eq!(positions.len(), 1);
+        assert_eq!(positions[0], 42);
     }
 
     #[test]

@@ -74,11 +74,17 @@ pub fn seed_mz_flt(mv: &mut Vec<Mm128>, q_occ_max: i32, q_occ_frac: f32) {
 /// Matches mm_seed_collect_all() from seed.c.
 fn seed_collect_all(mi: &MmIdx, mv: &[Mm128]) -> Vec<Seed> {
     let mut seeds = Vec::with_capacity(mv.len());
+    let mask = (1u64 << mi.bucket_bits) - 1;
+    let n = mv.len();
     for (i, p) in mv.iter().enumerate() {
         let q_pos = p.y as u32;
         let q_span = (p.x & 0xff) as u32;
         let minier = p.x >> 8;
-        let (t, _positions) = mi.get(minier);
+
+        // Single index lookup — get count and positions together
+        let bucket_idx = (minier & mask) as usize;
+        let key = (minier >> mi.bucket_bits) << 1;
+        let (t, pos_slice) = mi.buckets[bucket_idx].get(key);
         if t == 0 {
             continue;
         }
@@ -88,29 +94,15 @@ fn seed_collect_all(mi: &MmIdx, mv: &[Mm128]) -> Vec<Seed> {
         let is_tandem = (i > 0 && p.x >> 8 == mv[i - 1].x >> 8)
             || (i + 1 < mv.len() && p.x >> 8 == mv[i + 1].x >> 8);
 
-        // Store position info — we need to re-fetch from index when expanding
-        let mask = (1u64 << mi.bucket_bits) - 1;
-        let bucket_idx = (minier & mask) as usize;
-        let key = (minier >> mi.bucket_bits) << 1;
+        // Store position info from the single lookup
         let positions = if t == 1 {
-            // Singleton — get the value directly
-            let (_, pos_slice) = mi.buckets[bucket_idx].get(key);
             SeedPositions::Single(pos_slice[0])
         } else {
-            // Multi-hit — store reference info
+            // Multi-hit — compute offset from slice pointer
             let bucket = &mi.buckets[bucket_idx];
-            if let Some(h) = &bucket.h {
-                if let Some(&val) = h.get(&key) {
-                    let offset = (val >> 32) as usize;
-                    let count = (val as u32) as usize;
-                    SeedPositions::Multi { offset, count, bucket_idx }
-                } else {
-                    // Try singleton key
-                    SeedPositions::Single(0)
-                }
-            } else {
-                SeedPositions::Single(0)
-            }
+            let base = bucket.p.as_ptr();
+            let offset = unsafe { pos_slice.as_ptr().offset_from(base) as usize };
+            SeedPositions::Multi { offset, count: t as usize, bucket_idx }
         };
 
         seeds.push(Seed {
@@ -242,6 +234,7 @@ fn heap_sift_down(a: &mut [u64], mut i: usize, n: usize) {
 /// * `max_occ` - max occurrence for a minimizer (higher are filtered or selected)
 /// * `max_max_occ` - absolute maximum occurrence (always filtered above this)
 /// * `dist` - distance parameter for adaptive selection
+#[inline(never)]
 pub fn collect_matches(
     mi: &MmIdx,
     mv: &[Mm128],
@@ -270,7 +263,6 @@ pub fn collect_matches(
     let mut rep_en: i32 = 0;
     let mut n_a: i64 = 0;
     let mut mini_pos = Vec::with_capacity(n_m0);
-    let mut kept = Vec::with_capacity(n_m0);
 
     for q in &seeds {
         if q.flt {
@@ -286,13 +278,15 @@ pub fn collect_matches(
         } else {
             n_a += q.n as i64;
             mini_pos.push((q.q_span as u64) << 32 | (q.q_pos >> 1) as u64);
-            kept.push(q.clone());
         }
     }
     rep_len += rep_en - rep_st;
 
+    // Filter in-place instead of cloning into a new Vec
+    seeds.retain(|s| !s.flt);
+
     SeedResult {
-        seeds: kept,
+        seeds,
         n_a,
         rep_len,
         mini_pos,
@@ -308,8 +302,14 @@ pub fn collect_matches(
 /// - `a[i].y = flags | seg_id << 48 | q_span << 32 | q_pos` (q_pos has strand bit stripped; reverse strand gets coordinate flip)
 ///
 /// `qlen` is needed to flip reverse-strand query coordinates.
+#[inline(never)]
 pub fn expand_seeds_to_anchors(mi: &MmIdx, seeds: &[Seed], qlen: i32, flag: crate::flags::MapFlags) -> Vec<Mm128> {
-    let mut anchors = Vec::new();
+    // Pre-compute total anchor count for capacity hint
+    let n_a: usize = seeds.iter().filter(|s| !s.flt).map(|s| match &s.positions {
+        SeedPositions::Single(_) => 1,
+        SeedPositions::Multi { count, .. } => *count,
+    }).sum();
+    let mut anchors = Vec::with_capacity(n_a);
     for seed in seeds {
         if seed.flt {
             continue;
@@ -320,15 +320,17 @@ pub fn expand_seeds_to_anchors(mi: &MmIdx, seeds: &[Seed], qlen: i32, flag: crat
         let q_span = seed.q_span;
         let seg_id = seed.seg_id;
 
-        let positions: Vec<u64> = match &seed.positions {
-            SeedPositions::Single(pos) => vec![*pos],
+        // Iterate over positions without allocating
+        let single_buf: [u64; 1];
+        let positions: &[u64] = match &seed.positions {
+            SeedPositions::Single(pos) => { single_buf = [*pos]; &single_buf }
             SeedPositions::Multi { offset, count, bucket_idx } => {
                 let bucket = &mi.buckets[*bucket_idx];
-                (0..*count).map(|k| bucket.p[*offset + k]).collect()
+                &bucket.p[*offset..*offset + *count]
             }
         };
 
-        for &r in &positions {
+        for &r in positions {
             let r_strand = (r as u32) & 1;
             let is_forward = r_strand == q_strand;
 

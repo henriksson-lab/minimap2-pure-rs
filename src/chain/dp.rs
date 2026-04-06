@@ -1,6 +1,15 @@
+use std::cell::RefCell;
 use crate::types::Mm128;
 use super::backtrack::{chain_backtrack, compact_a};
 use super::{comput_sc, ChainResult};
+
+// Thread-local scratch buffers for chain DP to avoid per-call allocations.
+thread_local! {
+    static CHAIN_P: RefCell<Vec<i64>> = const { RefCell::new(Vec::new()) };
+    static CHAIN_F: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
+    static CHAIN_V: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
+    static CHAIN_T: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
+}
 
 /// DP-based chaining algorithm. Matches mg_lchain_dp() from lchain.c.
 ///
@@ -19,6 +28,7 @@ use super::{comput_sc, ChainResult};
 /// * `is_cdna` - cDNA mode (allow large gaps)
 /// * `n_seg` - number of query segments
 /// * `a` - sorted anchor array (consumed)
+#[inline(never)]
 pub fn lchain_dp(
     mut max_dist_x: i32,
     mut max_dist_y: i32,
@@ -46,27 +56,41 @@ pub fn lchain_dp(
     }
     let max_drop = if is_cdna { i32::MAX } else { bw };
 
-    let mut p = vec![-1i64; n as usize];
-    let mut f = vec![0i32; n as usize];
-    let mut v_scores = vec![0i32; n as usize];
-    let mut t = vec![0i32; n as usize];
+    let mut p = CHAIN_P.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    let mut f = CHAIN_F.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    let mut v_scores = CHAIN_V.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    let mut t = CHAIN_T.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    let nu = n as usize;
+    p.clear(); p.resize(nu, -1i64);
+    f.clear(); f.resize(nu, 0i32);
+    v_scores.clear(); v_scores.resize(nu, 0i32);
+    t.clear(); t.resize(nu, 0i32);
 
     // Fill score and backtrack arrays
     let mut st: i64 = 0;
     let mut max_ii: i64 = -1;
 
+    // SAFETY: all indices i, j, st, max_ii are in 0..n; all arrays have length n
+    let ap = a.as_ptr();
+    let fp = f.as_mut_ptr();
+    let pp = p.as_mut_ptr();
+    let tp = t.as_mut_ptr();
+    let vp = v_scores.as_mut_ptr();
     for i in 0..n {
         let iu = i as usize;
         let mut max_j: i64 = -1;
-        let mut max_f = ((a[iu].y >> 32) & 0xff) as i32; // q_span
+        let mut max_f = unsafe { (((*ap.add(iu)).y >> 32) & 0xff) as i32 }; // q_span
         let mut n_skip: i32 = 0;
 
         // Advance start pointer
-        while st < i
-            && (a[iu].x >> 32 != a[st as usize].x >> 32
-                || a[iu].x > a[st as usize].x + max_dist_x as u64)
-        {
-            st += 1;
+        while st < i {
+            let su = st as usize;
+            unsafe {
+                if (*ap.add(iu)).x >> 32 != (*ap.add(su)).x >> 32
+                    || (*ap.add(iu)).x > (*ap.add(su)).x + max_dist_x as u64 {
+                    st += 1;
+                } else { break; }
+            }
         }
         if i - st > max_iter as i64 {
             st = i - max_iter as i64;
@@ -76,64 +100,72 @@ pub fn lchain_dp(
         // DP: scan predecessors
         for j in (st..i).rev() {
             let ju = j as usize;
-            let sc = comput_sc(
-                &a[iu], &a[ju], max_dist_x, max_dist_y, bw,
+            let sc = unsafe { comput_sc(
+                &*ap.add(iu), &*ap.add(ju), max_dist_x, max_dist_y, bw,
                 chn_pen_gap, chn_pen_skip, is_cdna, n_seg,
-            );
+            ) };
             if sc == i32::MIN {
                 continue;
             }
-            let sc = sc + f[ju];
+            let sc = sc + unsafe { *fp.add(ju) };
             if sc > max_f {
                 max_f = sc;
                 max_j = j;
                 if n_skip > 0 {
                     n_skip -= 1;
                 }
-            } else if t[ju] == i as i32 {
+            } else if unsafe { *tp.add(ju) } == i as i32 {
                 n_skip += 1;
                 if n_skip > max_skip {
                     break;
                 }
             }
-            if p[ju] >= 0 {
-                t[p[ju] as usize] = i as i32;
+            unsafe {
+                if *pp.add(ju) >= 0 {
+                    *tp.add((*pp.add(ju)) as usize) = i as i32;
+                }
             }
             end_j = j;
         }
 
         // Check the global maximum in range (for skip recovery)
-        if max_ii < 0 || a[iu].x.wrapping_sub(a[max_ii as usize].x) > max_dist_x as u64 {
+        if max_ii < 0 || unsafe { (*ap.add(iu)).x.wrapping_sub((*ap.add(max_ii as usize)).x) } > max_dist_x as u64 {
             let mut max_val = i32::MIN;
             max_ii = -1;
             for j in (st..i).rev() {
-                if max_val < f[j as usize] {
-                    max_val = f[j as usize];
-                    max_ii = j;
+                unsafe {
+                    if max_val < *fp.add(j as usize) {
+                        max_val = *fp.add(j as usize);
+                        max_ii = j;
+                    }
                 }
             }
         }
         if max_ii >= 0 && max_ii < end_j {
-            let tmp = comput_sc(
-                &a[iu], &a[max_ii as usize], max_dist_x, max_dist_y, bw,
+            let tmp = unsafe { comput_sc(
+                &*ap.add(iu), &*ap.add(max_ii as usize), max_dist_x, max_dist_y, bw,
                 chn_pen_gap, chn_pen_skip, is_cdna, n_seg,
-            );
-            if tmp != i32::MIN && max_f < tmp + f[max_ii as usize] {
-                max_f = tmp + f[max_ii as usize];
+            ) };
+            if tmp != i32::MIN && max_f < tmp + unsafe { *fp.add(max_ii as usize) } {
+                max_f = tmp + unsafe { *fp.add(max_ii as usize) };
                 max_j = max_ii;
             }
         }
 
-        f[iu] = max_f;
-        p[iu] = max_j;
-        v_scores[iu] = if max_j >= 0 && v_scores[max_j as usize] > max_f {
-            v_scores[max_j as usize]
-        } else {
-            max_f
-        };
+        unsafe {
+            *fp.add(iu) = max_f;
+            *pp.add(iu) = max_j;
+        }
+        unsafe {
+            *vp.add(iu) = if max_j >= 0 && *vp.add(max_j as usize) > max_f {
+                *vp.add(max_j as usize)
+            } else {
+                max_f
+            };
+        }
         if max_ii < 0
-            || (a[iu].x.wrapping_sub(a[max_ii as usize].x) <= max_dist_x as u64
-                && f[max_ii as usize] < f[iu])
+            || unsafe { (*ap.add(iu)).x.wrapping_sub((*ap.add(max_ii as usize)).x) <= max_dist_x as u64
+                && *fp.add(max_ii as usize) < *fp.add(iu) }
         {
             max_ii = i;
         }
@@ -142,6 +174,13 @@ pub fn lchain_dp(
     // Backtrack
     let mut v_indices = Vec::new();
     let mut u = chain_backtrack(n, &f, &p, &mut v_indices, &mut t, min_cnt, min_sc, max_drop);
+
+    // Return scratch buffers for reuse
+    CHAIN_P.with(|c| *c.borrow_mut() = p);
+    CHAIN_F.with(|c| *c.borrow_mut() = f);
+    CHAIN_V.with(|c| *c.borrow_mut() = v_scores);
+    CHAIN_T.with(|c| *c.borrow_mut() = t);
+
     if u.is_empty() {
         return None;
     }

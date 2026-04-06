@@ -2,12 +2,22 @@ pub mod score;
 pub mod ksw2;
 pub mod ksw2_simd;
 
+use std::cell::RefCell;
+
 use crate::flags::KswFlags;
 use crate::index::MmIdx;
 use crate::options::MapOpt;
 use crate::seq::SEQ_NT4_TABLE;
 use crate::types::{AlignExtra, AlignReg, Cigar, Mm128};
 pub use ksw2::KswResult;
+
+// Thread-local scratch buffers for alignment to avoid per-call allocations.
+thread_local! {
+    static ALIGN_TSEQ_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static ALIGN_REV_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static ALIGN_QSEQ_FWD: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static ALIGN_QSEQ_REV: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
 
 /// High-level alignment interface dispatching to scalar or SIMD implementations.
 ///
@@ -161,9 +171,12 @@ fn test_zdrop(
         let op = c & 0xf;
         let len = (c >> 4) as usize;
         if op == 0 { // M
-            for l in 0..len {
-                if i + l < tseq.len() && j + l < qseq.len() {
-                    score += mat[tseq[i + l] as usize * 5 + qseq[j + l] as usize] as i32;
+            let safe_len = len.min(tseq.len().saturating_sub(i)).min(qseq.len().saturating_sub(j));
+            for l in 0..safe_len {
+                // SAFETY: l < safe_len ensures i+l < tseq.len() and j+l < qseq.len()
+                // tseq/qseq values are < 5, so tseq[]*5+qseq[] < 25 <= mat.len()
+                unsafe {
+                    score += *mat.get_unchecked(*tseq.get_unchecked(i + l) as usize * 5 + *qseq.get_unchecked(j + l) as usize) as i32;
                 }
                 // update_max_zdrop
                 let ci = (i + l) as i32;
@@ -385,7 +398,9 @@ fn align1(
 
     let mut cigar_ops: Vec<u32> = Vec::new();
     let mut dp_score = 0i32;
-    let mut tseq_buf = vec![0u8; (re0 - rs0 + 1) as usize];
+    let mut tseq_buf = ALIGN_TSEQ_BUF.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    let needed = (re0 - rs0 + 1) as usize;
+    if tseq_buf.len() < needed { tseq_buf.resize(needed, 0); }
     let mut rs1 = rs;
     let mut qs1 = qs;
 
@@ -395,11 +410,13 @@ fn align1(
         let qlen_ext = (qs - qs0) as usize;
         if tlen_ext > 0 && qlen_ext > 0 {
             mi.getseq(rid, rs0 as u32, rs as u32, &mut tseq_buf[..tlen_ext]);
-            let mut qrev: Vec<u8> = qseq[qs0 as usize..qs as usize].to_vec();
-            qrev.reverse();
-            let mut trev = tseq_buf[..tlen_ext].to_vec();
-            trev.reverse();
-            let ez = do_align(opt, &qrev, &trev, mat, bw, opt.zdrop, opt.end_bonus,
+            let mut rev_buf = ALIGN_REV_BUF.with(|c| std::mem::take(&mut *c.borrow_mut()));
+            let total_rev = tlen_ext + qlen_ext;
+            if rev_buf.len() < total_rev { rev_buf.resize(total_rev, 0); }
+            // Pack reversed query and target into rev_buf: [qrev | trev]
+            for k in 0..qlen_ext { rev_buf[k] = qseq[qs as usize - 1 - k]; }
+            for k in 0..tlen_ext { rev_buf[qlen_ext + k] = tseq_buf[tlen_ext - 1 - k]; }
+            let ez = do_align(opt, &rev_buf[..qlen_ext], &rev_buf[qlen_ext..total_rev], mat, bw, opt.zdrop, opt.end_bonus,
                 KswFlags::EXTZ_ONLY | KswFlags::RIGHT | KswFlags::REV_CIGAR);
             if !ez.cigar.is_empty() {
                 append_cigar(&mut cigar_ops, &ez.cigar);
@@ -412,6 +429,7 @@ fn align1(
                 rs1 = rs - (ez.max_t + 1);
                 qs1 = qs - (ez.max_q + 1);
             }
+            ALIGN_REV_BUF.with(|c| *c.borrow_mut() = rev_buf);
         }
     }
 
@@ -464,7 +482,7 @@ fn align1(
                 mi.getseq(rid, cur_rs as u32, next_re as u32, &mut tseq_buf[..gap_tlen]);
                 let qsub = &qseq[cur_qs as usize..next_qe as usize];
                 // First pass: alignment with approximate z-drop
-                let mut ez = do_align(opt, qsub, &tseq_buf[..gap_tlen], mat, use_bw, opt.zdrop, -1, KswFlags::empty());
+                let mut ez = do_align(opt, qsub, &tseq_buf[..gap_tlen], mat, use_bw, opt.zdrop, -1, KswFlags::APPROX_MAX);
 
                 // Test z-drop and potential inversion
                 if !ez.cigar.is_empty() && !ez.zdropped {
@@ -472,7 +490,7 @@ fn align1(
                     if zdrop_code > 0 {
                         // Second pass: re-align with exact z-drop (use zdrop_inv for inversions)
                         let zdrop2 = if zdrop_code == 2 { opt.zdrop_inv } else { opt.zdrop };
-                        ez = do_align(opt, qsub, &tseq_buf[..gap_tlen], mat, use_bw, zdrop2, -1, KswFlags::empty());
+                        ez = do_align(opt, qsub, &tseq_buf[..gap_tlen], mat, use_bw, zdrop2, -1, KswFlags::APPROX_MAX);
                     }
                 }
 
@@ -543,22 +561,24 @@ fn align1(
     qs1 += q_shift;
     if cigar_ops.is_empty() { return split_regs; }
 
-    // Compute stats from final alignment
+    // Compute stats from final alignment — reuse tseq_buf
     let final_tlen = (re1 - rs1).max(0) as usize;
-    let mut final_tseq = vec![0u8; final_tlen.max(1)];
+    if final_tlen > tseq_buf.len() { tseq_buf.resize(final_tlen, 0); }
     if final_tlen > 0 {
-        mi.getseq(rid, rs1 as u32, re1 as u32, &mut final_tseq[..final_tlen]);
+        mi.getseq(rid, rs1 as u32, re1 as u32, &mut tseq_buf[..final_tlen]);
     }
     let final_qseq = if qs1 >= 0 && qe1 <= qlen && qs1 < qe1 && (qe1 as usize) <= qseq.len() {
         &qseq[qs1 as usize..qe1 as usize]
     } else { &[] };
 
-    let (mlen, blen, n_ambi, dp_max) = compute_cigar_stats(&cigar_ops, final_qseq, &final_tseq[..final_tlen], mat, opt.q, opt.e);
+    let (mlen, blen, n_ambi, dp_max) = compute_cigar_stats(&cigar_ops, final_qseq, &tseq_buf[..final_tlen], mat, opt.q, opt.e);
 
     // Convert M to =/X if EQX mode requested
     if opt.flag.contains(crate::flags::MapFlags::EQX) && !final_qseq.is_empty() {
-        update_cigar_eqx(&mut cigar_ops, final_qseq, &final_tseq[..final_tlen]);
+        update_cigar_eqx(&mut cigar_ops, final_qseq, &tseq_buf[..final_tlen]);
     }
+    // Return thread-local buffers for reuse
+    ALIGN_TSEQ_BUF.with(|c| *c.borrow_mut() = tseq_buf);
 
     let extra = AlignExtra {
         dp_score,
@@ -742,8 +762,8 @@ fn compute_cigar_stats(cigar: &[u32], qseq: &[u8], tseq: &[u8], mat: &[i8], q_pe
     let mut mlen = 0i32;
     let mut blen = 0i32;
     let mut n_ambi = 0u32;
-    let mut score_cur = 0f64;
-    let mut dp_max = 0f64;
+    let mut score_cur = 0i32;
+    let mut dp_max = 0i32;
     let mut q_off = 0usize;
     let mut t_off = 0usize;
     for &c in cigar {
@@ -751,27 +771,29 @@ fn compute_cigar_stats(cigar: &[u32], qseq: &[u8], tseq: &[u8], mat: &[i8], q_pe
         let len = (c >> 4) as usize;
         match op {
             0 | 7 | 8 => {
-                for l in 0..len {
-                    if q_off + l < qseq.len() && t_off + l < tseq.len() {
-                        let qb = qseq[q_off + l];
-                        let tb = tseq[t_off + l];
-                        if qb > 3 || tb > 3 { n_ambi += 1; }
-                        else if qb == tb { mlen += 1; }
-                        score_cur += mat[(tb as usize) * 5 + qb as usize] as f64;
-                    }
-                    if score_cur < 0.0 { score_cur = 0.0; }
+                let safe_len = len.min(qseq.len().saturating_sub(q_off)).min(tseq.len().saturating_sub(t_off));
+                for l in 0..safe_len {
+                    // SAFETY: l < safe_len ensures q_off+l < qseq.len() and t_off+l < tseq.len()
+                    let (qb, tb) = unsafe {
+                        (*qseq.get_unchecked(q_off + l), *tseq.get_unchecked(t_off + l))
+                    };
+                    if qb > 3 || tb > 3 { n_ambi += 1; }
+                    else if qb == tb { mlen += 1; }
+                    // SAFETY: tb < 5, qb < 5 (encoded bases), so tb*5+qb < 25 <= mat.len()
+                    score_cur += unsafe { *mat.get_unchecked(tb as usize * 5 + qb as usize) } as i32;
+                    if score_cur < 0 { score_cur = 0; }
                     if score_cur > dp_max { dp_max = score_cur; }
                 }
                 blen += len as i32;
                 q_off += len; t_off += len;
             }
-            1 => { blen += len as i32; score_cur -= q_pen as f64 + e_pen as f64; if score_cur < 0.0 { score_cur = 0.0; } q_off += len; }
-            2 => { blen += len as i32; score_cur -= q_pen as f64 + e_pen as f64; if score_cur < 0.0 { score_cur = 0.0; } t_off += len; }
+            1 => { blen += len as i32; score_cur -= q_pen + e_pen; if score_cur < 0 { score_cur = 0; } q_off += len; }
+            2 => { blen += len as i32; score_cur -= q_pen + e_pen; if score_cur < 0 { score_cur = 0; } t_off += len; }
             3 => { t_off += len; } // N_SKIP
             _ => { q_off += len; t_off += len; }
         }
     }
-    (mlen, blen, n_ambi, dp_max as i32)
+    (mlen, blen, n_ambi, dp_max)
 }
 
 /// Perform DP alignment for all regions.
@@ -789,13 +811,16 @@ pub fn align_skeleton(
         return;
     }
 
-    // Encode query (forward and reverse complement)
-    let mut qseq_fwd = vec![0u8; qlen as usize];
-    let mut qseq_rev = vec![0u8; qlen as usize];
-    for i in 0..qlen as usize {
-        qseq_fwd[i] = SEQ_NT4_TABLE[qstr[i] as usize];
-        let c = qseq_fwd[i];
-        qseq_rev[qlen as usize - 1 - i] = if c < 4 { 3 - c } else { 4 };
+    // Encode query (forward and reverse complement) using thread-local buffers
+    let mut qseq_fwd = ALIGN_QSEQ_FWD.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    let mut qseq_rev = ALIGN_QSEQ_REV.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    let ql = qlen as usize;
+    qseq_fwd.clear(); qseq_fwd.resize(ql, 0);
+    qseq_rev.clear(); qseq_rev.resize(ql, 0);
+    for i in 0..ql {
+        let c = unsafe { *SEQ_NT4_TABLE.get_unchecked(*qstr.get_unchecked(i) as usize) };
+        qseq_fwd[i] = c;
+        qseq_rev[ql - 1 - i] = if c < 4 { 3 - c } else { 4 };
     }
 
     // Generate scoring matrix
@@ -847,6 +872,9 @@ pub fn align_skeleton(
         crate::hit::filter_regs(opt, qlen, regs);
     }
     crate::hit::hit_sort(regs, opt.alt_drop);
+    // Return thread-local buffers
+    ALIGN_QSEQ_FWD.with(|c| *c.borrow_mut() = qseq_fwd);
+    ALIGN_QSEQ_REV.with(|c| *c.borrow_mut() = qseq_rev);
 }
 
 #[cfg(test)]
