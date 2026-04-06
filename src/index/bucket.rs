@@ -48,13 +48,9 @@ impl IdxBucket {
         // Count distinct keys and total positions (singletons + multi-hit all go into p)
         let n = self.build_buf.len();
         let mut n_keys = 0u32;
-        let mut run_len = 1usize;
         for j in 1..=n {
             if j == n || self.build_buf[j].x >> 8 != self.build_buf[j - 1].x >> 8 {
                 n_keys += 1;
-                run_len = 1;
-            } else {
-                run_len += 1;
             }
         }
 
@@ -64,7 +60,7 @@ impl IdxBucket {
 
         let mut start_a = 0usize;
         let mut start_p = 0usize;
-        run_len = 1;
+        let mut run_len = 1usize;
         for j in 1..=n {
             if j == n || self.build_buf[j].x >> 8 != self.build_buf[j - 1].x >> 8 {
                 let last = &self.build_buf[j - 1];

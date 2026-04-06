@@ -772,7 +772,7 @@ unsafe fn extd2_sse2(
 unsafe fn score_track_tail(
     h_arr: &mut [i32], v8p: *const i8, hp: *mut i32,
     st0: i32, en0: i32, r: i32, qlen: i32, tlen: i32,
-    qe: i32, e2: i8, zdrop: i32, ez: &mut KswResult,
+    _qe: i32, e2: i8, zdrop: i32, ez: &mut KswResult,
     mut max_h: i32, mut max_t: i32, tail_start: i32,
 ) -> bool {
     for t in tail_start..en0 {

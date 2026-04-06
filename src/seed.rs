@@ -75,7 +75,6 @@ pub fn seed_mz_flt(mv: &mut Vec<Mm128>, q_occ_max: i32, q_occ_frac: f32) {
 fn seed_collect_all(mi: &MmIdx, mv: &[Mm128]) -> Vec<Seed> {
     let mut seeds = Vec::with_capacity(mv.len());
     let mask = (1u64 << mi.bucket_bits) - 1;
-    let n = mv.len();
     for (i, p) in mv.iter().enumerate() {
         let q_pos = p.y as u32;
         let q_span = (p.x & 0xff) as u32;
