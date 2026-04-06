@@ -172,7 +172,47 @@ struct Cli {
     max_occ: i32,
 }
 
+/// Check that the CPU supports the instruction set this binary was compiled for.
+/// With `-C target-cpu=native`, the compiler may emit AVX2/AVX-512 instructions
+/// in non-SIMD code. Without this check, the binary would SIGILL on older CPUs.
+fn check_cpu_features() {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let mut missing = Vec::new();
+        // Check features that target-cpu=native may have enabled.
+        // These are the common ones for Skylake+ (the build machine).
+        if cfg!(target_feature = "avx2") && !is_x86_feature_detected!("avx2") {
+            missing.push("AVX2");
+        }
+        if cfg!(target_feature = "avx") && !is_x86_feature_detected!("avx") {
+            missing.push("AVX");
+        }
+        if cfg!(target_feature = "sse4.2") && !is_x86_feature_detected!("sse4.2") {
+            missing.push("SSE4.2");
+        }
+        if cfg!(target_feature = "sse4.1") && !is_x86_feature_detected!("sse4.1") {
+            missing.push("SSE4.1");
+        }
+        if cfg!(target_feature = "bmi2") && !is_x86_feature_detected!("bmi2") {
+            missing.push("BMI2");
+        }
+        if cfg!(target_feature = "fma") && !is_x86_feature_detected!("fma") {
+            missing.push("FMA");
+        }
+        if !missing.is_empty() {
+            eprintln!("ERROR: This binary was compiled for a CPU with {} support,", missing.join(", "));
+            eprintln!("but this CPU does not support: {}", missing.join(", "));
+            eprintln!();
+            eprintln!("Rebuild without -C target-cpu=native for a portable binary:");
+            eprintln!("  Remove .cargo/config.toml or set rustflags = []");
+            eprintln!("  Then: cargo build --release");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn main() {
+    check_cpu_features();
     env_logger::init();
     let t_start = std::time::Instant::now();
     let cli = Cli::parse();

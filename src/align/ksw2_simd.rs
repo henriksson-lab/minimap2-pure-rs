@@ -28,6 +28,11 @@ pub fn has_sse41() -> bool {
     is_x86_feature_detected!("sse4.1")
 }
 
+#[cfg(target_arch = "x86_64")]
+pub fn has_avx2() -> bool {
+    is_x86_feature_detected!("avx2")
+}
+
 /// Faithful translation of ksw_extz2_sse2() from ksw2_extz2_sse.c.
 /// Uses rotated-band DP with SSE2 16-way byte parallelism.
 #[cfg(target_arch = "x86_64")]
@@ -762,11 +767,36 @@ unsafe fn extd2_sse2(
     ez
 }
 
-/// Score tracking for exact-max mode. Extracted to reduce register pressure in the SIMD inner loop.
+/// Score tracking — shared tail (zdrop check, boundary updates).
+#[inline(always)]
+unsafe fn score_track_tail(
+    h_arr: &mut [i32], v8p: *const i8, hp: *mut i32,
+    st0: i32, en0: i32, r: i32, qlen: i32, tlen: i32,
+    qe: i32, e2: i8, zdrop: i32, ez: &mut KswResult,
+    mut max_h: i32, mut max_t: i32, tail_start: i32,
+) -> bool {
+    for t in tail_start..en0 {
+        *hp.add(t as usize) += *v8p.add(t as usize) as i32;
+        if *hp.add(t as usize) > max_h { max_h = *hp.add(t as usize); max_t = t; }
+    }
+    if en0 == tlen-1 && h_arr[en0 as usize] > ez.mte { ez.mte = h_arr[en0 as usize]; ez.mte_q = r - en0; }
+    if r - st0 == qlen-1 && h_arr[st0 as usize] > ez.mqe { ez.mqe = h_arr[st0 as usize]; ez.mqe_t = st0; }
+    if zdrop >= 0 {
+        if max_h > ez.max as i32 { ez.max = max_h; ez.max_t = max_t; ez.max_q = r - max_t; }
+        else if max_t >= ez.max_t && r - max_t >= ez.max_q {
+            let l = ((max_t - ez.max_t) - ((r - max_t) - ez.max_q)).abs();
+            if ez.max - max_h > zdrop + l * e2 as i32 { ez.zdropped = true; return true; }
+        }
+    }
+    if r == qlen+tlen-2 && en0 == tlen-1 { ez.score = h_arr[(tlen-1) as usize]; }
+    false
+}
+
+/// Score tracking — AVX2 path (8 i32 per iteration).
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "sse2,avx2")]
 #[inline(never)]
-unsafe fn score_track_exact(
+unsafe fn score_track_exact_avx2(
     h_arr: &mut [i32], u: *const u8, v: *const u8,
     st0: i32, en0: i32, r: i32, qlen: i32, tlen: i32,
     qe: i32, e2: i8, zdrop: i32, ez: &mut KswResult,
@@ -775,11 +805,9 @@ unsafe fn score_track_exact(
     let v8p = v as *const i8;
     let hp = h_arr.as_mut_ptr();
     if r > 0 {
-        let mut max_h: i32;
         if en0 > 0 { *hp.add(en0 as usize) = *hp.add((en0-1) as usize) + *u8p.add(en0 as usize) as i32; }
         else { *hp.add(en0 as usize) = *hp.add(en0 as usize) + *v8p.add(en0 as usize) as i32; }
-        max_h = *hp.add(en0 as usize); let mut max_t = en0;
-        // AVX2-vectorized H-tracking: 8 i32 values per iteration using vpmovsxbd
+        let mut max_h = *hp.add(en0 as usize); let mut max_t = en0;
         use std::arch::x86_64::{__m256i, _mm256_loadu_si256, _mm256_storeu_si256,
             _mm256_add_epi32, _mm256_cmpgt_epi32, _mm256_set1_epi32,
             _mm256_or_si256, _mm256_and_si256, _mm256_andnot_si256, _mm256_cvtepi8_epi32};
@@ -790,7 +818,6 @@ unsafe fn score_track_exact(
             let mut t = st0;
             while t < en1 {
                 let tu = t as usize;
-                // Load 8 signed bytes from v and sign-extend to 8 i32s
                 let vv = _mm256_cvtepi8_epi32(_mm_loadl_epi64(v8p.add(tu) as *const __m128i));
                 let mut h1 = _mm256_loadu_si256(hp.add(tu) as *const __m256i);
                 h1 = _mm256_add_epi32(h1, vv);
@@ -806,26 +833,63 @@ unsafe fn score_track_exact(
         _mm256_storeu_si256(hh.as_mut_ptr() as *mut __m256i, max_h_v);
         _mm256_storeu_si256(tt.as_mut_ptr() as *mut __m256i, max_t_v);
         for i in 0..8 { if max_h < hh[i] { max_h = hh[i]; max_t = tt[i] + i as i32; } }
-        for t in en1..en0 {
-            *hp.add(t as usize) += *v8p.add(t as usize) as i32;
-            if *hp.add(t as usize) > max_h { max_h = *hp.add(t as usize); max_t = t; }
-        }
-        if en0 == tlen-1 && h_arr[en0 as usize] > ez.mte { ez.mte = h_arr[en0 as usize]; ez.mte_q = r - en0; }
-        if r - st0 == qlen-1 && h_arr[st0 as usize] > ez.mqe { ez.mqe = h_arr[st0 as usize]; ez.mqe_t = st0; }
-        if zdrop >= 0 {
-            if max_h > ez.max as i32 { ez.max = max_h; ez.max_t = max_t; ez.max_q = r - max_t; }
-            else if max_t >= ez.max_t && r - max_t >= ez.max_q {
-                let l = ((max_t - ez.max_t) - ((r - max_t) - ez.max_q)).abs();
-                if ez.max - max_h > zdrop + l * e2 as i32 { ez.zdropped = true; return true; }
-            }
-        }
-        if r == qlen+tlen-2 && en0 == tlen-1 { ez.score = h_arr[(tlen-1) as usize]; }
+        score_track_tail(h_arr, v8p, hp, st0, en0, r, qlen, tlen, qe, e2, zdrop, ez, max_h, max_t, en1)
     } else {
         h_arr[0] = *v8p as i32 - qe;
         if en0 == tlen-1 { ez.mte = h_arr[0]; ez.mte_q = 0; }
         if qlen == 1 { ez.mqe = h_arr[0]; ez.mqe_t = 0; }
+        false
     }
-    false // not zdropped
+}
+
+/// Score tracking — SSE2 path (4 i32 per iteration). Works on any x86_64.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+#[inline(never)]
+unsafe fn score_track_exact_sse2(
+    h_arr: &mut [i32], u: *const u8, v: *const u8,
+    st0: i32, en0: i32, r: i32, qlen: i32, tlen: i32,
+    qe: i32, e2: i8, zdrop: i32, ez: &mut KswResult,
+) -> bool {
+    let u8p = u as *const i8;
+    let v8p = v as *const i8;
+    let hp = h_arr.as_mut_ptr();
+    if r > 0 {
+        if en0 > 0 { *hp.add(en0 as usize) = *hp.add((en0-1) as usize) + *u8p.add(en0 as usize) as i32; }
+        else { *hp.add(en0 as usize) = *hp.add(en0 as usize) + *v8p.add(en0 as usize) as i32; }
+        let mut max_h = *hp.add(en0 as usize); let mut max_t = en0;
+        let en1 = st0 + (en0 - st0) / 4 * 4;
+        let mut max_h_v = _mm_set1_epi32(max_h);
+        let mut max_t_v = _mm_set1_epi32(max_t);
+        {
+            let mut t = st0;
+            while t < en1 {
+                let tu = t as usize;
+                let vv = _mm_setr_epi32(
+                    *v8p.add(tu) as i32, *v8p.add(tu+1) as i32,
+                    *v8p.add(tu+2) as i32, *v8p.add(tu+3) as i32,
+                );
+                let mut h1 = _mm_loadu_si128(hp.add(tu) as *const __m128i);
+                h1 = _mm_add_epi32(h1, vv);
+                _mm_storeu_si128(hp.add(tu) as *mut __m128i, h1);
+                let tv = _mm_set1_epi32(t);
+                let cmp = _mm_cmpgt_epi32(h1, max_h_v);
+                max_h_v = _mm_or_si128(_mm_and_si128(cmp, h1), _mm_andnot_si128(cmp, max_h_v));
+                max_t_v = _mm_or_si128(_mm_and_si128(cmp, tv), _mm_andnot_si128(cmp, max_t_v));
+                t += 4;
+            }
+        }
+        let mut hh = [0i32; 4]; let mut tt = [0i32; 4];
+        _mm_storeu_si128(hh.as_mut_ptr() as *mut __m128i, max_h_v);
+        _mm_storeu_si128(tt.as_mut_ptr() as *mut __m128i, max_t_v);
+        for i in 0..4 { if max_h < hh[i] { max_h = hh[i]; max_t = tt[i] + i as i32; } }
+        score_track_tail(h_arr, v8p, hp, st0, en0, r, qlen, tlen, qe, e2, zdrop, ez, max_h, max_t, en1)
+    } else {
+        h_arr[0] = *v8p as i32 - qe;
+        if en0 == tlen-1 { ez.mte = h_arr[0]; ez.mte_q = 0; }
+        if qlen == 1 { ez.mqe = h_arr[0]; ez.mqe_t = 0; }
+        false
+    }
 }
 
 /// SSE4.1-accelerated dual affine gap penalty kernel.
@@ -834,8 +898,10 @@ unsafe fn score_track_exact(
 /// Const-generic WITH_CIGAR parameter allows the compiler to fully specialize
 /// and eliminate dead code for each path, reducing code size and register pressure.
 #[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "sse4.1,avx2")]
-unsafe fn extd2_sse41<const WITH_CIGAR: bool>(
+/// Inner implementation — target_feature set by the wrapper.
+/// HAS_AVX2 controls whether AVX2 score tracking is used.
+#[inline(always)]
+unsafe fn extd2_sse41_inner<const WITH_CIGAR: bool, const HAS_AVX2: bool>(
     query: &[u8], target: &[u8], m: i8, mat: &[i8],
     mut q: i8, mut e: i8, mut q2: i8, mut e2: i8,
     w: i32, zdrop: i32, end_bonus: i32, flag: KswFlags,
@@ -1085,7 +1151,12 @@ unsafe fn extd2_sse41<const WITH_CIGAR: bool>(
 
         // Score tracking
         if !approx_max {
-            if score_track_exact(h_arr, u.as_ptr(), v.as_ptr(), st0, en0, r, qlen, tlen, qe, e2, zdrop, &mut ez) {
+            let zdropped = if HAS_AVX2 {
+                score_track_exact_avx2(h_arr, u.as_ptr(), v.as_ptr(), st0, en0, r, qlen, tlen, qe, e2, zdrop, &mut ez)
+            } else {
+                score_track_exact_sse2(h_arr, u.as_ptr(), v.as_ptr(), st0, en0, r, qlen, tlen, qe, e2, zdrop, &mut ez)
+            };
+            if zdropped {
                 break; // zdropped
             }
         } else {
@@ -1171,6 +1242,28 @@ unsafe fn extd2_sse41<const WITH_CIGAR: bool>(
     ez
 }
 
+/// SSE4.1+AVX2 entry point — VEX-encoded instructions, no false deps, AVX2 score tracking.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.1,avx2")]
+unsafe fn extd2_sse41_avx2<const WITH_CIGAR: bool>(
+    query: &[u8], target: &[u8], m: i8, mat: &[i8],
+    q: i8, e: i8, q2: i8, e2: i8,
+    w: i32, zdrop: i32, end_bonus: i32, flag: KswFlags,
+) -> KswResult {
+    extd2_sse41_inner::<WITH_CIGAR, true>(query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag)
+}
+
+/// SSE4.1-only entry point — works on any CPU with SSE4.1.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse4.1")]
+unsafe fn extd2_sse41_only<const WITH_CIGAR: bool>(
+    query: &[u8], target: &[u8], m: i8, mat: &[i8],
+    q: i8, e: i8, q2: i8, e2: i8,
+    w: i32, zdrop: i32, end_bonus: i32, flag: KswFlags,
+) -> KswResult {
+    extd2_sse41_inner::<WITH_CIGAR, false>(query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag)
+}
+
 /// Recompute ez.score/mqe/mte from CIGAR by walking the alignment.
 /// This fixes the H-score tracking offset in the SIMD kernels.
 fn fixup_score_from_cigar(
@@ -1254,11 +1347,17 @@ pub fn ksw_extd2_dispatch(
     #[cfg(target_arch = "x86_64")]
     {
         let with_cigar = !flag.contains(KswFlags::SCORE_ONLY);
-        let mut ez = if has_sse41() {
+        let mut ez = if has_avx2() && has_sse41() {
             if with_cigar {
-                unsafe { extd2_sse41::<true>(query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag) }
+                unsafe { extd2_sse41_avx2::<true>(query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag) }
             } else {
-                unsafe { extd2_sse41::<false>(query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag) }
+                unsafe { extd2_sse41_avx2::<false>(query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag) }
+            }
+        } else if has_sse41() {
+            if with_cigar {
+                unsafe { extd2_sse41_only::<true>(query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag) }
+            } else {
+                unsafe { extd2_sse41_only::<false>(query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag) }
             }
         } else if has_sse2() {
             unsafe { extd2_sse2(query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag) }
