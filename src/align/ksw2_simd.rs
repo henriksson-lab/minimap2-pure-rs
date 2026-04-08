@@ -892,14 +892,12 @@ unsafe fn score_track_exact_sse2(
     }
 }
 
-/// SSE4.1-accelerated dual affine gap penalty kernel.
+/// SSE4.1-accelerated dual affine gap penalty kernel (inner implementation).
 /// Same algorithm as extd2_sse2 but uses _mm_max_epi8, _mm_min_epi8, _mm_blendv_epi8
 /// instead of multi-instruction SSE2 emulation sequences.
-/// Const-generic WITH_CIGAR parameter allows the compiler to fully specialize
-/// and eliminate dead code for each path, reducing code size and register pressure.
+/// Const-generic WITH_CIGAR eliminates dead code per path; HAS_AVX2 selects
+/// AVX2 vs SSE2 score tracking. target_feature is set by the wrapper.
 #[cfg(target_arch = "x86_64")]
-/// Inner implementation — target_feature set by the wrapper.
-/// HAS_AVX2 controls whether AVX2 score tracking is used.
 #[inline(always)]
 unsafe fn extd2_sse41_inner<const WITH_CIGAR: bool, const HAS_AVX2: bool>(
     query: &[u8], target: &[u8], m: i8, mat: &[i8],

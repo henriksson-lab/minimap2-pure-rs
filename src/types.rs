@@ -232,7 +232,7 @@ pub struct KswResult {
 }
 
 /// Constants
-pub const MM_VERSION: &str = "0.3.0";
+pub const MM_VERSION: &str = "2.30-rs";
 pub const MM_IDX_MAGIC: &[u8; 4] = b"MMI\x02";
 pub const MM_MAX_SEG: usize = 255;
 pub const PARENT_UNSET: i32 = -1;
