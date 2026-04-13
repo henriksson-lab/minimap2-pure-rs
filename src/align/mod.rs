@@ -310,17 +310,100 @@ fn fix_bad_ends(as1: usize, cnt1: usize, a: &[Mm128], bw: i32, min_match: i32, m
 }
 
 /// Filter bad seeds: mark seeds with large gaps for ignoring.
-/// Simplified version of mm_filter_bad_seeds() from align.c.
-fn filter_bad_seeds(as1: usize, cnt1: usize, a: &mut [Mm128], min_gap: i32, max_ext_len: i32) {
-    if cnt1 < 3 { return; }
-    // Find seeds with large diagonal gaps
+/// Collect indices of seeds with large diagonal gaps. Matches collect_long_gaps() from align.c.
+fn collect_long_gaps(as1: usize, cnt1: usize, a: &[Mm128], min_gap: i32) -> Vec<usize> {
+    let mut k = Vec::new();
     for i in 1..cnt1 {
         let gap = ((a[as1 + i].y as i32) - (a[as1 + i - 1].y as i32))
                 - ((a[as1 + i].x as i32) - (a[as1 + i - 1].x as i32));
-        if (gap > min_gap || gap < -min_gap) && (gap > max_ext_len || gap < -max_ext_len) {
-            // Mark for long join — the gap-filling will use wider bandwidth
-            a[as1 + i].y |= crate::flags::SEED_LONG_JOIN;
+        if gap < -min_gap || gap > min_gap { k.push(i); }  // strictly greater, matching C
+    }
+    if k.len() <= 1 { return Vec::new(); }  // C returns 0 (null) when n <= 1
+    k
+}
+
+/// Filter bad seeds by finding clusters of large-gap seeds. Matches mm_filter_bad_seeds() from align.c.
+fn filter_bad_seeds(as1: usize, cnt1: usize, a: &mut [Mm128], min_gap: i32, diff_thres: i32, max_ext_len: i32, max_ext_cnt: usize) {
+    let k = collect_long_gaps(as1, cnt1, a, min_gap);
+    if k.is_empty() { return; }
+    let n = k.len();
+    let mut max_diff_val = 0i32;
+    let mut max_st: i32 = -1;
+    let mut max_en: i32 = -1;
+    let mut ki = 0;
+    loop {
+        if ki == n || ki as i32 >= max_en {
+            if max_en > 0 {
+                let start = k[max_st as usize];
+                let end = k[max_en as usize];
+                for i in start..end { a[as1 + i].y |= crate::flags::SEED_IGNORE; }
+            }
+            max_diff_val = 0; max_st = -1; max_en = -1;
+            if ki == n { break; }
         }
+        let i = k[ki];
+        let gap = ((a[as1 + i].y as i32) - (a[as1 + i - 1].y as i32))
+                - ((a[as1 + i].x as i32) - (a[as1 + i - 1].x as i32));
+        let mut n_ins = if gap > 0 { gap } else { 0 };
+        let mut n_del = if gap < 0 { -gap } else { 0 };
+        let qs = a[as1 + i - 1].y as i32;
+        let rs = a[as1 + i - 1].x as i32;
+        let mut cur_max_diff = 0i32;
+        let mut cur_max_diff_l: i32 = -1;
+        for l in (ki + 1)..n.min(ki + 1 + max_ext_cnt) {
+            let j = k[l];
+            if (a[as1 + j].y as i32) - qs > max_ext_len || (a[as1 + j].x as i32) - rs > max_ext_len { break; }
+            let gap2 = ((a[as1 + j].y as i32) - (a[as1 + j - 1].y as i32))
+                     - ((a[as1 + j].x as i32) - (a[as1 + j - 1].x as i32));
+            if gap2 > 0 { n_ins += gap2; } else { n_del += -gap2; }
+            let diff = n_ins + n_del - (n_ins - n_del).abs();
+            if cur_max_diff < diff { cur_max_diff = diff; cur_max_diff_l = l as i32; }
+        }
+        if cur_max_diff > diff_thres && cur_max_diff > max_diff_val {
+            max_diff_val = cur_max_diff; max_st = ki as i32; max_en = cur_max_diff_l;
+        }
+        ki += 1;
+    }
+}
+
+/// Filter bad seeds — alternate version. Matches mm_filter_bad_seeds_alt() from align.c.
+/// Finds chains of consecutive close gaps and marks intermediate seeds as SEED_IGNORE,
+/// end seeds as SEED_LONG_JOIN.
+fn filter_bad_seeds_alt(as1: usize, cnt1: usize, a: &mut [Mm128], min_gap: i32, max_ext: i32) {
+    let k = collect_long_gaps(as1, cnt1, a, min_gap);
+    if k.is_empty() { return; }
+    let n = k.len();
+    let mut ki = 0;
+    while ki < n {
+        let i = k[ki];
+        let gap1 = ((a[as1 + i].y as i32) - (a[as1 + i - 1].y as i32))
+                 - ((a[as1 + i].x as i32) - (a[as1 + i - 1].x as i32));
+        let mut re1 = a[as1 + i].x as i32;
+        let mut qe1 = a[as1 + i].y as i32;
+        let mut gap1_abs = gap1.abs();
+        let mut l = ki + 1;
+        while l < n {
+            let j = k[l];
+            if (a[as1 + j].y as i32) - qe1 > max_ext || (a[as1 + j].x as i32) - re1 > max_ext { break; }
+            let gap2 = ((a[as1 + j].y as i32) - (a[as1 + j - 1].y as i32))
+                     - ((a[as1 + j].x as i32) - (a[as1 + j - 1].x as i32));
+            let q_span_pre = ((a[as1 + j - 1].y >> 32) & 0xff) as i32;
+            let rs2 = (a[as1 + j - 1].x as i32) + q_span_pre;
+            let qs2 = (a[as1 + j - 1].y as i32) + q_span_pre;
+            let m = (rs2 - re1).min(qs2 - qe1);
+            let gap2_abs = gap2.abs();
+            if m > gap1_abs + gap2_abs { break; }
+            re1 = a[as1 + j].x as i32;
+            qe1 = a[as1 + j].y as i32;
+            gap1_abs = gap2_abs;
+            l += 1;
+        }
+        if l > ki + 1 {
+            let end = k[l - 1];
+            for j in k[ki]..end { a[as1 + j].y |= crate::flags::SEED_IGNORE; }
+            a[as1 + end].y |= crate::flags::SEED_LONG_JOIN;
+        }
+        ki = l;
     }
 }
 
@@ -348,7 +431,8 @@ fn align1(
     let raw_cnt = r.cnt as usize;
 
     // Filter bad seeds and trim bad ends
-    filter_bad_seeds(raw_as, raw_cnt, a, 10, opt.max_gap >> 1);
+    filter_bad_seeds(raw_as, raw_cnt, a, 10, 40, opt.max_gap >> 1, 10);
+    filter_bad_seeds_alt(raw_as, raw_cnt, a, 30, opt.max_gap >> 1);
     let (as1, cnt1) = if !(opt.flag.contains(crate::flags::MapFlags::NO_END_FLT)) {
         fix_bad_ends(raw_as, raw_cnt, a, opt.bw, opt.min_chain_score * 2, r.mlen)
     } else {
@@ -445,16 +529,8 @@ fn align1(
             continue;
         }
         // Compute next anchor position using mm_adjust_minier logic
-        let (next_re, next_qe) = if is_hpc {
-            adjust_minier(ai, k_half, true)
-        } else {
-            // For the last anchor or if LONG_JOIN, use end position; otherwise use k-midpoint
-            if i == cnt1 - 1 {
-                ((ai.x as i32) + 1, (ai.y as i32) + 1)
-            } else {
-                adjust_minier(ai, k_half, false)
-            }
-        };
+        // C calls mm_adjust_minier for ALL anchors including the last.
+        let (next_re, next_qe) = adjust_minier(ai, k_half, is_hpc);
 
         // Check if gap is large enough to align, or if it's the last anchor, or LONG_JOIN
         let has_long_join = ai.y & crate::flags::SEED_LONG_JOIN != 0;
@@ -469,14 +545,12 @@ fn align1(
                 && (next_qe as usize) <= qseq.len()
                 && cur_rs < ref_len && next_re <= ref_len
             {
-                // Use wider bandwidth for LONG_JOIN gaps
+                // Bandwidth: bw_long for all gaps; for LONG_JOIN, use max(gap_q, gap_t)
+                // Matches C: bw1 = bw_long, then overridden for LONG_JOIN
                 let use_bw = if has_long_join {
-                    let gap_diff = (gap_tlen as i32 - gap_qlen as i32).unsigned_abs() as i32;
-                    gap_diff.max(bw_long)
-                } else if gap_tlen > bw as usize * 2 || gap_qlen > bw as usize * 2 {
-                    bw_long
+                    (gap_tlen as i32).max(gap_qlen as i32).max(bw_long)
                 } else {
-                    bw
+                    bw_long
                 };
                 if gap_tlen > tseq_buf.len() { tseq_buf.resize(gap_tlen, 0); }
                 mi.getseq(rid, cur_rs as u32, next_re as u32, &mut tseq_buf[..gap_tlen]);
@@ -487,15 +561,41 @@ fn align1(
                 // Test z-drop and potential inversion
                 if !ez.cigar.is_empty() && !ez.zdropped {
                     let zdrop_code = test_zdrop(opt, qsub, &tseq_buf[..gap_tlen], &ez.cigar, mat);
+                    // Debug: dump test_zdrop results for long gap-fills
+                    if gap_tlen > 1000 && zdrop_code > 0 {
+                        use std::sync::atomic::{AtomicU32, Ordering};
+                        static CNT: AtomicU32 = AtomicU32::new(0);
+                        let c = CNT.fetch_add(1, Ordering::Relaxed);
+                        if c < 5 {
+                            eprintln!("TEST_ZDROP: gap_tlen={} gap_qlen={} zdrop_code={} first_pass_cigar={}",
+                                gap_tlen, gap_qlen, zdrop_code, crate::align::cigar_to_string(&ez.cigar));
+                        }
+                    }
                     if zdrop_code > 0 {
                         // Second pass: re-align with exact z-drop (use zdrop_inv for inversions)
+                        // Note: APPROX_MAX is intentionally NOT set here (matching C's "lift approximate")
+                        // so the exact H-tracking path is used, which enables proper z-drop detection.
                         let zdrop2 = if zdrop_code == 2 { opt.zdrop_inv } else { opt.zdrop };
-                        ez = do_align(opt, qsub, &tseq_buf[..gap_tlen], mat, use_bw, zdrop2, -1, KswFlags::APPROX_MAX);
+                        ez = do_align(opt, qsub, &tseq_buf[..gap_tlen], mat, use_bw, zdrop2, -1, KswFlags::empty());
                     }
                 }
 
                 log::debug!("  gap i={} cur_rs={} next_re={} cur_qs={} next_qe={} tlen={} qlen={} bw={} score={} zdropped={}",
                     i, cur_rs, next_re, cur_qs, next_qe, gap_tlen, gap_qlen, use_bw, ez.score, ez.zdropped);
+                // Dump z-dropped gap-fill input sequences for debugging
+                if ez.zdropped && gap_tlen > 500 && gap_tlen < 5000 {
+                    use std::sync::atomic::{AtomicBool, Ordering};
+                    static DUMPED: AtomicBool = AtomicBool::new(false);
+                    if !DUMPED.swap(true, Ordering::Relaxed) {
+                        // Write sequences to files for test reproduction
+                        let _ = std::fs::write("/tmp/zdrop_query.bin", &qseq[cur_qs as usize..next_qe as usize]);
+                        let _ = std::fs::write("/tmp/zdrop_target.bin", &tseq_buf[..gap_tlen]);
+                        eprintln!("ZDROP_DUMP: qlen={} tlen={} bw={} zdrop={} q={} e={} q2={} e2={} max_t={} max_q={} score={} cigar={}",
+                            gap_qlen, gap_tlen, use_bw, opt.zdrop, opt.q, opt.e, opt.q2, opt.e2,
+                            ez.max_t, ez.max_q, ez.score, crate::align::cigar_to_string(&ez.cigar));
+                    }
+                }
+                // Debug: dump last 3 gap-fills for first alignment
                 if ez.zdropped {
                         dp_score += ez.max;
                     dropped = true;
@@ -831,17 +931,21 @@ pub fn align_skeleton(
         score::gen_simple_mat(5, &mut mat, opt.a, opt.b, opt.sc_ambi);
     }
 
-    // Align each region, collecting any split regions
+    // Align each region, collecting any split regions.
+    // Like C's mm_align_skeleton, split regions are inserted back into the work queue
+    // so they can be further split (cascading z-drop splits).
+    let mut work: Vec<AlignReg> = regs.drain(..).collect();
     let mut new_regs: Vec<AlignReg> = Vec::new();
-    let n = regs.len();
-    for i in 0..n {
-        let mut r = regs[i].clone();
+    let mut wi = 0;
+    while wi < work.len() {
+        let mut r = work[wi].clone();
         let splits = align1(opt, mi, qlen, &qseq_fwd, &qseq_rev, &mut r, &mut *a, &mat);
         new_regs.push(r);
-        for mut sr in splits {
-            let _ = align1(opt, mi, qlen, &qseq_fwd, &qseq_rev, &mut sr, &mut *a, &mat);
-            new_regs.push(sr);
+        // Insert splits right after current position so they're processed next
+        for (j, sr) in splits.into_iter().enumerate() {
+            work.insert(wi + 1 + j, sr);
         }
+        wi += 1;
     }
 
     // Try inversion realignment between consecutive split regions

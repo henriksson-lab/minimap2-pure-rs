@@ -257,8 +257,8 @@ pub fn ksw_extz2(
             }
         }
 
-        // Z-drop
-        if zdrop >= 0 && row_max > KSW_NEG_INF / 2 {
+        // Z-drop: skip for APPROX_MAX
+        if zdrop >= 0 && !flag.contains(KswFlags::APPROX_MAX) && row_max > KSW_NEG_INF / 2 {
             if apply_zdrop(&mut ez, row_max, i, row_max_j as i32, zdrop, e) {
                 break;
             }
@@ -268,48 +268,30 @@ pub fn ksw_extz2(
         h_cur[j_st..j_en].fill(KSW_NEG_INF);
     }
 
-    // Compute final score
-    if qlen > 0 && tlen > 0 {
-        {
-            // Use mqe and mte to determine score
-            let mut score = KSW_NEG_INF;
-            if ez.mqe > KSW_NEG_INF / 2 && ez.mqe_t == tlen - 1 {
-                score = ez.mqe;
-            }
-            if ez.mte > KSW_NEG_INF / 2 && ez.mte_q == qlen - 1 && ez.mte > score {
-                score = ez.mte;
-            }
-            ez.score = score;
-            if score > KSW_NEG_INF / 2 {
-                ez.reach_end = true;
-            }
-        }
+    // Compute final score for full alignment (non-extension)
+    if !is_extz && qlen > 0 && tlen > 0 {
+        if ez.mqe > KSW_NEG_INF / 2 && ez.mqe_t == tlen - 1 { ez.score = ez.mqe; }
+        else if ez.mte > KSW_NEG_INF / 2 && ez.mte_q == qlen - 1 { ez.score = ez.mte; }
     }
 
     // Add end bonus
     if end_bonus > 0 {
-        if ez.mqe != KSW_NEG_INF {
-            ez.mqe += end_bonus;
-        }
-        if ez.mte != KSW_NEG_INF {
-            ez.mte += end_bonus;
-        }
-        if ez.score != KSW_NEG_INF {
-            ez.score += end_bonus;
-        }
+        if ez.mqe != KSW_NEG_INF { ez.mqe += end_bonus; }
+        if ez.mte != KSW_NEG_INF { ez.mte += end_bonus; }
     }
 
-    // Backtrack to generate CIGAR
-    if with_cigar && !ez.zdropped {
-        let (end_i, end_j) = if ez.score > KSW_NEG_INF / 2 {
-            if ez.mte_q == qlen - 1 && ez.mte >= ez.mqe {
-                (ez.mte_q, tlen - 1)
-            } else {
-                (qlen - 1, ez.mqe_t)
-            }
+    // Backtrace start — generate CIGAR even for zdropped
+    if with_cigar {
+        let (end_i, end_j) = if !ez.zdropped && !is_extz {
+            ez.reach_end = ez.score > KSW_NEG_INF / 2;
+            (qlen - 1, tlen - 1)
+        } else if !ez.zdropped && is_extz && ez.mqe + end_bonus > ez.max {
+            ez.reach_end = true;
+            (qlen - 1, ez.mqe_t)
+        } else if ez.max_t >= 0 && ez.max_q >= 0 {
+            (ez.max_t.max(0), ez.max_q.max(0))
         } else {
-            // Use max position
-            (ez.max_q.max(0), ez.max_t.max(0))
+            (-1, -1)
         };
 
         if end_i >= 0 && end_j >= 0 {
@@ -335,16 +317,17 @@ pub fn ksw_extz2(
                 }
 
                 match state {
-                    0 => { push_cigar_fn(&mut cigar, 0, 1); i -= 1; j -= 1; }  // M
-                    1 => { push_cigar_fn(&mut cigar, 2, 1); i -= 1; }          // D
-                    _ => { push_cigar_fn(&mut cigar, 1, 1); j -= 1; }          // I
+                    // i=query, j=target: state 1 = E (query gap) = I, state 2 = F (target gap) = D
+                    0 => { push_cigar_fn(&mut cigar, 0, 1); i -= 1; j -= 1; }
+                    1 => { push_cigar_fn(&mut cigar, 1, 1); i -= 1; }
+                    _ => { push_cigar_fn(&mut cigar, 2, 1); j -= 1; }
                 }
             }
             if i >= 0 {
-                push_cigar_fn(&mut cigar, 2, i + 1); // leading deletion
+                push_cigar_fn(&mut cigar, 1, i + 1);
             }
             if j >= 0 {
-                push_cigar_fn(&mut cigar, 1, j + 1); // leading insertion
+                push_cigar_fn(&mut cigar, 2, j + 1);
             }
             // Reverse CIGAR unless REV_CIGAR flag
             if !flag.contains(KswFlags::REV_CIGAR) {
@@ -464,10 +447,12 @@ pub fn ksw_extd2(
             }
         }
 
-        if zdrop >= 0 {
+        // Z-drop check: skip for APPROX_MAX (matching SIMD behavior where the
+        // approximate tracking path only checks z-drop with APPROX_DROP flag)
+        if zdrop >= 0 && !flag.contains(KswFlags::APPROX_MAX) {
             let best_j = (j_st..j_en).max_by_key(|&j| h_cur[j]).unwrap_or(j_st);
             if h_cur[best_j] > KSW_NEG_INF / 2 {
-                if apply_zdrop(&mut ez, h_cur[best_j], i, best_j as i32, zdrop, e) {
+                if apply_zdrop(&mut ez, h_cur[best_j], i, best_j as i32, zdrop, e2) {
                     break;
                 }
             }
@@ -477,29 +462,33 @@ pub fn ksw_extd2(
         h_cur.iter_mut().for_each(|x| *x = KSW_NEG_INF);
     }
 
-    // Score computation (same as extz2)
-    let mut score = KSW_NEG_INF;
-    if ez.mqe > KSW_NEG_INF / 2 && ez.mqe_t == tlen - 1 { score = ez.mqe; }
-    if ez.mte > KSW_NEG_INF / 2 && ez.mte_q == qlen - 1 && ez.mte > score { score = ez.mte; }
-    ez.score = score;
-    if score > KSW_NEG_INF / 2 { ez.reach_end = true; }
+    // Score: for non-extension, score = H[qlen-1][tlen-1].
+    // For extension, score is the max along the last query row (mqe) or last target col (mte).
+    let is_extz = flag.contains(KswFlags::EXTZ_ONLY);
+    if !is_extz {
+        // Full alignment: the score at (qlen-1, tlen-1) was tracked via mqe/mte
+        if ez.mqe > KSW_NEG_INF / 2 && ez.mqe_t == tlen - 1 { ez.score = ez.mqe; }
+        else if ez.mte > KSW_NEG_INF / 2 && ez.mte_q == qlen - 1 { ez.score = ez.mte; }
+    }
 
     if end_bonus > 0 {
         if ez.mqe != KSW_NEG_INF { ez.mqe += end_bonus; }
         if ez.mte != KSW_NEG_INF { ez.mte += end_bonus; }
-        if ez.score != KSW_NEG_INF { ez.score += end_bonus; }
     }
 
-    // Backtrack (same logic as extz2 but with 5 states)
-    if with_cigar && !ez.zdropped {
-        let (end_i, end_j) = if ez.score > KSW_NEG_INF / 2 {
-            if ez.mte_q == qlen - 1 && ez.mte >= ez.mqe {
-                (ez.mte_q, tlen - 1)
-            } else {
-                (qlen - 1, ez.mqe_t)
-            }
+    // Backtrace start — generate CIGAR even for zdropped (matching C SIMD behavior)
+    if with_cigar {
+        let (end_i, end_j) = if !ez.zdropped && !is_extz {
+            ez.reach_end = ez.score > KSW_NEG_INF / 2;
+            (qlen - 1, tlen - 1)
+        } else if !ez.zdropped && is_extz && ez.mqe + end_bonus > ez.max {
+            ez.reach_end = true;
+            (qlen - 1, ez.mqe_t)
+        } else if ez.max_t >= 0 && ez.max_q >= 0 {
+            // apply_zdrop sets max_t=query_pos, max_q=target_pos
+            (ez.max_t.max(0), ez.max_q.max(0))
         } else {
-            (ez.max_q.max(0), ez.max_t.max(0))
+            (-1, -1)
         };
 
         if end_i >= 0 && end_j >= 0 {
@@ -519,14 +508,15 @@ pub fn ksw_extd2(
                     state = 0;
                 }
                 if state == 0 { state = tmp & 7; }
+                // i=query, j=target: state 1/3 = E (query gap) = I, state 2/4 = F (target gap) = D
                 match state {
                     0 => { push_cigar_fn(&mut cigar, 0, 1); i -= 1; j -= 1; }
-                    1 | 3 => { push_cigar_fn(&mut cigar, 2, 1); i -= 1; }
-                    _ => { push_cigar_fn(&mut cigar, 1, 1); j -= 1; }
+                    1 | 3 => { push_cigar_fn(&mut cigar, 1, 1); i -= 1; }
+                    _ => { push_cigar_fn(&mut cigar, 2, 1); j -= 1; }
                 }
             }
-            if i >= 0 { push_cigar_fn(&mut cigar, 2, i + 1); }
-            if j >= 0 { push_cigar_fn(&mut cigar, 1, j + 1); }
+            if i >= 0 { push_cigar_fn(&mut cigar, 1, i + 1); }
+            if j >= 0 { push_cigar_fn(&mut cigar, 2, j + 1); }
             if !flag.contains(KswFlags::REV_CIGAR) { cigar.reverse(); }
             ez.cigar = cigar;
         }

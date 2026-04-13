@@ -4,6 +4,14 @@ A pure Rust reimplementation of [minimap2](https://github.com/lh3/minimap2) v2.3
 
 It has been tested to be equivalent to the C version, but 7% faster. Let us know if you find differences and provide test data!
 
+This is a translation of the original code and not the authorative implementation. This code should generate bitwise
+equal output to the original. Please report any deviations
+
+The aim of this project is to increase performance, especially by providing this code through a type-safe library interface.
+The code can also be compiled to be used for webassembly.
+
+**some issues/polishing still remain. this is the latest release but don't yet use it for production code yet**
+
 ## Features
 
 - **Pure Rust** -- no C dependencies or FFI

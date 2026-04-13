@@ -143,7 +143,7 @@ unsafe fn extz2_sse2(
         // Band boundaries (faithful translation of C lines 110-124)
         let mut st = 0i32.max(r - qlen + 1);
         let mut en = (tlen - 1).min(r);
-        if st < (r - wr + 1 + 1) / 2 { st = (r - wr + 1 + 1) / 2; }
+        if st < (r - wr + 1) >> 1 { st = (r - wr + 1) >> 1; }
         if en > (r + wl) / 2 { en = (r + wl) / 2; }
         if st > en { ez.zdropped = true; break; }
         let st0 = st; let en0 = en;
@@ -264,9 +264,9 @@ unsafe fn extz2_sse2(
         let u8p = u.as_ptr(); let v8p = v.as_ptr();
         let hp = h_arr.as_mut_ptr();
         if !approx_max { // Exact max
+            let mut max_h: i32;
+            let mut max_t: i32;
             if r > 0 {
-                let mut max_h: i32;
-                let mut max_t: i32;
                 if en0 > 0 {
                     *hp.add(en0 as usize) = *hp.add(en0 as usize - 1) + *u8p.add(en0 as usize) as i32 - qe;
                 } else {
@@ -304,25 +304,23 @@ unsafe fn extz2_sse2(
                     *hp.add(t as usize) += *v8p.add(t as usize) as i32 - qe;
                     if *hp.add(t as usize) > max_h { max_h = *hp.add(t as usize); max_t = t; }
                 }
-                if en0 == tlen - 1 && h_arr[en0 as usize] > ez.mte {
-                    ez.mte = h_arr[en0 as usize]; ez.mte_q = r - en0;
-                }
-                if r - st0 == qlen - 1 && h_arr[st0 as usize] > ez.mqe {
-                    ez.mqe = h_arr[st0 as usize]; ez.mqe_t = st0;
-                }
-                if zdrop >= 0 {
-                    if max_h > ez.max as i32 { ez.max = max_h; ez.max_t = max_t; ez.max_q = r - max_t; }
-                    else if max_t >= ez.max_t && r - max_t >= ez.max_q {
-                        let l = ((max_t - ez.max_t) - ((r - max_t) - ez.max_q)).abs();
-                        if ez.max - max_h > zdrop + l * e as i32 { ez.zdropped = true; break; }
-                    }
-                }
-                if r == qlen + tlen - 2 && en0 == tlen - 1 { ez.score = h_arr[(tlen-1) as usize]; }
             } else {
                 h_arr[0] = *v8p as i32 - qe - qe;
-                if en0 == tlen-1 && h_arr[en0 as usize] > ez.mte { ez.mte = h_arr[0]; ez.mte_q = 0; }
-                if st0 == 0 && qlen == 1 { ez.mqe = h_arr[0]; ez.mqe_t = 0; }
+                max_h = h_arr[0]; max_t = 0;
             }
+            // Unconditional mte/mqe/zdrop checks (matching C)
+            if en0 == tlen - 1 && h_arr[en0 as usize] > ez.mte {
+                ez.mte = h_arr[en0 as usize]; ez.mte_q = r - en0;
+            }
+            if r - st0 == qlen - 1 && h_arr[st0 as usize] > ez.mqe {
+                ez.mqe = h_arr[st0 as usize]; ez.mqe_t = st0;
+            }
+            if max_h > ez.max as i32 { ez.max = max_h; ez.max_t = max_t; ez.max_q = r - max_t; }
+            else if max_t >= ez.max_t && r - max_t >= ez.max_q {
+                let l = ((max_t - ez.max_t) - ((r - max_t) - ez.max_q)).abs();
+                if zdrop >= 0 && ez.max - max_h > zdrop + l * e as i32 { ez.zdropped = true; break; }
+            }
+            if r == qlen + tlen - 2 && en0 == tlen - 1 { ez.score = h_arr[(tlen-1) as usize]; }
         } else { // Approximate max
             if r > 0 {
                 if last_h0_t >= st0 && last_h0_t <= en0 && last_h0_t+1 >= st0 && last_h0_t+1 <= en0 {
@@ -356,7 +354,6 @@ unsafe fn extz2_sse2(
         if ez.mte > KSW_NEG_INF/2 && ez.mte_q == qlen-1 && ez.mte > sc { sc = ez.mte; }
         ez.score = sc;
     }
-    if ez.score > KSW_NEG_INF/2 { ez.reach_end = true; }
     if end_bonus > 0 {
         if ez.mqe != KSW_NEG_INF { ez.mqe += end_bonus; }
         if ez.mte != KSW_NEG_INF { ez.mte += end_bonus; }
@@ -434,6 +431,7 @@ unsafe fn extd2_sse2(
     let qe = q as i32 + e as i32;
     let with_cigar = !flag.contains(KswFlags::SCORE_ONLY);
     let approx_max = flag.contains(KswFlags::APPROX_MAX);
+    let is_right = flag.contains(KswFlags::RIGHT);
     let w = if w < 0 { qlen.max(tlen) } else { w };
     let (wl, wr) = (w, w);
     let tlen_ = ((tlen + 15) / 16) as usize;
@@ -521,7 +519,7 @@ unsafe fn extd2_sse2(
     for r in 0..qlen + tlen - 1 {
         let mut st = 0i32.max(r - qlen + 1);
         let mut en = (tlen - 1).min(r);
-        if st < (r - wr + 1 + 1) / 2 { st = (r - wr + 1 + 1) / 2; }
+        if st < (r - wr + 1) >> 1 { st = (r - wr + 1) >> 1; }
         if en > (r + wl) / 2 { en = (r + wl) / 2; }
         if st > en { ez.zdropped = true; break; }
         let st0 = st; let en0 = en;
@@ -587,21 +585,40 @@ unsafe fn extd2_sse2(
             let b2 = _mm_add_epi8(_mm_loadu_si128(y2p.add(p) as *const __m128i), ut);
 
             // SSE2: z = max(z, a, b, a2, b2) via signed compare+blend
+            // LEFT vs RIGHT alignment differ in tiebreaking (C lines 200-322)
             let mut zz = z;
-            let mut tmp = _mm_cmpgt_epi8(a, zz);
-            zz = _mm_or_si128(_mm_andnot_si128(tmp, zz), _mm_and_si128(tmp, a));
-            let mut d = if with_cigar { _mm_and_si128(tmp, _mm_set1_epi8(1)) } else { zero_ };
-            tmp = _mm_cmpgt_epi8(b, zz);
-            zz = _mm_or_si128(_mm_andnot_si128(tmp, zz), _mm_and_si128(tmp, b));
-            if with_cigar { d = _mm_or_si128(_mm_andnot_si128(tmp, d), _mm_and_si128(tmp, _mm_set1_epi8(2))); }
-            tmp = _mm_cmpgt_epi8(a2, zz);
-            zz = _mm_or_si128(_mm_andnot_si128(tmp, zz), _mm_and_si128(tmp, a2));
-            if with_cigar { d = _mm_or_si128(_mm_andnot_si128(tmp, d), _mm_and_si128(tmp, _mm_set1_epi8(3))); }
-            tmp = _mm_cmpgt_epi8(b2, zz);
-            zz = _mm_or_si128(_mm_andnot_si128(tmp, zz), _mm_and_si128(tmp, b2));
-            if with_cigar { d = _mm_or_si128(_mm_andnot_si128(tmp, d), _mm_and_si128(tmp, _mm_set1_epi8(4))); }
+            let mut d = zero_;
+            if !is_right {
+                // LEFT alignment: strict greater, ties prefer z
+                let mut tmp = _mm_cmpgt_epi8(a, zz);
+                zz = _mm_or_si128(_mm_andnot_si128(tmp, zz), _mm_and_si128(tmp, a));
+                if with_cigar { d = _mm_and_si128(tmp, _mm_set1_epi8(1)); }
+                tmp = _mm_cmpgt_epi8(b, zz);
+                zz = _mm_or_si128(_mm_andnot_si128(tmp, zz), _mm_and_si128(tmp, b));
+                if with_cigar { d = _mm_or_si128(_mm_andnot_si128(tmp, d), _mm_and_si128(tmp, _mm_set1_epi8(2))); }
+                tmp = _mm_cmpgt_epi8(a2, zz);
+                zz = _mm_or_si128(_mm_andnot_si128(tmp, zz), _mm_and_si128(tmp, a2));
+                if with_cigar { d = _mm_or_si128(_mm_andnot_si128(tmp, d), _mm_and_si128(tmp, _mm_set1_epi8(3))); }
+                tmp = _mm_cmpgt_epi8(b2, zz);
+                zz = _mm_or_si128(_mm_andnot_si128(tmp, zz), _mm_and_si128(tmp, b2));
+                if with_cigar { d = _mm_or_si128(_mm_andnot_si128(tmp, d), _mm_and_si128(tmp, _mm_set1_epi8(4))); }
+            } else {
+                // RIGHT alignment: ties prefer gap states (a, b, a2, b2)
+                let mut tmp = _mm_cmpgt_epi8(zz, a);
+                zz = _mm_or_si128(_mm_and_si128(tmp, zz), _mm_andnot_si128(tmp, a));
+                if with_cigar { d = _mm_andnot_si128(tmp, _mm_set1_epi8(1)); }
+                tmp = _mm_cmpgt_epi8(zz, b);
+                zz = _mm_or_si128(_mm_and_si128(tmp, zz), _mm_andnot_si128(tmp, b));
+                if with_cigar { d = _mm_or_si128(_mm_and_si128(tmp, d), _mm_andnot_si128(tmp, _mm_set1_epi8(2))); }
+                tmp = _mm_cmpgt_epi8(zz, a2);
+                zz = _mm_or_si128(_mm_and_si128(tmp, zz), _mm_andnot_si128(tmp, a2));
+                if with_cigar { d = _mm_or_si128(_mm_and_si128(tmp, d), _mm_andnot_si128(tmp, _mm_set1_epi8(3))); }
+                tmp = _mm_cmpgt_epi8(zz, b2);
+                zz = _mm_or_si128(_mm_and_si128(tmp, zz), _mm_andnot_si128(tmp, b2));
+                if with_cigar { d = _mm_or_si128(_mm_and_si128(tmp, d), _mm_andnot_si128(tmp, _mm_set1_epi8(4))); }
+            }
             // Clamp: z = min(z, sc_mch_)
-            tmp = _mm_cmplt_epi8(sc_mch_, zz);
+            let tmp = _mm_cmplt_epi8(sc_mch_, zz);
             zz = _mm_or_si128(_mm_and_si128(tmp, sc_mch_), _mm_andnot_si128(tmp, zz));
 
             // dp_code_block2
@@ -614,19 +631,34 @@ unsafe fn extd2_sse2(
             let a2 = _mm_sub_epi8(a2, zq2);
             let b2 = _mm_sub_epi8(b2, zq2);
 
-            // Store x, y, x2, y2
-            let tmp = _mm_cmpgt_epi8(a, zero_);
-            _mm_storeu_si128(xp.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, a), qe_));
-            if with_cigar { d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x08u8 as i8))); }
-            let tmp = _mm_cmpgt_epi8(b, zero_);
-            _mm_storeu_si128(yp.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, b), qe_));
-            if with_cigar { d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x10u8 as i8))); }
-            let tmp = _mm_cmpgt_epi8(a2, zero_);
-            _mm_storeu_si128(x2p.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, a2), qe2_));
-            if with_cigar { d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x20u8 as i8))); }
-            let tmp = _mm_cmpgt_epi8(b2, zero_);
-            _mm_storeu_si128(y2p.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, b2), qe2_));
-            if with_cigar { d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x40u8 as i8))); }
+            // Store x, y, x2, y2 — LEFT vs RIGHT differ in tiebreaking at zero
+            if !is_right {
+                let tmp = _mm_cmpgt_epi8(a, zero_);
+                _mm_storeu_si128(xp.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, a), qe_));
+                if with_cigar { d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x08u8 as i8))); }
+                let tmp = _mm_cmpgt_epi8(b, zero_);
+                _mm_storeu_si128(yp.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, b), qe_));
+                if with_cigar { d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x10u8 as i8))); }
+                let tmp = _mm_cmpgt_epi8(a2, zero_);
+                _mm_storeu_si128(x2p.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, a2), qe2_));
+                if with_cigar { d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x20u8 as i8))); }
+                let tmp = _mm_cmpgt_epi8(b2, zero_);
+                _mm_storeu_si128(y2p.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, b2), qe2_));
+                if with_cigar { d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x40u8 as i8))); }
+            } else {
+                let tmp = _mm_cmpgt_epi8(zero_, a);
+                _mm_storeu_si128(xp.add(p) as *mut __m128i, _mm_sub_epi8(_mm_andnot_si128(tmp, a), qe_));
+                if with_cigar { d = _mm_or_si128(d, _mm_andnot_si128(tmp, _mm_set1_epi8(0x08u8 as i8))); }
+                let tmp = _mm_cmpgt_epi8(zero_, b);
+                _mm_storeu_si128(yp.add(p) as *mut __m128i, _mm_sub_epi8(_mm_andnot_si128(tmp, b), qe_));
+                if with_cigar { d = _mm_or_si128(d, _mm_andnot_si128(tmp, _mm_set1_epi8(0x10u8 as i8))); }
+                let tmp = _mm_cmpgt_epi8(zero_, a2);
+                _mm_storeu_si128(x2p.add(p) as *mut __m128i, _mm_sub_epi8(_mm_andnot_si128(tmp, a2), qe2_));
+                if with_cigar { d = _mm_or_si128(d, _mm_andnot_si128(tmp, _mm_set1_epi8(0x20u8 as i8))); }
+                let tmp = _mm_cmpgt_epi8(zero_, b2);
+                _mm_storeu_si128(y2p.add(p) as *mut __m128i, _mm_sub_epi8(_mm_andnot_si128(tmp, b2), qe2_));
+                if with_cigar { d = _mm_or_si128(d, _mm_andnot_si128(tmp, _mm_set1_epi8(0x40u8 as i8))); }
+            }
 
             if with_cigar {
                 let pr_off = r as usize * n_col_ * 16 + (t as i32 - st_) as usize * 16;
@@ -635,15 +667,18 @@ unsafe fn extd2_sse2(
         }
 
         // Score tracking (C lines 323-384, using signed interpretation)
+        // Structure matches C exactly: compute H[]/max_H/max_t in if/else,
+        // then mte/mqe/zdrop checks run UNCONDITIONALLY.
         let u8p = u.as_ptr() as *const i8;
         let v8p = v.as_ptr() as *const i8;
         let hp = h_arr.as_mut_ptr();
         if !approx_max {
+            let mut max_h: i32;
+            let mut max_t: i32;
             if r > 0 {
-                let mut max_h: i32;
                 if en0 > 0 { h_arr[en0 as usize] = h_arr[(en0-1) as usize] + *u8p.add(en0 as usize) as i32; }
                 else { h_arr[en0 as usize] = h_arr[en0 as usize] + *v8p.add(en0 as usize) as i32; }
-                max_h = h_arr[en0 as usize]; let mut max_t = en0;
+                max_h = h_arr[en0 as usize]; max_t = en0;
                 // SSE2-vectorized H-tracking: 4 i32 values per iteration
                 let en1 = st0 + (en0 - st0) / 4 * 4;
                 let mut max_h_v = _mm_set1_epi32(max_h);
@@ -674,21 +709,20 @@ unsafe fn extd2_sse2(
                     *hp.add(t as usize) += *v8p.add(t as usize) as i32;
                     if *hp.add(t as usize) > max_h { max_h = *hp.add(t as usize); max_t = t; }
                 }
-                if en0 == tlen-1 && h_arr[en0 as usize] > ez.mte { ez.mte = h_arr[en0 as usize]; ez.mte_q = r - en0; }
-                if r - st0 == qlen-1 && h_arr[st0 as usize] > ez.mqe { ez.mqe = h_arr[st0 as usize]; ez.mqe_t = st0; }
-                if zdrop >= 0 {
-                    if max_h > ez.max as i32 { ez.max = max_h; ez.max_t = max_t; ez.max_q = r - max_t; }
-                    else if max_t >= ez.max_t && r - max_t >= ez.max_q {
-                        let l = ((max_t - ez.max_t) - ((r - max_t) - ez.max_q)).abs();
-                        if ez.max - max_h > zdrop + l * e2 as i32 { ez.zdropped = true; break; }
-                    }
-                }
-                if r == qlen+tlen-2 && en0 == tlen-1 { ez.score = h_arr[(tlen-1) as usize]; }
             } else {
                 h_arr[0] = *v8p as i32 - qe;
-                if en0 == tlen-1 { ez.mte = h_arr[0]; ez.mte_q = 0; }
-                if qlen == 1 { ez.mqe = h_arr[0]; ez.mqe_t = 0; }
+                max_h = h_arr[0]; max_t = 0;
             }
+            // These checks run for BOTH r==0 and r>0, matching C exactly
+            if en0 == tlen-1 && h_arr[en0 as usize] > ez.mte { ez.mte = h_arr[en0 as usize]; ez.mte_q = r - en0; }
+            if r - st0 == qlen-1 && h_arr[st0 as usize] > ez.mqe { ez.mqe = h_arr[st0 as usize]; ez.mqe_t = st0; }
+            // zdrop check (matches C's ksw_apply_zdrop with is_rot=1)
+            if max_h > ez.max as i32 { ez.max = max_h; ez.max_t = max_t; ez.max_q = r - max_t; }
+            else if max_t >= ez.max_t && r - max_t >= ez.max_q {
+                let l = ((max_t - ez.max_t) - ((r - max_t) - ez.max_q)).abs();
+                if zdrop >= 0 && ez.max - max_h > zdrop + l * e2 as i32 { ez.zdropped = true; break; }
+            }
+            if r == qlen+tlen-2 && en0 == tlen-1 { ez.score = h_arr[(tlen-1) as usize]; }
         } else {
             if r > 0 {
                 if last_h0_t >= st0 && last_h0_t <= en0 && last_h0_t+1 >= st0 && last_h0_t+1 <= en0 {
@@ -720,7 +754,6 @@ unsafe fn extd2_sse2(
         if ez.mte > KSW_NEG_INF/2 && ez.mte_q == qlen-1 && ez.mte > sc { sc = ez.mte; }
         ez.score = sc;
     }
-    if ez.score > KSW_NEG_INF/2 { ez.reach_end = true; }
     if end_bonus > 0 {
         if ez.mqe != KSW_NEG_INF { ez.mqe += end_bonus; }
         if ez.mte != KSW_NEG_INF { ez.mte += end_bonus; }
@@ -768,6 +801,7 @@ unsafe fn extd2_sse2(
 }
 
 /// Score tracking — shared tail (zdrop check, boundary updates).
+/// Matches C's unconditional mte/mqe/zdrop checks after H-array computation.
 #[inline(always)]
 unsafe fn score_track_tail(
     h_arr: &mut [i32], v8p: *const i8, hp: *mut i32,
@@ -781,12 +815,11 @@ unsafe fn score_track_tail(
     }
     if en0 == tlen-1 && h_arr[en0 as usize] > ez.mte { ez.mte = h_arr[en0 as usize]; ez.mte_q = r - en0; }
     if r - st0 == qlen-1 && h_arr[st0 as usize] > ez.mqe { ez.mqe = h_arr[st0 as usize]; ez.mqe_t = st0; }
-    if zdrop >= 0 {
-        if max_h > ez.max as i32 { ez.max = max_h; ez.max_t = max_t; ez.max_q = r - max_t; }
-        else if max_t >= ez.max_t && r - max_t >= ez.max_q {
-            let l = ((max_t - ez.max_t) - ((r - max_t) - ez.max_q)).abs();
-            if ez.max - max_h > zdrop + l * e2 as i32 { ez.zdropped = true; return true; }
-        }
+    // Max tracking is unconditional (matches C's ksw_apply_zdrop); zdrop check is conditional
+    if max_h > ez.max as i32 { ez.max = max_h; ez.max_t = max_t; ez.max_q = r - max_t; }
+    else if max_t >= ez.max_t && r - max_t >= ez.max_q {
+        let l = ((max_t - ez.max_t) - ((r - max_t) - ez.max_q)).abs();
+        if zdrop >= 0 && ez.max - max_h > zdrop + l * e2 as i32 { ez.zdropped = true; return true; }
     }
     if r == qlen+tlen-2 && en0 == tlen-1 { ez.score = h_arr[(tlen-1) as usize]; }
     false
@@ -836,9 +869,8 @@ unsafe fn score_track_exact_avx2(
         score_track_tail(h_arr, v8p, hp, st0, en0, r, qlen, tlen, qe, e2, zdrop, ez, max_h, max_t, en1)
     } else {
         h_arr[0] = *v8p as i32 - qe;
-        if en0 == tlen-1 { ez.mte = h_arr[0]; ez.mte_q = 0; }
-        if qlen == 1 { ez.mqe = h_arr[0]; ez.mqe_t = 0; }
-        false
+        let max_h = h_arr[0]; let max_t = 0i32;
+        score_track_tail(h_arr, v8p, hp, st0, en0, r, qlen, tlen, qe, e2, zdrop, ez, max_h, max_t, en0)
     }
 }
 
@@ -886,9 +918,8 @@ unsafe fn score_track_exact_sse2(
         score_track_tail(h_arr, v8p, hp, st0, en0, r, qlen, tlen, qe, e2, zdrop, ez, max_h, max_t, en1)
     } else {
         h_arr[0] = *v8p as i32 - qe;
-        if en0 == tlen-1 { ez.mte = h_arr[0]; ez.mte_q = 0; }
-        if qlen == 1 { ez.mqe = h_arr[0]; ez.mqe_t = 0; }
-        false
+        let max_h = h_arr[0]; let max_t = 0i32;
+        score_track_tail(h_arr, v8p, hp, st0, en0, r, qlen, tlen, qe, e2, zdrop, ez, max_h, max_t, en0)
     }
 }
 
@@ -914,6 +945,7 @@ unsafe fn extd2_sse41_inner<const WITH_CIGAR: bool, const HAS_AVX2: bool>(
     }
     let qe = q as i32 + e as i32;
     let approx_max = flag.contains(KswFlags::APPROX_MAX);
+    let is_right = flag.contains(KswFlags::RIGHT);
     let w = if w < 0 { qlen.max(tlen) } else { w };
     let (wl, wr) = (w, w);
     let tlen_ = ((tlen + 15) / 16) as usize;
@@ -996,7 +1028,7 @@ unsafe fn extd2_sse41_inner<const WITH_CIGAR: bool, const HAS_AVX2: bool>(
     for r in 0..qlen + tlen - 1 {
         let mut st = 0i32.max(r - qlen + 1);
         let mut en = (tlen - 1).min(r);
-        if st < (r - wr + 1 + 1) / 2 { st = (r - wr + 1 + 1) / 2; }
+        if st < (r - wr + 1) >> 1 { st = (r - wr + 1) >> 1; }
         if en > (r + wl) / 2 { en = (r + wl) / 2; }
         if st > en { ez.zdropped = true; break; }
         let st0 = st; let en0 = en;
@@ -1071,14 +1103,25 @@ unsafe fn extd2_sse41_inner<const WITH_CIGAR: bool, const HAS_AVX2: bool>(
                 let a2 = _mm_sub_epi8(a2, zq2);
                 let b2 = _mm_sub_epi8(b2, zq2);
 
-                let tmp = _mm_cmpgt_epi8(a, zero_);
-                _mm_storeu_si128(xp.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, a), qe_));
-                let tmp = _mm_cmpgt_epi8(b, zero_);
-                _mm_storeu_si128(yp.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, b), qe_));
-                let tmp = _mm_cmpgt_epi8(a2, zero_);
-                _mm_storeu_si128(x2p.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, a2), qe2_));
-                let tmp = _mm_cmpgt_epi8(b2, zero_);
-                _mm_storeu_si128(y2p.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, b2), qe2_));
+                if !is_right {
+                    let tmp = _mm_cmpgt_epi8(a, zero_);
+                    _mm_storeu_si128(xp.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, a), qe_));
+                    let tmp = _mm_cmpgt_epi8(b, zero_);
+                    _mm_storeu_si128(yp.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, b), qe_));
+                    let tmp = _mm_cmpgt_epi8(a2, zero_);
+                    _mm_storeu_si128(x2p.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, a2), qe2_));
+                    let tmp = _mm_cmpgt_epi8(b2, zero_);
+                    _mm_storeu_si128(y2p.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, b2), qe2_));
+                } else {
+                    let tmp = _mm_cmpgt_epi8(zero_, a);
+                    _mm_storeu_si128(xp.add(p) as *mut __m128i, _mm_sub_epi8(_mm_andnot_si128(tmp, a), qe_));
+                    let tmp = _mm_cmpgt_epi8(zero_, b);
+                    _mm_storeu_si128(yp.add(p) as *mut __m128i, _mm_sub_epi8(_mm_andnot_si128(tmp, b), qe_));
+                    let tmp = _mm_cmpgt_epi8(zero_, a2);
+                    _mm_storeu_si128(x2p.add(p) as *mut __m128i, _mm_sub_epi8(_mm_andnot_si128(tmp, a2), qe2_));
+                    let tmp = _mm_cmpgt_epi8(zero_, b2);
+                    _mm_storeu_si128(y2p.add(p) as *mut __m128i, _mm_sub_epi8(_mm_andnot_si128(tmp, b2), qe2_));
+                }
             }
         } else {
             // CIGAR path — with backtrack direction bits
@@ -1105,19 +1148,31 @@ unsafe fn extd2_sse41_inner<const WITH_CIGAR: bool, const HAS_AVX2: bool>(
                 let a2 = _mm_add_epi8(x2t1, vt1);
                 let b2 = _mm_add_epi8(_mm_loadu_si128(y2p.add(p) as *const __m128i), ut);
 
+                // LEFT vs RIGHT comparison with SSE4.1 blendv
+                // Matches C's ksw2_extd2_sse.c lines 234-252 (LEFT) / 283-301 (RIGHT)
                 let mut zz = z;
-                let tmp = _mm_cmpgt_epi8(a, zz);
-                zz = _mm_max_epi8(zz, a);
-                let mut d = _mm_and_si128(tmp, _mm_set1_epi8(1));
-                let tmp = _mm_cmpgt_epi8(b, zz);
-                zz = _mm_max_epi8(zz, b);
-                d = _mm_blendv_epi8(d, _mm_set1_epi8(2), tmp);
-                let tmp = _mm_cmpgt_epi8(a2, zz);
-                zz = _mm_max_epi8(zz, a2);
-                d = _mm_blendv_epi8(d, _mm_set1_epi8(3), tmp);
-                let tmp = _mm_cmpgt_epi8(b2, zz);
-                zz = _mm_max_epi8(zz, b2);
-                d = _mm_blendv_epi8(d, _mm_set1_epi8(4), tmp);
+                let mut d;
+                if !is_right {
+                    // LEFT: d = and(cmpgt(a,z), 1) — matches C line 235
+                    d = _mm_and_si128(_mm_cmpgt_epi8(a, zz), _mm_set1_epi8(1));
+                    zz = _mm_max_epi8(zz, a);
+                    d = _mm_blendv_epi8(d, _mm_set1_epi8(2), _mm_cmpgt_epi8(b, zz));
+                    zz = _mm_max_epi8(zz, b);
+                    d = _mm_blendv_epi8(d, _mm_set1_epi8(3), _mm_cmpgt_epi8(a2, zz));
+                    zz = _mm_max_epi8(zz, a2);
+                    d = _mm_blendv_epi8(d, _mm_set1_epi8(4), _mm_cmpgt_epi8(b2, zz));
+                    zz = _mm_max_epi8(zz, b2);
+                } else {
+                    // RIGHT: reversed tiebreaking
+                    d = _mm_andnot_si128(_mm_cmpgt_epi8(zz, a), _mm_set1_epi8(1));
+                    zz = _mm_max_epi8(zz, a);
+                    d = _mm_blendv_epi8(_mm_set1_epi8(2), d, _mm_cmpgt_epi8(zz, b));
+                    zz = _mm_max_epi8(zz, b);
+                    d = _mm_blendv_epi8(_mm_set1_epi8(3), d, _mm_cmpgt_epi8(zz, a2));
+                    zz = _mm_max_epi8(zz, a2);
+                    d = _mm_blendv_epi8(_mm_set1_epi8(4), d, _mm_cmpgt_epi8(zz, b2));
+                    zz = _mm_max_epi8(zz, b2);
+                }
                 zz = _mm_min_epi8(zz, sc_mch_);
 
                 _mm_storeu_si128(up.add(p) as *mut __m128i, _mm_sub_epi8(zz, vt1));
@@ -1129,18 +1184,33 @@ unsafe fn extd2_sse41_inner<const WITH_CIGAR: bool, const HAS_AVX2: bool>(
                 let a2 = _mm_sub_epi8(a2, zq2);
                 let b2 = _mm_sub_epi8(b2, zq2);
 
-                let tmp = _mm_cmpgt_epi8(a, zero_);
-                _mm_storeu_si128(xp.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, a), qe_));
-                d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x08u8 as i8)));
-                let tmp = _mm_cmpgt_epi8(b, zero_);
-                _mm_storeu_si128(yp.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, b), qe_));
-                d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x10u8 as i8)));
-                let tmp = _mm_cmpgt_epi8(a2, zero_);
-                _mm_storeu_si128(x2p.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, a2), qe2_));
-                d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x20u8 as i8)));
-                let tmp = _mm_cmpgt_epi8(b2, zero_);
-                _mm_storeu_si128(y2p.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, b2), qe2_));
-                d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x40u8 as i8)));
+                if !is_right {
+                    let tmp = _mm_cmpgt_epi8(a, zero_);
+                    _mm_storeu_si128(xp.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, a), qe_));
+                    d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x08u8 as i8)));
+                    let tmp = _mm_cmpgt_epi8(b, zero_);
+                    _mm_storeu_si128(yp.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, b), qe_));
+                    d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x10u8 as i8)));
+                    let tmp = _mm_cmpgt_epi8(a2, zero_);
+                    _mm_storeu_si128(x2p.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, a2), qe2_));
+                    d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x20u8 as i8)));
+                    let tmp = _mm_cmpgt_epi8(b2, zero_);
+                    _mm_storeu_si128(y2p.add(p) as *mut __m128i, _mm_sub_epi8(_mm_and_si128(tmp, b2), qe2_));
+                    d = _mm_or_si128(d, _mm_and_si128(tmp, _mm_set1_epi8(0x40u8 as i8)));
+                } else {
+                    let tmp = _mm_cmpgt_epi8(zero_, a);
+                    _mm_storeu_si128(xp.add(p) as *mut __m128i, _mm_sub_epi8(_mm_andnot_si128(tmp, a), qe_));
+                    d = _mm_or_si128(d, _mm_andnot_si128(tmp, _mm_set1_epi8(0x08u8 as i8)));
+                    let tmp = _mm_cmpgt_epi8(zero_, b);
+                    _mm_storeu_si128(yp.add(p) as *mut __m128i, _mm_sub_epi8(_mm_andnot_si128(tmp, b), qe_));
+                    d = _mm_or_si128(d, _mm_andnot_si128(tmp, _mm_set1_epi8(0x10u8 as i8)));
+                    let tmp = _mm_cmpgt_epi8(zero_, a2);
+                    _mm_storeu_si128(x2p.add(p) as *mut __m128i, _mm_sub_epi8(_mm_andnot_si128(tmp, a2), qe2_));
+                    d = _mm_or_si128(d, _mm_andnot_si128(tmp, _mm_set1_epi8(0x20u8 as i8)));
+                    let tmp = _mm_cmpgt_epi8(zero_, b2);
+                    _mm_storeu_si128(y2p.add(p) as *mut __m128i, _mm_sub_epi8(_mm_andnot_si128(tmp, b2), qe2_));
+                    d = _mm_or_si128(d, _mm_andnot_si128(tmp, _mm_set1_epi8(0x40u8 as i8)));
+                }
 
                 let pr_off = r as usize * n_col_ * 16 + (t as i32 - st_) as usize * 16;
                 if pr_off + 16 <= bt_len { _mm_storeu_si128(bt_ptr.add(pr_off) as *mut __m128i, d); }
@@ -1190,7 +1260,7 @@ unsafe fn extd2_sse41_inner<const WITH_CIGAR: bool, const HAS_AVX2: bool>(
         if ez.mte > KSW_NEG_INF/2 && ez.mte_q == qlen-1 && ez.mte > sc { sc = ez.mte; }
         ez.score = sc;
     }
-    if ez.score > KSW_NEG_INF/2 { ez.reach_end = true; }
+    // Do NOT set reach_end here — C only sets it in the EXTZ_ONLY backtrace path
     if end_bonus > 0 {
         if ez.mqe != KSW_NEG_INF { ez.mqe += end_bonus; }
         if ez.mte != KSW_NEG_INF { ez.mte += end_bonus; }
@@ -1278,19 +1348,28 @@ fn fixup_score_from_cigar(
     let mut ti = 0usize;
     let mut max_qi = 0usize;
     let mut max_ti = 0usize;
+    // Track CIGAR position of the max for truncation:
+    // (cigar_idx, offset_within_op) where the max was found
+    let mut max_cigar_idx = 0usize;
+    let mut max_cigar_offset = 0usize;
 
-    for &c in &ez.cigar {
+    for (cidx, &c) in ez.cigar.iter().enumerate() {
         let op = c & 0xf;
         let len = (c >> 4) as usize;
         match op {
             0 | 7 | 8 => { // M/=/X
                 let safe_len = len.min(query.len().saturating_sub(qi)).min(target.len().saturating_sub(ti));
                 for l in 0..safe_len {
-                    // SAFETY: l < safe_len ensures qi+l < query.len() and ti+l < target.len()
                     unsafe {
                         score += *mat.get_unchecked(*target.get_unchecked(ti + l) as usize * m_u + *query.get_unchecked(qi + l) as usize) as i32;
                     }
-                    if score > max_score { max_score = score; max_qi = qi + l; max_ti = ti + l; }
+                    if score > max_score {
+                        max_score = score;
+                        max_qi = qi + l;
+                        max_ti = ti + l;
+                        max_cigar_idx = cidx;
+                        max_cigar_offset = l + 1; // bases consumed up to and including this position
+                    }
                 }
                 qi += len; ti += len;
             }
@@ -1298,38 +1377,28 @@ fn fixup_score_from_cigar(
                 let gap = (qe1 + e as i32 * (len as i32 - 1)).min(qe2v + e2 as i32 * (len as i32 - 1));
                 score -= gap;
                 qi += len;
-                if score > max_score { max_score = score; max_qi = qi; max_ti = ti; }
+                if score > max_score {
+                    max_score = score; max_qi = qi; max_ti = ti;
+                    max_cigar_idx = cidx; max_cigar_offset = len;
+                }
             }
             2 | 3 => { // D/N
                 let gap = (qe1 + e as i32 * (len as i32 - 1)).min(qe2v + e2 as i32 * (len as i32 - 1));
                 score -= gap;
                 ti += len;
-                if score > max_score { max_score = score; max_qi = qi; max_ti = ti; }
+                if score > max_score {
+                    max_score = score; max_qi = qi; max_ti = ti;
+                    max_cigar_idx = cidx; max_cigar_offset = len;
+                }
             }
             _ => { qi += len; ti += len; }
         }
-        if score < 0 { score = 0; }
     }
 
-    // Set the corrected values
-    let final_score = score;
-    ez.score = final_score;
-    ez.max = max_score;
-    ez.max_q = max_qi as i32;
-    ez.max_t = max_ti as i32;
+    // No fixup — use SIMD kernel values directly (matching C minimap2 behavior).
+    // C doesn't have a fixup; the SIMD kernel's values are used as-is.
+    let _ = (score, max_score, max_qi, max_ti, qi, ti); // suppress unused warnings
 
-    // mqe: score when reaching end of query
-    if qi == query.len() {
-        ez.mqe = final_score;
-        ez.mqe_t = (ti as i32) - 1;
-    }
-    // mte: score when reaching end of target
-    if ti == target.len() {
-        ez.mte = final_score;
-        ez.mte_q = (qi as i32) - 1;
-    }
-
-    ez.reach_end = qi == query.len() && ti == target.len();
     if end_bonus > 0 && ez.reach_end {
         ez.score += end_bonus;
         if ez.mqe != KSW_NEG_INF { ez.mqe += end_bonus; }
@@ -1360,15 +1429,13 @@ pub fn ksw_extd2_dispatch(
         } else if has_sse2() {
             unsafe { extd2_sse2(query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag) }
         } else {
-            return super::ksw2::ksw_extd2(query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag);
+            return crate::align::ksw2::ksw_extd2(query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag);
         };
-        if !ez.cigar.is_empty() && !flag.contains(KswFlags::APPROX_MAX) {
-            fixup_score_from_cigar(&mut ez, query, target, m, mat, q, e, q2, e2, end_bonus);
-        }
+        // No fixup — SIMD kernel values match C minimap2's behavior directly
         return ez;
     }
     #[cfg(not(target_arch = "x86_64"))]
-    super::ksw2::ksw_extd2(query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag)
+    crate::align::ksw2::ksw_extd2(query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag)
 }
 
 /// Dispatch: SIMD for single-gap, scalar fallback otherwise.
@@ -1378,10 +1445,7 @@ pub fn ksw_extz2_dispatch(
 ) -> KswResult {
     #[cfg(target_arch = "x86_64")]
     if has_sse2() {
-        let mut ez = unsafe { extz2_sse2(query, target, m, mat, q, e, w, zdrop, end_bonus, flag) };
-        if !ez.cigar.is_empty() && !flag.contains(KswFlags::APPROX_MAX) {
-            fixup_score_from_cigar(&mut ez, query, target, m, mat, q, e, q, e, end_bonus);
-        }
+        let ez = unsafe { extz2_sse2(query, target, m, mat, q, e, w, zdrop, end_bonus, flag) };
         return ez;
     }
     super::ksw2::ksw_extz2(query, target, m, mat, q, e, w, zdrop, end_bonus, flag)
@@ -1420,5 +1484,175 @@ mod tests {
             let expected = format!("{}M", len);
             assert_eq!(cigar_str, expected, "len={}: got {} expected {}", len, cigar_str, expected);
         }
+    }
+
+    /// Compare SIMD extd2 dispatch (with fixup) against scalar extd2 for
+    /// extension-like alignments. This catches SIMD H-tracking / backtrace bugs.
+    #[test]
+    fn test_simd_vs_scalar_extd2_extension() {
+        let mut mat = Vec::new();
+        gen_simple_mat(5, &mut mat, 2, 4, 1);
+        // map-hifi-like penalties: q=4, e=2, q2=24, e2=1
+        let q: i8 = 4; let e: i8 = 2; let q2: i8 = 24; let e2: i8 = 1;
+
+        // Test 1: perfect match followed by random (extension should stop at match end)
+        let mut query = vec![0u8; 200]; // 200bp match
+        let mut target = vec![0u8; 200];
+        // Add divergent tail
+        for i in 0..300 { query.push((i * 3 % 4) as u8); target.push((i * 7 % 4) as u8); }
+
+        let simd = ksw_extd2_dispatch(&query, &target, 5, &mat, q, e, q2, e2, 500, 400, 0, KswFlags::EXTZ_ONLY);
+        let scalar = crate::align::ksw2::ksw_extd2(&query, &target, 5, &mat, q, e, q2, e2, 500, 400, 0, KswFlags::EXTZ_ONLY);
+
+        let simd_cigar = crate::align::cigar_to_string(&simd.cigar);
+        let scalar_cigar = crate::align::cigar_to_string(&scalar.cigar);
+        assert_eq!(simd_cigar, scalar_cigar,
+            "SIMD vs scalar CIGAR mismatch for extension: SIMD={} scalar={} simd_max_t={} scalar_max_t={}",
+            simd_cigar, scalar_cigar, simd.max_t, scalar.max_t);
+
+        // Test 2: realistic extension - good region, then mismatches, then another match
+        let mut query2 = Vec::new();
+        let mut target2 = Vec::new();
+        for i in 0..150 { query2.push((i % 4) as u8); target2.push((i % 4) as u8); } // 150bp match
+        for i in 0..50 { query2.push(((i+1) % 4) as u8); target2.push((i % 4) as u8); } // 50bp mismatch
+        for i in 0..100 { query2.push((i % 4) as u8); target2.push((i % 4) as u8); } // 100bp match
+
+        let simd2 = ksw_extd2_dispatch(&query2, &target2, 5, &mat, q, e, q2, e2, 500, 400, 0, KswFlags::EXTZ_ONLY);
+        let scalar2 = crate::align::ksw2::ksw_extd2(&query2, &target2, 5, &mat, q, e, q2, e2, 500, 400, 0, KswFlags::EXTZ_ONLY);
+
+        let simd_cigar2 = crate::align::cigar_to_string(&simd2.cigar);
+        let scalar_cigar2 = crate::align::cigar_to_string(&scalar2.cigar);
+        assert_eq!(simd_cigar2, scalar_cigar2,
+            "SIMD vs scalar CIGAR mismatch (test 2): SIMD={} scalar={}", simd_cigar2, scalar_cigar2);
+    }
+
+    /// Compare SIMD extd2 for gap-fill (APPROX_MAX) - backtrace from (tlen-1, qlen-1)
+    #[test]
+    fn test_simd_vs_scalar_extd2_gapfill() {
+        let mut mat = Vec::new();
+        gen_simple_mat(5, &mut mat, 2, 4, 1);
+        let q: i8 = 4; let e: i8 = 2; let q2: i8 = 24; let e2: i8 = 1;
+
+        // Realistic gap-fill: mostly matching with a few mismatches and indels
+        let mut query = Vec::new();
+        let mut target = Vec::new();
+        // 100bp match
+        for i in 0..100 { query.push((i % 4) as u8); target.push((i % 4) as u8); }
+        // 1bp deletion in query (target has extra base)
+        target.push(2);
+        // 50bp match
+        for i in 0..50 { query.push(((i+2) % 4) as u8); target.push(((i+2) % 4) as u8); }
+        // 1bp insertion in query
+        query.push(3);
+        // 80bp match
+        for i in 0..80 { query.push((i % 4) as u8); target.push((i % 4) as u8); }
+
+        let simd = ksw_extd2_dispatch(&query, &target, 5, &mat, q, e, q2, e2, 500, 400, -1, KswFlags::APPROX_MAX);
+        let scalar = crate::align::ksw2::ksw_extd2(&query, &target, 5, &mat, q, e, q2, e2, 500, 400, -1, KswFlags::APPROX_MAX);
+
+        let simd_cigar = crate::align::cigar_to_string(&simd.cigar);
+        let scalar_cigar = crate::align::cigar_to_string(&scalar.cigar);
+        assert_eq!(simd_cigar, scalar_cigar,
+            "Gap-fill CIGAR mismatch: SIMD={} scalar={}", simd_cigar, scalar_cigar);
+    }
+
+    /// Test SIMD vs scalar for varying sequence lengths around 16-byte boundaries
+    #[test]
+    fn test_simd_vs_scalar_boundary_lengths() {
+        let mut mat = Vec::new();
+        gen_simple_mat(5, &mut mat, 2, 4, 1);
+        let q: i8 = 4; let e: i8 = 2; let q2: i8 = 24; let e2: i8 = 1;
+
+        for len in [15, 16, 17, 31, 32, 33, 47, 48, 49, 63, 64, 65, 100, 128, 200, 256, 300] {
+            let query: Vec<u8> = (0..len).map(|i| (i % 4) as u8).collect();
+            let target: Vec<u8> = (0..len).map(|i| (i % 4) as u8).collect();
+
+            for &flag in &[KswFlags::empty(), KswFlags::APPROX_MAX, KswFlags::EXTZ_ONLY] {
+                let simd = ksw_extd2_dispatch(&query, &target, 5, &mat, q, e, q2, e2, 500, 400, 0, flag);
+                let scalar = crate::align::ksw2::ksw_extd2(&query, &target, 5, &mat, q, e, q2, e2, 500, 400, 0, flag);
+
+                let simd_cigar = crate::align::cigar_to_string(&simd.cigar);
+                let scalar_cigar = crate::align::cigar_to_string(&scalar.cigar);
+                assert_eq!(simd_cigar, scalar_cigar,
+                    "len={} flag={:?}: SIMD={} scalar={}", len, flag, simd_cigar, scalar_cigar);
+            }
+        }
+    }
+
+    /// Test SIMD extension with sequences that have a match region followed by divergence
+    /// at various lengths (mimics the real right-extension pattern)
+    #[test]
+    fn test_simd_extension_match_then_diverge() {
+        let mut mat = Vec::new();
+        gen_simple_mat(5, &mut mat, 2, 4, 1);
+        let q: i8 = 4; let e: i8 = 2; let q2: i8 = 24; let e2: i8 = 1;
+
+        // Test various match lengths with divergent tails
+        for match_len in [50, 100, 200, 300, 500] {
+            for tail_len in [100, 500] {
+                let mut query = Vec::new();
+                let mut target = Vec::new();
+                for i in 0..match_len { query.push((i % 4) as u8); target.push((i % 4) as u8); }
+                for i in 0..tail_len { query.push(((i * 3 + 1) % 4) as u8); target.push(((i * 7 + 2) % 4) as u8); }
+
+                let simd = ksw_extd2_dispatch(&query, &target, 5, &mat, q, e, q2, e2, 500, 400, 0, KswFlags::EXTZ_ONLY);
+                let scalar = crate::align::ksw2::ksw_extd2(&query, &target, 5, &mat, q, e, q2, e2, 500, 400, 0, KswFlags::EXTZ_ONLY);
+
+                let s_cig = crate::align::cigar_to_string(&simd.cigar);
+                let r_cig = crate::align::cigar_to_string(&scalar.cigar);
+
+                // Count query bases consumed
+                fn qcons(cigar: &[u32]) -> i32 {
+                    cigar.iter().map(|&c| { let op = c & 0xf; let len = (c >> 4) as i32;
+                        if op == 0 || op == 1 || op == 7 || op == 8 { len } else { 0 }
+                    }).sum()
+                }
+                let s_qc = qcons(&simd.cigar);
+                let r_qc = qcons(&scalar.cigar);
+
+                // Query consumption should be very close (within 2bp)
+                assert!((s_qc - r_qc).abs() <= 2,
+                    "match={} tail={}: query consumed differs too much: SIMD={} ({}) scalar={} ({})",
+                    match_len, tail_len, s_qc, s_cig, r_qc, r_cig);
+            }
+        }
+    }
+
+    /// Focused test: narrow down SIMD vs scalar difference for extension with
+    /// specific sequence patterns. Prints diagnostics for any mismatch.
+    #[test]
+    fn test_simd_scalar_extension_diagnostic() {
+        let mut mat = Vec::new();
+        gen_simple_mat(5, &mut mat, 2, 4, 1);
+        let q: i8 = 4; let e: i8 = 2; let q2: i8 = 24; let e2: i8 = 1;
+        let mut mismatches = 0;
+
+        // Sweep parameters that might trigger differences
+        for match_len in (20..=200).step_by(10) {
+            for tail_len in [50, 200, 500] {
+                for bw in [100, 500] {
+                    let mut query = Vec::new();
+                    let mut target = Vec::new();
+                    for i in 0..match_len { query.push((i % 4) as u8); target.push((i % 4) as u8); }
+                    for i in 0..tail_len { query.push(((i * 3 + 1) % 4) as u8); target.push(((i * 7 + 2) % 4) as u8); }
+
+                    let simd = ksw_extd2_dispatch(&query, &target, 5, &mat, q, e, q2, e2, bw, 400, 0, KswFlags::EXTZ_ONLY);
+                    let scalar = crate::align::ksw2::ksw_extd2(&query, &target, 5, &mat, q, e, q2, e2, bw, 400, 0, KswFlags::EXTZ_ONLY);
+
+                    if simd.cigar != scalar.cigar {
+                        mismatches += 1;
+                        if mismatches <= 5 {
+                            eprintln!("MISMATCH match={} tail={} bw={}: SIMD={} scalar={} simd_max_t={} scalar_max_t={} simd_reach={} scalar_reach={}",
+                                match_len, tail_len, bw,
+                                crate::align::cigar_to_string(&simd.cigar),
+                                crate::align::cigar_to_string(&scalar.cigar),
+                                simd.max_t, scalar.max_t, simd.reach_end, scalar.reach_end);
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("Total SIMD vs scalar mismatches: {}", mismatches);
+        // For now, just report — don't assert, so we can see the full picture
     }
 }

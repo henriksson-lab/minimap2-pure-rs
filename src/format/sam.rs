@@ -79,25 +79,18 @@ pub fn write_sam_record(
     write!(s, "{}\t{}\t{}\t{}\t{}\t", qname, sam_flag, rname, pos, r.mapq).unwrap();
 
     // CIGAR
+    // Clip character: use hard-clip for supplementary/secondary (unless SOFTCLIP flag set),
+    // soft-clip for primary. Matches C minimap2's write_sam_cigar() logic.
+    let use_hard_clip = ((sam_flag & 0x800) != 0
+        || ((sam_flag & 0x100) != 0 && flag.contains(MapFlags::SECONDARY_SEQ)))
+        && !flag.contains(MapFlags::SOFTCLIP);
+    let clip_char = if use_hard_clip { 'H' } else { 'S' };
+
     if let Some(ref p) = r.extra {
-        // Soft-clip at start
-        if r.rev {
-            let clip = qlen - r.qe;
-            if clip > 0 {
-                if flag.contains(MapFlags::SOFTCLIP) {
-                    write!(s, "{}S", clip).unwrap();
-                } else {
-                    write!(s, "{}H", clip).unwrap();
-                }
-            }
-        } else {
-            if r.qs > 0 {
-                if flag.contains(MapFlags::SOFTCLIP) {
-                    write!(s, "{}S", r.qs).unwrap();
-                } else {
-                    write!(s, "{}H", r.qs).unwrap();
-                }
-            }
+        // Clip at start
+        let clip_start = if r.rev { qlen - r.qe } else { r.qs };
+        if clip_start > 0 {
+            write!(s, "{}{}", clip_start, clip_char).unwrap();
         }
         // Main CIGAR
         for &c in &p.cigar.0 {
@@ -106,24 +99,10 @@ pub fn write_sam_record(
             let op_char = CigarOp::CHARS[op as usize] as char;
             write!(s, "{}{}", len, op_char).unwrap();
         }
-        // Soft-clip at end
-        if r.rev {
-            if r.qs > 0 {
-                if flag.contains(MapFlags::SOFTCLIP) {
-                    write!(s, "{}S", r.qs).unwrap();
-                } else {
-                    write!(s, "{}H", r.qs).unwrap();
-                }
-            }
-        } else {
-            let clip = qlen - r.qe;
-            if clip > 0 {
-                if flag.contains(MapFlags::SOFTCLIP) {
-                    write!(s, "{}S", clip).unwrap();
-                } else {
-                    write!(s, "{}H", clip).unwrap();
-                }
-            }
+        // Clip at end
+        let clip_end = if r.rev { r.qs } else { qlen - r.qe };
+        if clip_end > 0 {
+            write!(s, "{}{}", clip_end, clip_char).unwrap();
         }
     } else {
         s.push('*');
@@ -133,11 +112,10 @@ pub fn write_sam_record(
     write!(s, "\t*\t0\t0\t").unwrap();
 
     // Determine SEQ/QUAL range based on clipping mode
-    let use_softclip = flag.contains(MapFlags::SOFTCLIP);
-    let (seq_start, seq_end) = if use_softclip || r.extra.is_none() {
-        (0usize, qseq.len()) // full sequence for soft clips
+    let (seq_start, seq_end) = if !use_hard_clip || r.extra.is_none() {
+        (0usize, qseq.len()) // full sequence for soft clips / primary
     } else {
-        // Hard clip: output only aligned portion
+        // Hard clip: output only aligned portion (supplementary/secondary)
         if r.rev {
             let qs_fwd = (qlen - r.qe).max(0) as usize;
             let qe_fwd = (qlen - r.qs).min(qlen) as usize;
