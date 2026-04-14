@@ -201,6 +201,38 @@ fn map_file_pair(ref_path: &str, qry_path: &str, preset: Option<&str>) -> Vec<(S
     results
 }
 
+fn command_stdout(program: &str, args: &[&str]) -> String {
+    let output = std::process::Command::new(program)
+        .args(args)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run {} {:?}: {}", program, args, e));
+    assert!(output.status.success(),
+        "{} {:?} failed with status {}", program, args, output.status);
+    String::from_utf8(output.stdout)
+        .unwrap_or_else(|e| panic!("{} {:?} produced non-UTF8 stdout: {}", program, args, e))
+}
+
+fn non_header_lines(output: &str) -> Vec<String> {
+    output
+        .lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('@'))
+        .map(str::to_owned)
+        .collect()
+}
+
+fn sam_core_fields(output: &str) -> Vec<String> {
+    non_header_lines(output)
+        .into_iter()
+        .map(|line| {
+            line.split('\t')
+                .take(6)
+                .collect::<Vec<_>>()
+                .join("\t")
+        })
+        .collect()
+}
+
 #[test]
 fn test_mt_genome_mapping() {
     let results = map_file_pair("minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa", None);
@@ -964,36 +996,52 @@ fn test_gapfill_cigar_covers_full_gap() {
     }
 }
 
-/// Test that a single read against chr11 produces the same CIGAR as C.
+/// Test that a single read against the chr11 regression fixture produces the
+/// same PAF records as C minimap2.
 /// This catches the remaining alignment difference that only manifests
 /// with longer right extensions (>100bp).
 #[test] 
 fn test_chr11_cigar_vs_c() {
     if !Path::new("minimap2/minimap2").exists() || !Path::new("target/release/minimap2-pure-rs").exists() { return; }
-    // Need chr11 reference and test read
-    let chr11 = "/tmp/chr11.fa";
-    let query = "/tmp/mini_query.fq";
-    if !Path::new(chr11).exists() || !Path::new(query).exists() { return; }
-    
-    let c_out = std::process::Command::new("minimap2/minimap2")
-        .args(&["-c", "-x", "map-hifi", chr11, query])
-        .stderr(std::process::Stdio::null())
-        .output().unwrap();
-    let c_paf = String::from_utf8_lossy(&c_out.stdout);
-    let c_line = c_paf.lines().next().unwrap_or("");
-    let c_fields: Vec<&str> = c_line.split('\t').collect();
-    
-    let r_out = std::process::Command::new("target/release/minimap2-pure-rs")
-        .args(&["-c", "-x", "map-hifi", chr11, query])
-        .stderr(std::process::Stdio::null())
-        .output().unwrap();
-    let r_paf = String::from_utf8_lossy(&r_out.stdout);
-    let r_line = r_paf.lines().next().unwrap_or("");
-    let r_fields: Vec<&str> = r_line.split('\t').collect();
-    
-    if c_fields.len() > 3 && r_fields.len() > 3 {
-        assert_eq!(c_fields[3], r_fields[3],
-            "qend differs: C={} Rust={}", c_fields[3], r_fields[3]);
+    let reference = "tests/data/chr11_bug_window.fa";
+    let query = "tests/data/chr11_bug_query.fq";
+
+    let args = ["-c", "-x", "map-hifi", reference, query];
+    let c_lines = non_header_lines(&command_stdout("minimap2/minimap2", &args));
+    let rust_lines = non_header_lines(&command_stdout("target/release/minimap2-pure-rs", &args));
+
+    assert_eq!(c_lines, rust_lines,
+        "chr11 fixture PAF output differs\nC:\n{}\nRust:\n{}",
+        c_lines.join("\n"), rust_lines.join("\n"));
+}
+
+#[test]
+fn test_cli_fixture_parity_matrix() {
+    if !Path::new("minimap2/minimap2").exists() || !Path::new("target/release/minimap2-pure-rs").exists() { return; }
+
+    let paf_cases: &[(&str, &[&str])] = &[
+        ("MT default PAF+cg", &["-c", "minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa"]),
+        ("MT HiFi PAF+cg", &["-c", "-x", "map-hifi", "minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa"]),
+        ("x3s default PAF+cg", &["-c", "minimap2/test/x3s-ref.fa", "minimap2/test/x3s-qry.fa"]),
+        ("t2/q2 default PAF+cg", &["-c", "minimap2/test/t2.fa", "minimap2/test/q2.fa"]),
+        ("chr11 fixture HiFi PAF+cg", &["-c", "-x", "map-hifi", "tests/data/chr11_bug_window.fa", "tests/data/chr11_bug_query.fq"]),
+    ];
+
+    for &(name, args) in paf_cases {
+        let c_lines = non_header_lines(&command_stdout("minimap2/minimap2", args));
+        let rust_lines = non_header_lines(&command_stdout("target/release/minimap2-pure-rs", args));
+        assert_eq!(c_lines, rust_lines, "{} differs", name);
+    }
+
+    let sam_cases: &[(&str, &[&str])] = &[
+        ("MT HiFi SAM EQX", &["-a", "-x", "map-hifi", "--eqx", "minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa"]),
+        ("x3s default SAM", &["-a", "minimap2/test/x3s-ref.fa", "minimap2/test/x3s-qry.fa"]),
+    ];
+
+    for &(name, args) in sam_cases {
+        let c_fields = sam_core_fields(&command_stdout("minimap2/minimap2", args));
+        let rust_fields = sam_core_fields(&command_stdout("target/release/minimap2-pure-rs", args));
+        assert_eq!(c_fields, rust_fields, "{} SAM core fields differ", name);
     }
 }
 
@@ -1038,7 +1086,7 @@ fn test_zdrop_real_sequences_simd_vs_scalar() {
 /// The z-drop fires at different positions depending on bandwidth.
 #[test]
 fn test_zdrop_second_pass_bandwidth() {
-    use minimap2::align::{align_pair_dual, cigar_to_string};
+    use minimap2::align::align_pair_dual;
     use minimap2::align::score::gen_simple_mat;
     use minimap2::flags::KswFlags;
     

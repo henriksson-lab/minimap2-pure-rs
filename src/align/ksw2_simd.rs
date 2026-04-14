@@ -1334,6 +1334,7 @@ unsafe fn extd2_sse41_only<const WITH_CIGAR: bool>(
 
 /// Recompute ez.score/mqe/mte from CIGAR by walking the alignment.
 /// This fixes the H-score tracking offset in the SIMD kernels.
+#[allow(dead_code, unused_variables, unused_assignments)]
 fn fixup_score_from_cigar(
     ez: &mut KswResult, query: &[u8], target: &[u8], m: i8, mat: &[i8],
     q: i8, e: i8, q2: i8, e2: i8, end_bonus: i32,
@@ -1414,7 +1415,7 @@ pub fn ksw_extd2_dispatch(
     #[cfg(target_arch = "x86_64")]
     {
         let with_cigar = !flag.contains(KswFlags::SCORE_ONLY);
-        let mut ez = if has_avx2() && has_sse41() {
+        let ez = if has_avx2() && has_sse41() {
             if with_cigar {
                 unsafe { extd2_sse41_avx2::<true>(query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag) }
             } else {

@@ -6,7 +6,19 @@ use crate::types::AlignReg;
 /// Compute event identity from alignment: mlen / blen.
 pub fn event_identity(r: &AlignReg) -> f64 {
     if r.blen == 0 { return 0.0; }
-    r.mlen as f64 / r.blen as f64
+    let Some(extra) = r.extra.as_ref() else {
+        return r.mlen as f64 / r.blen as f64;
+    };
+    let mut n_gap = 0i32;
+    let mut n_gapo = 0i32;
+    for &c in &extra.cigar.0 {
+        let op = c & 0xf;
+        if op == 1 || op == 2 {
+            n_gapo += 1;
+            n_gap += (c >> 4) as i32;
+        }
+    }
+    r.mlen as f64 / (r.blen + extra.n_ambi as i32 - n_gap + n_gapo) as f64
 }
 
 /// Write PAF tags for an alignment. Matches write_tags() from format.c.

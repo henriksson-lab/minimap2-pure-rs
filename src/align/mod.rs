@@ -561,16 +561,6 @@ fn align1(
                 // Test z-drop and potential inversion
                 if !ez.cigar.is_empty() && !ez.zdropped {
                     let zdrop_code = test_zdrop(opt, qsub, &tseq_buf[..gap_tlen], &ez.cigar, mat);
-                    // Debug: dump test_zdrop results for long gap-fills
-                    if gap_tlen > 1000 && zdrop_code > 0 {
-                        use std::sync::atomic::{AtomicU32, Ordering};
-                        static CNT: AtomicU32 = AtomicU32::new(0);
-                        let c = CNT.fetch_add(1, Ordering::Relaxed);
-                        if c < 5 {
-                            eprintln!("TEST_ZDROP: gap_tlen={} gap_qlen={} zdrop_code={} first_pass_cigar={}",
-                                gap_tlen, gap_qlen, zdrop_code, crate::align::cigar_to_string(&ez.cigar));
-                        }
-                    }
                     if zdrop_code > 0 {
                         // Second pass: re-align with exact z-drop (use zdrop_inv for inversions)
                         // Note: APPROX_MAX is intentionally NOT set here (matching C's "lift approximate")
@@ -582,37 +572,38 @@ fn align1(
 
                 log::debug!("  gap i={} cur_rs={} next_re={} cur_qs={} next_qe={} tlen={} qlen={} bw={} score={} zdropped={}",
                     i, cur_rs, next_re, cur_qs, next_qe, gap_tlen, gap_qlen, use_bw, ez.score, ez.zdropped);
-                // Dump z-dropped gap-fill input sequences for debugging
-                if ez.zdropped && gap_tlen > 500 && gap_tlen < 5000 {
-                    use std::sync::atomic::{AtomicBool, Ordering};
-                    static DUMPED: AtomicBool = AtomicBool::new(false);
-                    if !DUMPED.swap(true, Ordering::Relaxed) {
-                        // Write sequences to files for test reproduction
-                        let _ = std::fs::write("/tmp/zdrop_query.bin", &qseq[cur_qs as usize..next_qe as usize]);
-                        let _ = std::fs::write("/tmp/zdrop_target.bin", &tseq_buf[..gap_tlen]);
-                        eprintln!("ZDROP_DUMP: qlen={} tlen={} bw={} zdrop={} q={} e={} q2={} e2={} max_t={} max_q={} score={} cigar={}",
-                            gap_qlen, gap_tlen, use_bw, opt.zdrop, opt.q, opt.e, opt.q2, opt.e2,
-                            ez.max_t, ez.max_q, ez.score, crate::align::cigar_to_string(&ez.cigar));
-                    }
+                if !ez.cigar.is_empty() {
+                    append_cigar(&mut cigar_ops, &ez.cigar);
                 }
-                // Debug: dump last 3 gap-fills for first alignment
                 if ez.zdropped {
-                        dp_score += ez.max;
+                    dp_score += ez.max;
                     dropped = true;
-                    // Try to split: find the anchor just after the z-drop point
-                    let remaining_cnt = cnt1 - i;
-                    if remaining_cnt >= opt.min_cnt as usize {
-                        if let Some(mut r2) = crate::hit::split_reg(r, i as i32, qlen, a) {
+
+                    let zdrop_re = cur_rs + ez.max_t + 1;
+                    let zdrop_qe = cur_qs + ez.max_q + 1;
+
+                    // Try to split at the first anchor after the z-drop point,
+                    // matching minimap2's mm_align1().
+                    let mut split_j = i as isize - 1;
+                    while split_j >= 0 {
+                        let anchor_x = a[as1 + split_j as usize].x as i32;
+                        if anchor_x <= cur_rs + ez.max_t { break; }
+                        split_j -= 1;
+                    }
+                    if split_j < 0 { split_j = 0; }
+                    let split_n = as1 as i32 + split_j as i32 + 1 - r.as_;
+                    let remaining_cnt = r.cnt - split_n;
+                    if remaining_cnt >= opt.min_cnt {
+                        if let Some(mut r2) = crate::hit::split_reg(r, split_n, qlen, a) {
                             // Check if zdrop was due to inversion
                             let zdrop_code = test_zdrop(opt, qsub, &tseq_buf[..gap_tlen], &ez.cigar, mat);
                             if zdrop_code == 2 { r2.split_inv = true; }
                             split_regs.push(r2);
                         }
                     }
+                    cur_rs = zdrop_re;
+                    cur_qs = zdrop_qe;
                     break;
-                }
-                if !ez.cigar.is_empty() {
-                    append_cigar(&mut cigar_ops, &ez.cigar);
                 }
                 if ez.score > ksw2::KSW_NEG_INF / 2 {
                     dp_score += ez.score;
@@ -862,8 +853,8 @@ fn compute_cigar_stats(cigar: &[u32], qseq: &[u8], tseq: &[u8], mat: &[i8], q_pe
     let mut mlen = 0i32;
     let mut blen = 0i32;
     let mut n_ambi = 0u32;
-    let mut score_cur = 0i32;
-    let mut dp_max = 0i32;
+    let mut score_cur = 0.0f64;
+    let mut dp_max = 0.0f64;
     let mut q_off = 0usize;
     let mut t_off = 0usize;
     for &c in cigar {
@@ -877,23 +868,48 @@ fn compute_cigar_stats(cigar: &[u32], qseq: &[u8], tseq: &[u8], mat: &[i8], q_pe
                     let (qb, tb) = unsafe {
                         (*qseq.get_unchecked(q_off + l), *tseq.get_unchecked(t_off + l))
                     };
-                    if qb > 3 || tb > 3 { n_ambi += 1; }
-                    else if qb == tb { mlen += 1; }
+                    if qb > 3 || tb > 3 {
+                        n_ambi += 1;
+                    } else {
+                        blen += 1;
+                        if qb == tb { mlen += 1; }
+                    }
                     // SAFETY: tb < 5, qb < 5 (encoded bases), so tb*5+qb < 25 <= mat.len()
-                    score_cur += unsafe { *mat.get_unchecked(tb as usize * 5 + qb as usize) } as i32;
-                    if score_cur < 0 { score_cur = 0; }
+                    score_cur += unsafe { *mat.get_unchecked(tb as usize * 5 + qb as usize) } as f64;
+                    if score_cur < 0.0 { score_cur = 0.0; }
                     if score_cur > dp_max { dp_max = score_cur; }
                 }
-                blen += len as i32;
                 q_off += len; t_off += len;
             }
-            1 => { blen += len as i32; score_cur -= q_pen + e_pen; if score_cur < 0 { score_cur = 0; } q_off += len; }
-            2 => { blen += len as i32; score_cur -= q_pen + e_pen; if score_cur < 0 { score_cur = 0; } t_off += len; }
+            1 => {
+                let safe_len = len.min(qseq.len().saturating_sub(q_off));
+                let mut ambi = 0usize;
+                for l in 0..safe_len {
+                    if unsafe { *qseq.get_unchecked(q_off + l) } > 3 { ambi += 1; }
+                }
+                n_ambi += ambi as u32;
+                blen += (safe_len - ambi) as i32;
+                score_cur -= q_pen as f64 + e_pen as f64 * crate::chain::mg_log2(1.0 + len as f32) as f64;
+                if score_cur < 0.0 { score_cur = 0.0; }
+                q_off += len;
+            }
+            2 => {
+                let safe_len = len.min(tseq.len().saturating_sub(t_off));
+                let mut ambi = 0usize;
+                for l in 0..safe_len {
+                    if unsafe { *tseq.get_unchecked(t_off + l) } > 3 { ambi += 1; }
+                }
+                n_ambi += ambi as u32;
+                blen += (safe_len - ambi) as i32;
+                score_cur -= q_pen as f64 + e_pen as f64 * crate::chain::mg_log2(1.0 + len as f32) as f64;
+                if score_cur < 0.0 { score_cur = 0.0; }
+                t_off += len;
+            }
             3 => { t_off += len; } // N_SKIP
             _ => { q_off += len; t_off += len; }
         }
     }
-    (mlen, blen, n_ambi, dp_max)
+    (mlen, blen, n_ambi, (dp_max + 0.499) as i32)
 }
 
 /// Perform DP alignment for all regions.
