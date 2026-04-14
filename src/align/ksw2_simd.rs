@@ -1332,81 +1332,6 @@ unsafe fn extd2_sse41_only<const WITH_CIGAR: bool>(
     extd2_sse41_inner::<WITH_CIGAR, false>(query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag)
 }
 
-/// Recompute ez.score/mqe/mte from CIGAR by walking the alignment.
-/// This fixes the H-score tracking offset in the SIMD kernels.
-#[allow(dead_code, unused_variables, unused_assignments)]
-fn fixup_score_from_cigar(
-    ez: &mut KswResult, query: &[u8], target: &[u8], m: i8, mat: &[i8],
-    q: i8, e: i8, q2: i8, e2: i8, end_bonus: i32,
-) {
-    if ez.cigar.is_empty() { return; }
-    let qe1 = q as i32 + e as i32;
-    let qe2v = q2 as i32 + e2 as i32;
-    let m_u = m as usize;
-    let mut score = 0i32;
-    let mut max_score = 0i32;
-    let mut qi = 0usize;
-    let mut ti = 0usize;
-    let mut max_qi = 0usize;
-    let mut max_ti = 0usize;
-    // Track CIGAR position of the max for truncation:
-    // (cigar_idx, offset_within_op) where the max was found
-    let mut max_cigar_idx = 0usize;
-    let mut max_cigar_offset = 0usize;
-
-    for (cidx, &c) in ez.cigar.iter().enumerate() {
-        let op = c & 0xf;
-        let len = (c >> 4) as usize;
-        match op {
-            0 | 7 | 8 => { // M/=/X
-                let safe_len = len.min(query.len().saturating_sub(qi)).min(target.len().saturating_sub(ti));
-                for l in 0..safe_len {
-                    unsafe {
-                        score += *mat.get_unchecked(*target.get_unchecked(ti + l) as usize * m_u + *query.get_unchecked(qi + l) as usize) as i32;
-                    }
-                    if score > max_score {
-                        max_score = score;
-                        max_qi = qi + l;
-                        max_ti = ti + l;
-                        max_cigar_idx = cidx;
-                        max_cigar_offset = l + 1; // bases consumed up to and including this position
-                    }
-                }
-                qi += len; ti += len;
-            }
-            1 => { // I
-                let gap = (qe1 + e as i32 * (len as i32 - 1)).min(qe2v + e2 as i32 * (len as i32 - 1));
-                score -= gap;
-                qi += len;
-                if score > max_score {
-                    max_score = score; max_qi = qi; max_ti = ti;
-                    max_cigar_idx = cidx; max_cigar_offset = len;
-                }
-            }
-            2 | 3 => { // D/N
-                let gap = (qe1 + e as i32 * (len as i32 - 1)).min(qe2v + e2 as i32 * (len as i32 - 1));
-                score -= gap;
-                ti += len;
-                if score > max_score {
-                    max_score = score; max_qi = qi; max_ti = ti;
-                    max_cigar_idx = cidx; max_cigar_offset = len;
-                }
-            }
-            _ => { qi += len; ti += len; }
-        }
-    }
-
-    // No fixup — use SIMD kernel values directly (matching C minimap2 behavior).
-    // C doesn't have a fixup; the SIMD kernel's values are used as-is.
-    let _ = (score, max_score, max_qi, max_ti, qi, ti); // suppress unused warnings
-
-    if end_bonus > 0 && ez.reach_end {
-        ez.score += end_bonus;
-        if ez.mqe != KSW_NEG_INF { ez.mqe += end_bonus; }
-        if ez.mte != KSW_NEG_INF { ez.mte += end_bonus; }
-    }
-}
-
 /// Dispatch for dual-gap: SSE4.1 → SSE2 → scalar fallback.
 pub fn ksw_extd2_dispatch(
     query: &[u8], target: &[u8], m: i8, mat: &[i8],
@@ -1620,7 +1545,7 @@ mod tests {
     }
 
     /// Focused test: narrow down SIMD vs scalar difference for extension with
-    /// specific sequence patterns. Prints diagnostics for any mismatch.
+    /// specific sequence patterns.
     #[test]
     fn test_simd_scalar_extension_diagnostic() {
         let mut mat = Vec::new();
@@ -1642,18 +1567,10 @@ mod tests {
 
                     if simd.cigar != scalar.cigar {
                         mismatches += 1;
-                        if mismatches <= 5 {
-                            eprintln!("MISMATCH match={} tail={} bw={}: SIMD={} scalar={} simd_max_t={} scalar_max_t={} simd_reach={} scalar_reach={}",
-                                match_len, tail_len, bw,
-                                crate::align::cigar_to_string(&simd.cigar),
-                                crate::align::cigar_to_string(&scalar.cigar),
-                                simd.max_t, scalar.max_t, simd.reach_end, scalar.reach_end);
-                        }
                     }
                 }
             }
         }
-        eprintln!("Total SIMD vs scalar mismatches: {}", mismatches);
-        // For now, just report — don't assert, so we can see the full picture
+        assert_eq!(mismatches, 0, "SIMD and scalar extension CIGARs differ");
     }
 }

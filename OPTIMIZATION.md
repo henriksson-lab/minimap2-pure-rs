@@ -10,6 +10,11 @@ Starting point: 27% slower. Final result: **6-7% faster** in CPU cycles.
 
 ## SIMD Alignment Kernel (`src/align/ksw2_simd.rs`)
 
+### SSE2 low-level local alignment (`ksw_ll_i16`)
+The C implementation uses a striped SSE2 `ksw_ll_i16()` for inversion/z-drop checks. A scalar Rust translation dominated the reduced chr11 HiFi regression fixture before optimization (~73% of Rust cycles on the amplified chr11 x200 benchmark), making Rust ~2.8x slower than C on that workload.
+
+`src/align/ksw2.rs` now dispatches `ksw_ll_i16()` to a striped SSE2 implementation on x86_64, with the scalar implementation retained as fallback. After this change, `scripts/benchmark_speed.py --reps 5` reports the chr11 x200 case at approximately parity with C minimap2, and profiling shows both implementations are again dominated by the dual-gap extension kernel.
+
 ### SSE4.1 kernel with const-generic specialization
 The C version dispatches CIGAR vs score-only at runtime with `if (with_cigar)` branches inside the inner loop. The Rust version uses `extd2_sse41<const WITH_CIGAR: bool>`, letting LLVM generate two fully specialized functions. The CIGAR version has no dead score-only code and vice versa, reducing code size and register pressure.
 
@@ -54,7 +59,7 @@ Unsafe `get_unchecked` / raw pointer access in hot loops where indices are prova
 
 - **`mm_sketch`** — `SEQ_NT4_TABLE[seq[i]]` lookups and circular `buf[j]` accesses
 - **`lchain_dp`** — inner DP loop accessing `a[iu]`, `f[ju]`, `p[ju]`, `t[ju]`
-- **`test_zdrop`** / **`compute_cigar_stats`** / **`fixup_score_from_cigar`** — per-base CIGAR walking with matrix lookups
+- **`test_zdrop`** / **`compute_cigar_stats`** — per-base CIGAR walking with matrix lookups
 - **SIMD kernel** — `off_a[r]`, `off_e[r]`, backtrack `bt[idx]` accesses
 
 ## Code Structure

@@ -1,5 +1,8 @@
 use crate::flags::KswFlags;
 
+#[cfg(target_arch = "x86_64")]
+use std::arch::x86_64::*;
+
 pub const KSW_NEG_INF: i32 = -0x40000000;
 
 /// KSW2 alignment result.
@@ -10,10 +13,10 @@ pub struct KswResult {
     pub max_q: i32,
     pub max_t: i32,
     pub mqe: i32,   // max score reaching end of query
-    pub mqe_t: i32,  // target position when reaching end of query
+    pub mqe_t: i32, // target position when reaching end of query
     pub mte: i32,   // max score reaching end of target
-    pub mte_q: i32,  // query position when reaching end of target
-    pub score: i32,  // max score reaching both ends
+    pub mte_q: i32, // query position when reaching end of target
+    pub score: i32, // max score reaching both ends
     pub reach_end: bool,
     pub cigar: Vec<u32>,
 }
@@ -43,14 +46,39 @@ impl KswResult {
 }
 
 /// Low-level 16-bit local alignment for inversion detection.
-/// Scalar equivalent of ksw_ll_i16.
+/// Equivalent of minimap2's ksw_ll_i16.
 /// Returns (score, query_end, target_end).
 pub fn ksw_ll_i16(
-    query: &[u8], target: &[u8], m: i8, mat: &[i8], gapo: i32, gape: i32,
+    query: &[u8],
+    target: &[u8],
+    m: i8,
+    mat: &[i8],
+    gapo: i32,
+    gape: i32,
+) -> (i32, i32, i32) {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("sse2") {
+            // SAFETY: the runtime check above guarantees SSE2 support.
+            return unsafe { ksw_ll_i16_sse2(query, target, m, mat, gapo, gape) };
+        }
+    }
+    ksw_ll_i16_scalar(query, target, m, mat, gapo, gape)
+}
+
+fn ksw_ll_i16_scalar(
+    query: &[u8],
+    target: &[u8],
+    m: i8,
+    mat: &[i8],
+    gapo: i32,
+    gape: i32,
 ) -> (i32, i32, i32) {
     let qlen = query.len();
     let tlen = target.len();
-    if qlen == 0 || tlen == 0 { return (0, -1, -1); }
+    if qlen == 0 || tlen == 0 {
+        return (0, -1, -1);
+    }
     let m_u = m as usize;
     let gapoe = gapo + gape;
     let mut h = vec![0i32; qlen];
@@ -72,16 +100,144 @@ pub fn ksw_ll_i16(
             let h_gap = (h_new - gapoe).max(0);
             e[j] = (e[j] - gape).max(h_gap);
             f = (f - gape).max(h_gap);
-            if h_new > imax { imax = h_new; }
+            if h_new > imax {
+                imax = h_new;
+            }
         }
         if imax >= gmax {
-            gmax = imax; te = i as i32;
+            gmax = imax;
+            te = i as i32;
             for j in (0..qlen).rev() {
-                if h[j] == gmax { qe = j as i32; break; }
+                if h[j] == gmax {
+                    qe = j as i32;
+                    break;
+                }
             }
         }
     }
     (gmax, qe, te)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn ksw_ll_i16_sse2(
+    query: &[u8],
+    target: &[u8],
+    m: i8,
+    mat: &[i8],
+    gapo: i32,
+    gape: i32,
+) -> (i32, i32, i32) {
+    let qlen = query.len();
+    let tlen = target.len();
+    if qlen == 0 || tlen == 0 {
+        return (0, -1, -1);
+    }
+
+    let m_u = m as usize;
+    let slen = (qlen + 7) >> 3;
+    let n_vec = slen * m_u;
+    let mut qp = vec![_mm_setzero_si128(); n_vec];
+    for a in 0..m_u {
+        for i in 0..slen {
+            let mut v = [0i16; 8];
+            for lane in 0..8 {
+                let k = i + lane * slen;
+                if k < qlen {
+                    v[lane] = *mat.get_unchecked(a * m_u + *query.get_unchecked(k) as usize) as i16;
+                }
+            }
+            *qp.get_unchecked_mut(a * slen + i) =
+                _mm_set_epi16(v[7], v[6], v[5], v[4], v[3], v[2], v[1], v[0]);
+        }
+    }
+
+    let mut h0 = vec![_mm_setzero_si128(); slen];
+    let mut h1 = vec![_mm_setzero_si128(); slen];
+    let mut e_arr = vec![_mm_setzero_si128(); slen];
+    let mut hmax = vec![_mm_setzero_si128(); slen];
+
+    let zero = _mm_setzero_si128();
+    let gapoe = _mm_set1_epi16((gapo + gape) as i16);
+    let gape_v = _mm_set1_epi16(gape as i16);
+    let mut gmax = 0i32;
+    let mut te = -1i32;
+
+    for i in 0..tlen {
+        let mut f = zero;
+        let mut max_v = zero;
+        let ti = *target.get_unchecked(i) as usize;
+        let s_base = ti * slen;
+
+        let mut h = _mm_loadu_si128(h0.as_ptr().add(slen - 1));
+        h = _mm_slli_si128::<2>(h);
+        for j in 0..slen {
+            h = _mm_adds_epi16(h, _mm_loadu_si128(qp.as_ptr().add(s_base + j)));
+            let e = _mm_loadu_si128(e_arr.as_ptr().add(j));
+            h = _mm_max_epi16(h, e);
+            h = _mm_max_epi16(h, f);
+            max_v = _mm_max_epi16(max_v, h);
+            _mm_storeu_si128(h1.as_mut_ptr().add(j), h);
+
+            h = _mm_subs_epu16(h, gapoe);
+            let e_new = _mm_max_epi16(_mm_subs_epu16(e, gape_v), h);
+            _mm_storeu_si128(e_arr.as_mut_ptr().add(j), e_new);
+            f = _mm_max_epi16(_mm_subs_epu16(f, gape_v), h);
+            h = _mm_loadu_si128(h0.as_ptr().add(j));
+        }
+
+        for _ in 0..8 {
+            f = _mm_slli_si128::<2>(f);
+            let mut any_gt = false;
+            for j in 0..slen {
+                let h_old = _mm_loadu_si128(h1.as_ptr().add(j));
+                let h_new = _mm_max_epi16(h_old, f);
+                _mm_storeu_si128(h1.as_mut_ptr().add(j), h_new);
+                let h_gap = _mm_subs_epu16(h_new, gapoe);
+                f = _mm_subs_epu16(f, gape_v);
+                let gt = _mm_cmpgt_epi16(f, h_gap);
+                if _mm_movemask_epi8(gt) != 0 {
+                    any_gt = true;
+                }
+            }
+            if !any_gt {
+                break;
+            }
+        }
+
+        let imax = hmax_epi16(max_v) as i32;
+        if imax >= gmax {
+            gmax = imax;
+            te = i as i32;
+            hmax.copy_from_slice(&h1);
+        }
+        std::mem::swap(&mut h0, &mut h1);
+    }
+
+    let mut qe = -1i32;
+    for i in 0..(slen * 8) {
+        let vec_idx = i / 8;
+        let lane = i & 7;
+        let mut lanes = [0i16; 8];
+        _mm_storeu_si128(
+            lanes.as_mut_ptr() as *mut __m128i,
+            _mm_loadu_si128(hmax.as_ptr().add(vec_idx)),
+        );
+        if lanes[lane] as i32 == gmax {
+            let q = i / 8 + (i & 7) * slen;
+            qe = q as i32;
+        }
+    }
+    (gmax, qe, te)
+}
+
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn hmax_epi16(mut x: __m128i) -> i16 {
+    x = _mm_max_epi16(x, _mm_srli_si128::<8>(x));
+    x = _mm_max_epi16(x, _mm_srli_si128::<4>(x));
+    x = _mm_max_epi16(x, _mm_srli_si128::<2>(x));
+    _mm_extract_epi16::<0>(x) as i16
 }
 
 /// Push a CIGAR operation, merging with the last if same op.
@@ -220,40 +376,58 @@ pub fn ksw_extz2(
                 *e_ptr.add(j) = e_new;
 
                 // F state (insertion)
-                let f_new = (f - e_i32).max(
-                    if j > 0 { *h_cur_ptr.add(j - 1) - qe } else { KSW_NEG_INF }
-                );
+                let f_new = (f - e_i32).max(if j > 0 {
+                    *h_cur_ptr.add(j - 1) - qe
+                } else {
+                    KSW_NEG_INF
+                });
                 f = f_new;
 
                 // H = max(diag, E, F)
                 let mut h = diag.max(e_new).max(f_new);
-                if is_extz && h < 0 { h = 0; }
+                if is_extz && h < 0 {
+                    h = 0;
+                }
                 *h_cur_ptr.add(j) = h;
 
-                if h > row_max { row_max = h; row_max_j = j; }
+                if h > row_max {
+                    row_max = h;
+                    row_max_j = j;
+                }
 
                 // Backtrack: bits 0-2 = state (0=H/diag, 1=E/del, 2=F/ins)
                 // bit 3 (0x08) = E continuation, bit 4 (0x10) = F continuation
                 if with_cigar {
                     let e_ext = e_old - e_i32;
                     let _f_ext = f - e_i32; // f before update was f_new, f_ext is old f - e
-                    let bt_val = if h == diag { 0u8 }
-                        else if h == e_new {
-                            1u8 | if e_new == e_ext { 0x08 } else { 0 }
+                    let bt_val = if h == diag {
+                        0u8
+                    } else if h == e_new {
+                        1u8 | if e_new == e_ext { 0x08 } else { 0 }
+                    } else {
+                        // For F continuation: check if f_new came from extension
+                        let _f_was_ext = f_new == (f_new + e_i32) - e_i32; // always true, use prev f
+                        2u8 | if j > 0 && f_new != (*h_cur_ptr.add(j - 1) - qe) {
+                            0x10
                         } else {
-                            // For F continuation: check if f_new came from extension
-                            let _f_was_ext = f_new == (f_new + e_i32) - e_i32; // always true, use prev f
-                            2u8 | if j > 0 && f_new != (*h_cur_ptr.add(j-1) - qe) { 0x10 } else { 0 }
-                        };
+                            0
+                        }
+                    };
                     bt[iu][j] = bt_val;
                 }
 
-                if j == last_col && h > ez.mte { ez.mte = h; ez.mte_q = i; }
+                if j == last_col && h > ez.mte {
+                    ez.mte = h;
+                    ez.mte_q = i;
+                }
             }
         }
         if i == last_row {
             for j in j_st..j_en {
-                if h_cur[j] > ez.mqe { ez.mqe = h_cur[j]; ez.mqe_t = j as i32; }
+                if h_cur[j] > ez.mqe {
+                    ez.mqe = h_cur[j];
+                    ez.mqe_t = j as i32;
+                }
             }
         }
 
@@ -270,14 +444,21 @@ pub fn ksw_extz2(
 
     // Compute final score for full alignment (non-extension)
     if !is_extz && qlen > 0 && tlen > 0 {
-        if ez.mqe > KSW_NEG_INF / 2 && ez.mqe_t == tlen - 1 { ez.score = ez.mqe; }
-        else if ez.mte > KSW_NEG_INF / 2 && ez.mte_q == qlen - 1 { ez.score = ez.mte; }
+        if ez.mqe > KSW_NEG_INF / 2 && ez.mqe_t == tlen - 1 {
+            ez.score = ez.mqe;
+        } else if ez.mte > KSW_NEG_INF / 2 && ez.mte_q == qlen - 1 {
+            ez.score = ez.mte;
+        }
     }
 
     // Add end bonus
     if end_bonus > 0 {
-        if ez.mqe != KSW_NEG_INF { ez.mqe += end_bonus; }
-        if ez.mte != KSW_NEG_INF { ez.mte += end_bonus; }
+        if ez.mqe != KSW_NEG_INF {
+            ez.mqe += end_bonus;
+        }
+        if ez.mte != KSW_NEG_INF {
+            ez.mte += end_bonus;
+        }
     }
 
     // Backtrace start — generate CIGAR even for zdropped
@@ -318,9 +499,19 @@ pub fn ksw_extz2(
 
                 match state {
                     // i=query, j=target: state 1 = E (query gap) = I, state 2 = F (target gap) = D
-                    0 => { push_cigar_fn(&mut cigar, 0, 1); i -= 1; j -= 1; }
-                    1 => { push_cigar_fn(&mut cigar, 1, 1); i -= 1; }
-                    _ => { push_cigar_fn(&mut cigar, 2, 1); j -= 1; }
+                    0 => {
+                        push_cigar_fn(&mut cigar, 0, 1);
+                        i -= 1;
+                        j -= 1;
+                    }
+                    1 => {
+                        push_cigar_fn(&mut cigar, 1, 1);
+                        i -= 1;
+                    }
+                    _ => {
+                        push_cigar_fn(&mut cigar, 2, 1);
+                        j -= 1;
+                    }
                 }
             }
             if i >= 0 {
@@ -402,21 +593,53 @@ pub fn ksw_extd2(
             };
 
             // E states (deletion)
-            let e1_ext = if e1_arr[j] > KSW_NEG_INF / 2 { e1_arr[j] - e as i32 } else { KSW_NEG_INF };
-            let e1_open = if h_prv[j] > KSW_NEG_INF / 2 { h_prv[j] - qe1 } else { KSW_NEG_INF };
+            let e1_ext = if e1_arr[j] > KSW_NEG_INF / 2 {
+                e1_arr[j] - e as i32
+            } else {
+                KSW_NEG_INF
+            };
+            let e1_open = if h_prv[j] > KSW_NEG_INF / 2 {
+                h_prv[j] - qe1
+            } else {
+                KSW_NEG_INF
+            };
             e1_arr[j] = e1_ext.max(e1_open);
 
-            let e2_ext = if e2_arr[j] > KSW_NEG_INF / 2 { e2_arr[j] - e2 as i32 } else { KSW_NEG_INF };
-            let e2_open = if h_prv[j] > KSW_NEG_INF / 2 { h_prv[j] - qe2 } else { KSW_NEG_INF };
+            let e2_ext = if e2_arr[j] > KSW_NEG_INF / 2 {
+                e2_arr[j] - e2 as i32
+            } else {
+                KSW_NEG_INF
+            };
+            let e2_open = if h_prv[j] > KSW_NEG_INF / 2 {
+                h_prv[j] - qe2
+            } else {
+                KSW_NEG_INF
+            };
             e2_arr[j] = e2_ext.max(e2_open);
 
             // F states (insertion)
-            let f1_ext = if f1 > KSW_NEG_INF / 2 { f1 - e as i32 } else { KSW_NEG_INF };
-            let f1_open = if j > 0 && h_cur[j - 1] > KSW_NEG_INF / 2 { h_cur[j - 1] - qe1 } else { KSW_NEG_INF };
+            let f1_ext = if f1 > KSW_NEG_INF / 2 {
+                f1 - e as i32
+            } else {
+                KSW_NEG_INF
+            };
+            let f1_open = if j > 0 && h_cur[j - 1] > KSW_NEG_INF / 2 {
+                h_cur[j - 1] - qe1
+            } else {
+                KSW_NEG_INF
+            };
             f1 = f1_ext.max(f1_open);
 
-            let f2_ext = if f2 > KSW_NEG_INF / 2 { f2 - e2 as i32 } else { KSW_NEG_INF };
-            let f2_open = if j > 0 && h_cur[j - 1] > KSW_NEG_INF / 2 { h_cur[j - 1] - qe2 } else { KSW_NEG_INF };
+            let f2_ext = if f2 > KSW_NEG_INF / 2 {
+                f2 - e2 as i32
+            } else {
+                KSW_NEG_INF
+            };
+            let f2_open = if j > 0 && h_cur[j - 1] > KSW_NEG_INF / 2 {
+                h_cur[j - 1] - qe2
+            } else {
+                KSW_NEG_INF
+            };
             f2 = f2_ext.max(f2_open);
 
             let h = diag.max(e1_arr[j]).max(e2_arr[j]).max(f1).max(f2);
@@ -467,13 +690,20 @@ pub fn ksw_extd2(
     let is_extz = flag.contains(KswFlags::EXTZ_ONLY);
     if !is_extz {
         // Full alignment: the score at (qlen-1, tlen-1) was tracked via mqe/mte
-        if ez.mqe > KSW_NEG_INF / 2 && ez.mqe_t == tlen - 1 { ez.score = ez.mqe; }
-        else if ez.mte > KSW_NEG_INF / 2 && ez.mte_q == qlen - 1 { ez.score = ez.mte; }
+        if ez.mqe > KSW_NEG_INF / 2 && ez.mqe_t == tlen - 1 {
+            ez.score = ez.mqe;
+        } else if ez.mte > KSW_NEG_INF / 2 && ez.mte_q == qlen - 1 {
+            ez.score = ez.mte;
+        }
     }
 
     if end_bonus > 0 {
-        if ez.mqe != KSW_NEG_INF { ez.mqe += end_bonus; }
-        if ez.mte != KSW_NEG_INF { ez.mte += end_bonus; }
+        if ez.mqe != KSW_NEG_INF {
+            ez.mqe += end_bonus;
+        }
+        if ez.mte != KSW_NEG_INF {
+            ez.mte += end_bonus;
+        }
     }
 
     // Backtrace start — generate CIGAR even for zdropped (matching C SIMD behavior)
@@ -500,24 +730,44 @@ pub fn ksw_extd2(
             while i >= 0 && j >= 0 {
                 let iu = i as usize;
                 let ju = j as usize;
-                if iu >= bt.len() || ju >= bt[0].len() { break; }
+                if iu >= bt.len() || ju >= bt[0].len() {
+                    break;
+                }
                 let tmp = bt[iu][ju];
                 if state == 0 {
                     state = tmp & 7;
                 } else if (tmp >> (state + 2)) & 1 == 0 {
                     state = 0;
                 }
-                if state == 0 { state = tmp & 7; }
+                if state == 0 {
+                    state = tmp & 7;
+                }
                 // i=query, j=target: state 1/3 = E (query gap) = I, state 2/4 = F (target gap) = D
                 match state {
-                    0 => { push_cigar_fn(&mut cigar, 0, 1); i -= 1; j -= 1; }
-                    1 | 3 => { push_cigar_fn(&mut cigar, 1, 1); i -= 1; }
-                    _ => { push_cigar_fn(&mut cigar, 2, 1); j -= 1; }
+                    0 => {
+                        push_cigar_fn(&mut cigar, 0, 1);
+                        i -= 1;
+                        j -= 1;
+                    }
+                    1 | 3 => {
+                        push_cigar_fn(&mut cigar, 1, 1);
+                        i -= 1;
+                    }
+                    _ => {
+                        push_cigar_fn(&mut cigar, 2, 1);
+                        j -= 1;
+                    }
                 }
             }
-            if i >= 0 { push_cigar_fn(&mut cigar, 1, i + 1); }
-            if j >= 0 { push_cigar_fn(&mut cigar, 2, j + 1); }
-            if !flag.contains(KswFlags::REV_CIGAR) { cigar.reverse(); }
+            if i >= 0 {
+                push_cigar_fn(&mut cigar, 1, i + 1);
+            }
+            if j >= 0 {
+                push_cigar_fn(&mut cigar, 2, j + 1);
+            }
+            if !flag.contains(KswFlags::REV_CIGAR) {
+                cigar.reverse();
+            }
             ez.cigar = cigar;
         }
     }
@@ -541,7 +791,18 @@ mod tests {
         let mat = make_mat();
         let query = [0u8, 1, 2, 3, 0, 1, 2, 3]; // ACGTACGT
         let target = [0u8, 1, 2, 3, 0, 1, 2, 3];
-        let ez = ksw_extz2(&query, &target, 5, &mat, 4, 2, -1, 400, 0, KswFlags::empty());
+        let ez = ksw_extz2(
+            &query,
+            &target,
+            5,
+            &mat,
+            4,
+            2,
+            -1,
+            400,
+            0,
+            KswFlags::empty(),
+        );
         assert_eq!(ez.score, 16); // 8 * 2 = 16
         assert!(ez.reach_end);
         assert!(!ez.cigar.is_empty());
@@ -551,11 +812,33 @@ mod tests {
     }
 
     #[test]
+    fn test_ksw_ll_i16_matches_scalar() {
+        let mat = make_mat();
+        let query = [0u8, 1, 2, 3, 0, 4, 2, 3, 1, 1, 2, 0, 3, 2, 1, 0];
+        let target = [3u8, 0, 1, 2, 3, 0, 1, 4, 2, 3, 1, 2, 0, 3, 2, 1, 0];
+        assert_eq!(
+            ksw_ll_i16(&query, &target, 5, &mat, 4, 2),
+            ksw_ll_i16_scalar(&query, &target, 5, &mat, 4, 2)
+        );
+    }
+
+    #[test]
     fn test_extz2_with_mismatch() {
         let mat = make_mat();
-        let query =  [0u8, 1, 2, 3, 0, 1, 2, 3];
+        let query = [0u8, 1, 2, 3, 0, 1, 2, 3];
         let target = [0u8, 1, 0, 3, 0, 1, 2, 3]; // mismatch at pos 2
-        let ez = ksw_extz2(&query, &target, 5, &mat, 4, 2, -1, 400, 0, KswFlags::empty());
+        let ez = ksw_extz2(
+            &query,
+            &target,
+            5,
+            &mat,
+            4,
+            2,
+            -1,
+            400,
+            0,
+            KswFlags::empty(),
+        );
         assert!(ez.score > 0);
         assert!(ez.score < 16); // less than perfect
         assert!(ez.reach_end);
@@ -564,9 +847,20 @@ mod tests {
     #[test]
     fn test_extz2_with_gap() {
         let mat = make_mat();
-        let query =  [0u8, 1, 2, 3, 0, 1, 2, 3];
+        let query = [0u8, 1, 2, 3, 0, 1, 2, 3];
         let target = [0u8, 1, 2, 2, 3, 0, 1, 2, 3]; // insertion in target
-        let ez = ksw_extz2(&query, &target, 5, &mat, 4, 2, -1, 400, 0, KswFlags::empty());
+        let ez = ksw_extz2(
+            &query,
+            &target,
+            5,
+            &mat,
+            4,
+            2,
+            -1,
+            400,
+            0,
+            KswFlags::empty(),
+        );
         assert!(ez.score > 0);
     }
 
@@ -575,7 +869,18 @@ mod tests {
         let mat = make_mat();
         let query = [0u8, 1, 2, 3];
         let target = [0u8, 1, 2, 3];
-        let ez = ksw_extz2(&query, &target, 5, &mat, 4, 2, -1, 400, 0, KswFlags::SCORE_ONLY);
+        let ez = ksw_extz2(
+            &query,
+            &target,
+            5,
+            &mat,
+            4,
+            2,
+            -1,
+            400,
+            0,
+            KswFlags::SCORE_ONLY,
+        );
         assert_eq!(ez.score, 8);
         assert!(ez.cigar.is_empty());
     }
@@ -585,7 +890,20 @@ mod tests {
         let mat = make_mat();
         let query = [0u8, 1, 2, 3, 0, 1, 2, 3];
         let target = [0u8, 1, 2, 3, 0, 1, 2, 3];
-        let ez = ksw_extd2(&query, &target, 5, &mat, 4, 2, 24, 1, -1, 400, 0, KswFlags::empty());
+        let ez = ksw_extd2(
+            &query,
+            &target,
+            5,
+            &mat,
+            4,
+            2,
+            24,
+            1,
+            -1,
+            400,
+            0,
+            KswFlags::empty(),
+        );
         assert_eq!(ez.score, 16);
         assert!(ez.reach_end);
     }
@@ -596,7 +914,20 @@ mod tests {
         // Query is short, target has a long insertion
         let query = [0u8, 1, 2, 3];
         let target = [0u8, 1, 2, 3, 0, 0, 0, 0, 0, 0];
-        let ez = ksw_extd2(&query, &target, 5, &mat, 4, 2, 24, 1, -1, 400, 0, KswFlags::empty());
+        let ez = ksw_extd2(
+            &query,
+            &target,
+            5,
+            &mat,
+            4,
+            2,
+            24,
+            1,
+            -1,
+            400,
+            0,
+            KswFlags::empty(),
+        );
         // Should still find the alignment
         assert!(ez.mqe > 0 || ez.mte > 0);
     }

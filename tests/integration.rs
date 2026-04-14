@@ -222,13 +222,20 @@ fn non_header_lines(output: &str) -> Vec<String> {
 }
 
 fn sam_core_fields(output: &str) -> Vec<String> {
+    const SAM_TAGS: [&str; 4] = ["NM", "AS", "ms", "nn"];
     non_header_lines(output)
         .into_iter()
         .map(|line| {
-            line.split('\t')
-                .take(6)
-                .collect::<Vec<_>>()
-                .join("\t")
+            let fields: Vec<&str> = line.split('\t').collect();
+            let mut normalized = fields[..fields.len().min(6)].to_vec();
+            for tag in SAM_TAGS {
+                if let Some(field) = fields.iter().skip(11).find(|field| {
+                    field.starts_with(tag) && field.as_bytes().get(tag.len()) == Some(&b':')
+                }) {
+                    normalized.push(field);
+                }
+            }
+            normalized.join("\t")
         })
         .collect()
 }
@@ -403,22 +410,6 @@ fn test_aligner_api() {
 
 // === Tests for debugging HiFi CIGAR differences (last M before soft-clip too short) ===
 
-/// Helper: parse a CIGAR string like "61S15857M200S" into Vec<(op_char, len)>
-fn parse_cigar_string(s: &str) -> Vec<(char, u32)> {
-    let mut ops = Vec::new();
-    let mut num = String::new();
-    for c in s.chars() {
-        if c.is_ascii_digit() {
-            num.push(c);
-        } else {
-            let len: u32 = num.parse().unwrap_or(0);
-            num.clear();
-            ops.push((c, len));
-        }
-    }
-    ops
-}
-
 /// Helper: count query-consuming bases in a BAM-encoded CIGAR
 fn cigar_query_consumed(cigar: &[u32]) -> i32 {
     let mut q = 0i32;
@@ -581,180 +572,7 @@ fn test_sam_cigar_equals_query_length() {
     }
 }
 
-/// Test 4: Compare Rust vs C minimap2 PAF output on MT test data with CIGAR.
-/// This is the key integration test that catches the qend difference.
-#[test]
-fn test_mt_cigar_vs_c_minimap2() {
-    let c_mm2 = Path::new("minimap2/minimap2");
-    if !c_mm2.exists() || !Path::new("minimap2/test/MT-human.fa").exists() {
-        eprintln!("Skipping: C minimap2 binary or test data not found");
-        return;
-    }
-
-    // Run C minimap2
-    let c_output = std::process::Command::new(c_mm2)
-        .args(&["-c", "--eqx", "minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa"])
-        .output()
-        .expect("Failed to run C minimap2");
-    let c_paf = String::from_utf8_lossy(&c_output.stdout);
-    let c_lines: Vec<&str> = c_paf.lines().collect();
-    assert!(!c_lines.is_empty(), "C minimap2 produced no output");
-
-    // Run Rust minimap2
-    let (io, mut mo) = setup_opts(None);
-    mo.flag |= MapFlags::CIGAR | MapFlags::OUT_CG | MapFlags::EQX;
-    let mi = MmIdx::build_from_file(
-        "minimap2/test/MT-human.fa", io.w as i32, io.k as i32, io.bucket_bits,
-        io.flag, io.mini_batch_size, io.batch_size,
-    ).unwrap().unwrap();
-    options::mapopt_update(&mut mo, &mi);
-
-    let mut fp = minimap2::bseq::BseqFile::open("minimap2/test/MT-orang.fa").unwrap();
-    let mut rust_lines: Vec<String> = Vec::new();
-    while let Ok(Some(rec)) = fp.read_record() {
-        let result = map::map_query(&mi, &mo, &rec.name, &rec.seq);
-        let lines = map::format_paf(&mi, &mo, &rec.name, &rec.seq, &result);
-        rust_lines.extend(lines);
-    }
-    assert!(!rust_lines.is_empty(), "Rust minimap2 produced no output");
-
-    // Compare line by line
-    let n = c_lines.len().min(rust_lines.len());
-    for i in 0..n {
-        let c_fields: Vec<&str> = c_lines[i].split('\t').collect();
-        let r_fields: Vec<&str> = rust_lines[i].split('\t').collect();
-
-        // Compare the first 12 mandatory PAF fields
-        for f in 0..12.min(c_fields.len()).min(r_fields.len()) {
-            if c_fields[f] != r_fields[f] {
-                // Report difference with context
-                eprintln!("PAF field {} differs for line {}:", f, i);
-                eprintln!("  C:    {}", c_fields[..12.min(c_fields.len())].join("\t"));
-                eprintln!("  Rust: {}", r_fields[..12.min(r_fields.len())].join("\t"));
-
-                // For fields 2,3 (qs,qe) and 7,8 (rs,re), compute the delta
-                if f == 2 || f == 3 || f == 7 || f == 8 {
-                    let c_val: i64 = c_fields[f].parse().unwrap_or(0);
-                    let r_val: i64 = r_fields[f].parse().unwrap_or(0);
-                    eprintln!("  Delta: {} (Rust - C)", r_val - c_val);
-                }
-            }
-        }
-
-        // Strict check on coordinates (qs, qe, rs, re = fields 2,3,7,8)
-        for &f in &[2usize, 3, 7, 8] {
-            if f < c_fields.len() && f < r_fields.len() {
-                assert_eq!(c_fields[f], r_fields[f],
-                    "MT CIGAR: PAF field {} (qs/qe/rs/re) differs on line {}.\n  C:    {}\n  Rust: {}",
-                    f, i,
-                    c_fields[..12.min(c_fields.len())].join("\t"),
-                    r_fields[..12.min(r_fields.len())].join("\t"));
-            }
-        }
-    }
-    assert_eq!(c_lines.len(), rust_lines.len(),
-        "Different number of PAF lines: C={}, Rust={}", c_lines.len(), rust_lines.len());
-}
-
-/// Test 5: Compare Rust vs C minimap2 with map-hifi preset on MT data.
-/// This specifically targets the HiFi preset where 462/649 reads had differences.
-#[test]
-fn test_mt_hifi_cigar_vs_c_minimap2() {
-    let c_mm2 = Path::new("minimap2/minimap2");
-    if !c_mm2.exists() || !Path::new("minimap2/test/MT-human.fa").exists() {
-        eprintln!("Skipping: C minimap2 binary or test data not found");
-        return;
-    }
-
-    // Run C minimap2 with map-hifi preset
-    let c_output = std::process::Command::new(c_mm2)
-        .args(&["-c", "-x", "map-hifi", "minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa"])
-        .output()
-        .expect("Failed to run C minimap2");
-    let c_paf = String::from_utf8_lossy(&c_output.stdout);
-    let c_lines: Vec<&str> = c_paf.lines().collect();
-
-    // Run Rust minimap2 with map-hifi preset
-    let (io, mut mo) = setup_opts(Some("map-hifi"));
-    mo.flag |= MapFlags::CIGAR | MapFlags::OUT_CG;
-    let mi = MmIdx::build_from_file(
-        "minimap2/test/MT-human.fa", io.w as i32, io.k as i32, io.bucket_bits,
-        io.flag, io.mini_batch_size, io.batch_size,
-    ).unwrap().unwrap();
-    options::mapopt_update(&mut mo, &mi);
-
-    let mut fp = minimap2::bseq::BseqFile::open("minimap2/test/MT-orang.fa").unwrap();
-    let mut rust_lines: Vec<String> = Vec::new();
-    while let Ok(Some(rec)) = fp.read_record() {
-        let result = map::map_query(&mi, &mo, &rec.name, &rec.seq);
-        let lines = map::format_paf(&mi, &mo, &rec.name, &rec.seq, &result);
-        rust_lines.extend(lines);
-    }
-
-    if c_lines.is_empty() && rust_lines.is_empty() {
-        // Both produce no output (HiFi k=19 may need longer sequences)
-        return;
-    }
-
-    let n = c_lines.len().min(rust_lines.len());
-    for i in 0..n {
-        let c_fields: Vec<&str> = c_lines[i].split('\t').collect();
-        let r_fields: Vec<&str> = rust_lines[i].split('\t').collect();
-
-        // Compare coordinates and report differences with diagnostic info
-        for &f in &[2usize, 3, 7, 8] {
-            if f < c_fields.len() && f < r_fields.len() && c_fields[f] != r_fields[f] {
-                let c_val: i64 = c_fields[f].parse().unwrap_or(0);
-                let r_val: i64 = r_fields[f].parse().unwrap_or(0);
-                let field_name = match f { 2 => "qs", 3 => "qe", 7 => "rs", 8 => "re", _ => "?" };
-                panic!(
-                    "HiFi MT: {} differs by {} on line {}.\n  C:    {}\n  Rust: {}",
-                    field_name, r_val - c_val, i,
-                    c_fields[..12.min(c_fields.len())].join("\t"),
-                    r_fields[..12.min(r_fields.len())].join("\t"));
-            }
-        }
-
-        // Also compare CIGAR tags if present
-        let c_cg = c_fields.iter().find(|f| f.starts_with("cg:Z:"));
-        let r_cg = r_fields.iter().find(|f| f.starts_with("cg:Z:"));
-        if let (Some(c_cg), Some(r_cg)) = (c_cg, r_cg) {
-            if c_cg != r_cg {
-                // Parse CIGARs and find where they diverge
-                let c_ops = parse_cigar_string(&c_cg[5..]);
-                let r_ops = parse_cigar_string(&r_cg[5..]);
-                let diff_idx = c_ops.iter().zip(r_ops.iter())
-                    .position(|(a, b)| a != b)
-                    .unwrap_or(c_ops.len().min(r_ops.len()));
-
-                // Show the last few ops around the difference
-                let start = diff_idx.saturating_sub(2);
-                let c_context: Vec<String> = c_ops[start..c_ops.len().min(diff_idx + 3)]
-                    .iter().map(|(c, l)| format!("{}{}", l, c)).collect();
-                let r_context: Vec<String> = r_ops[start..r_ops.len().min(diff_idx + 3)]
-                    .iter().map(|(c, l)| format!("{}{}", l, c)).collect();
-                eprintln!("HiFi MT line {}: CIGAR differs at op {} (0-indexed).", i, diff_idx);
-                eprintln!("  C CIGAR around diff: ...{}", c_context.join(""));
-                eprintln!("  R CIGAR around diff: ...{}", r_context.join(""));
-                eprintln!("  C has {} ops, Rust has {} ops", c_ops.len(), r_ops.len());
-
-                // Check if the difference is in the last M before S pattern
-                if let Some((last_c, last_len)) = r_ops.last() {
-                    if *last_c == 'M' || *last_c == '=' {
-                        if let Some((c_last_c, c_last_len)) = c_ops.last() {
-                            if *c_last_c == *last_c && *c_last_len > *last_len {
-                                eprintln!("  PATTERN MATCH: Last {} is shorter in Rust ({}) vs C ({}), delta={}",
-                                    last_c, last_len, c_last_len, c_last_len - last_len);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// Test 6: Right extension endpoint consistency.
+/// Test 4: Right extension endpoint consistency.
 /// After alignment, verify that the right extension produces coordinates
 /// consistent with the CIGAR. Specifically: the sum of aligned query bases
 /// from the CIGAR should exactly equal qe - qs (no gap).
@@ -813,63 +631,7 @@ fn test_right_extension_endpoint() {
     }
 }
 
-/// Test 7: Compare t2/q2 test data with C minimap2 (another pair to test gap-filling).
-#[test]
-fn test_t2q2_cigar_vs_c_minimap2() {
-    let c_mm2 = Path::new("minimap2/minimap2");
-    if !c_mm2.exists() || !Path::new("minimap2/test/t2.fa").exists()
-        || !Path::new("minimap2/test/q2.fa").exists()
-    {
-        eprintln!("Skipping: C minimap2 binary or test data not found");
-        return;
-    }
-
-    // Run C minimap2
-    let c_output = std::process::Command::new(c_mm2)
-        .args(&["-c", "minimap2/test/t2.fa", "minimap2/test/q2.fa"])
-        .output()
-        .expect("Failed to run C minimap2");
-    let c_paf = String::from_utf8_lossy(&c_output.stdout);
-    let c_lines: Vec<&str> = c_paf.lines().filter(|l| !l.is_empty()).collect();
-
-    // Run Rust minimap2
-    let (io, mut mo) = setup_opts(None);
-    mo.flag |= MapFlags::CIGAR | MapFlags::OUT_CG;
-    let mi = MmIdx::build_from_file(
-        "minimap2/test/t2.fa", io.w as i32, io.k as i32, io.bucket_bits,
-        io.flag, io.mini_batch_size, io.batch_size,
-    ).unwrap().unwrap();
-    options::mapopt_update(&mut mo, &mi);
-
-    let mut fp = minimap2::bseq::BseqFile::open("minimap2/test/q2.fa").unwrap();
-    let mut rust_lines: Vec<String> = Vec::new();
-    while let Ok(Some(rec)) = fp.read_record() {
-        let result = map::map_query(&mi, &mo, &rec.name, &rec.seq);
-        let lines = map::format_paf(&mi, &mo, &rec.name, &rec.seq, &result);
-        rust_lines.extend(lines);
-    }
-
-    let n = c_lines.len().min(rust_lines.len());
-    for i in 0..n {
-        let c_fields: Vec<&str> = c_lines[i].split('\t').collect();
-        let r_fields: Vec<&str> = rust_lines[i].split('\t').collect();
-
-        // Compare coordinates
-        for &f in &[2usize, 3, 7, 8] {
-            if f < c_fields.len() && f < r_fields.len() {
-                assert_eq!(c_fields[f], r_fields[f],
-                    "t2/q2: PAF field {} differs on line {}.\n  C:    {}\n  Rust: {}",
-                    f, i,
-                    c_fields[..12.min(c_fields.len())].join("\t"),
-                    r_fields[..12.min(r_fields.len())].join("\t"));
-            }
-        }
-    }
-    assert_eq!(c_lines.len(), rust_lines.len(),
-        "t2/q2: Different number of PAF lines: C={}, Rust={}", c_lines.len(), rust_lines.len());
-}
-
-/// Test 8: Detailed right extension diagnostic.
+/// Test 5: Detailed right extension diagnostic.
 /// Map MT-orang to MT-human and dump detailed alignment info to help debug
 /// the "last M before S is too short" pattern.
 #[test]
@@ -892,25 +654,7 @@ fn test_right_extension_diagnostic() {
         if let Some(ref extra) = r.extra {
             let cigar = &extra.cigar.0;
 
-            // Find the last alignment op (not soft-clip)
-            let last_align_op = cigar.last().map(|&c| {
-                let op = c & 0xf;
-                let len = c >> 4;
-                (op, len)
-            });
-
             let aligned_q = cigar_aligned_query(cigar);
-            let soft_right = if r.rev { r.qs } else { qlen - r.qe };
-
-            eprintln!("Reg {}: qs={} qe={} rs={} re={} rev={} mapq={} qlen={}",
-                i, r.qs, r.qe, r.rs, r.re, r.rev, r.mapq, qlen);
-            eprintln!("  aligned_q={} soft_right={} total={}",
-                aligned_q, soft_right, aligned_q + r.qs + soft_right);
-            if let Some((op, len)) = last_align_op {
-                let op_char = b"MIDNSHP=XB"[op as usize] as char;
-                eprintln!("  last alignment op: {}{}", len, op_char);
-            }
-            eprintln!("  CIGAR: {}", minimap2::align::cigar_to_string(cigar));
 
             // The key assertion: everything must add up
             let total = if r.rev {
@@ -920,40 +664,9 @@ fn test_right_extension_diagnostic() {
             };
             assert_eq!(total, qlen,
                 "Reg {}: coordinates + CIGAR don't add up to qlen. \
-                 qs={}, aligned_q={}, trailing={}, total={}, qlen={}",
-                i, r.qs, aligned_q, qlen - r.qe, total, qlen);
-        }
-    }
-}
-
-/// Test that C and Rust produce identical CIGARs for MT genome with map-hifi preset.
-#[test]
-fn test_mt_hifi_full_cigar_vs_c() {
-    if !Path::new("minimap2/minimap2").exists() || !Path::new("target/release/minimap2-pure-rs").exists() { return; }
-    if !Path::new("minimap2/test/MT-human.fa").exists() { return; }
-    let c_out = std::process::Command::new("minimap2/minimap2")
-        .args(&["-a", "-x", "map-hifi", "--eqx", "minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa"])
-        .stderr(std::process::Stdio::null())
-        .output().unwrap();
-    let c_sam = String::from_utf8_lossy(&c_out.stdout);
-    let c_records: Vec<&str> = c_sam.lines().filter(|l| !l.starts_with('@')).collect();
-
-    let r_out = std::process::Command::new("target/release/minimap2-pure-rs")
-        .args(&["-a", "-x", "map-hifi", "--eqx", "minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa"])
-        .stderr(std::process::Stdio::null())
-        .output().unwrap();
-    let r_sam = String::from_utf8_lossy(&r_out.stdout);
-    let r_records: Vec<&str> = r_sam.lines().filter(|l| !l.starts_with('@')).collect();
-
-    assert_eq!(c_records.len(), r_records.len(), 
-        "Different number of SAM records: C={} Rust={}", c_records.len(), r_records.len());
-    
-    for (i, (c, r)) in c_records.iter().zip(r_records.iter()).enumerate() {
-        let c_fields: Vec<&str> = c.split('\t').collect();
-        let r_fields: Vec<&str> = r.split('\t').collect();
-        if c_fields.len() > 5 && r_fields.len() > 5 {
-            assert_eq!(c_fields[5], r_fields[5],
-                "Record {}: CIGAR differs\n  C:  {}\n  Rs: {}", i, c_fields[5], r_fields[5]);
+                 qs={}, qe={}, rs={}, re={}, rev={}, aligned_q={}, total={}, qlen={}, CIGAR={}",
+                i, r.qs, r.qe, r.rs, r.re, r.rev, aligned_q, total, qlen,
+                minimap2::align::cigar_to_string(cigar));
         }
     }
 }
@@ -1021,7 +734,10 @@ fn test_cli_fixture_parity_matrix() {
 
     let paf_cases: &[(&str, &[&str])] = &[
         ("MT default PAF+cg", &["-c", "minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa"]),
+        ("MT map-ont PAF+cg", &["-c", "-x", "map-ont", "minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa"]),
         ("MT HiFi PAF+cg", &["-c", "-x", "map-hifi", "minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa"]),
+        ("MT asm5 PAF+cg", &["-c", "-x", "asm5", "minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa"]),
+        ("MT asm10 PAF+cg", &["-c", "-x", "asm10", "minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa"]),
         ("x3s default PAF+cg", &["-c", "minimap2/test/x3s-ref.fa", "minimap2/test/x3s-qry.fa"]),
         ("t2/q2 default PAF+cg", &["-c", "minimap2/test/t2.fa", "minimap2/test/q2.fa"]),
         ("chr11 fixture HiFi PAF+cg", &["-c", "-x", "map-hifi", "tests/data/chr11_bug_window.fa", "tests/data/chr11_bug_query.fq"]),
@@ -1035,6 +751,7 @@ fn test_cli_fixture_parity_matrix() {
 
     let sam_cases: &[(&str, &[&str])] = &[
         ("MT HiFi SAM EQX", &["-a", "-x", "map-hifi", "--eqx", "minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa"]),
+        ("MT map-ont SAM", &["-a", "-x", "map-ont", "minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa"]),
         ("x3s default SAM", &["-a", "minimap2/test/x3s-ref.fa", "minimap2/test/x3s-qry.fa"]),
     ];
 
@@ -1070,10 +787,7 @@ fn test_zdrop_real_sequences_simd_vs_scalar() {
     
     let simd_cig = cigar_to_string(&simd.cigar);
     let scalar_cig = cigar_to_string(&scalar.cigar);
-    
-    eprintln!("SIMD:   zdrop={} max_t={} max_q={} score={} cigar={}", simd.zdropped, simd.max_t, simd.max_q, simd.score, simd_cig);
-    eprintln!("Scalar: zdrop={} max_t={} max_q={} score={} cigar={}", scalar.zdropped, scalar.max_t, scalar.max_q, scalar.score, scalar_cig);
-    
+
     assert_eq!(simd.zdropped, scalar.zdropped,
         "zdropped differs: SIMD={} scalar={}", simd.zdropped, scalar.zdropped);
     assert_eq!(simd.max_t, scalar.max_t, 
@@ -1100,10 +814,7 @@ fn test_zdrop_second_pass_bandwidth() {
             6, 2, 26, 1, bw, 400, -1, KswFlags::empty());
         let scalar = minimap2::align::ksw2::ksw_extd2(&query, &target, 5, &mat,
             6, 2, 26, 1, bw, 400, -1, KswFlags::empty());
-        
-        eprintln!("bw={}: SIMD max_t={} zdrop={} cigar_ops={}, Scalar max_t={} zdrop={} cigar_ops={}",
-            bw, simd.max_t, simd.zdropped, simd.cigar.len(), scalar.max_t, scalar.zdropped, scalar.cigar.len());
-        
+
         assert_eq!(simd.max_t, scalar.max_t,
             "bw={}: max_t SIMD={} scalar={}", bw, simd.max_t, scalar.max_t);
     }
@@ -1127,11 +838,7 @@ fn test_zdrop_first_pass_approx_max() {
     
     let simd_cig = cigar_to_string(&simd.cigar);
     let scalar_cig = cigar_to_string(&scalar.cigar);
-    
-    eprintln!("First pass APPROX_MAX:");
-    eprintln!("  SIMD:   cigar={} score={} zdropped={}", simd_cig, simd.score, simd.zdropped);
-    eprintln!("  Scalar: cigar={} score={} zdropped={}", scalar_cig, scalar.score, scalar.zdropped);
-    
+
     assert_eq!(simd_cig, scalar_cig,
         "First pass CIGAR differs: SIMD={} scalar={}", simd_cig, scalar_cig);
 }
