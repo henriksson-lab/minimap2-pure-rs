@@ -246,24 +246,40 @@ cargo test --all
 
 ## Performance
 
-Benchmarked on Intel Xeon Gold 6138 (Skylake), single-threaded, CIGAR mode (`-c`),
-synthetic ONT-like reads against MT-human.fa. Built with `-C target-cpu=native`.
-CPU cycles measured via `perf stat` (deterministic, not affected by system load).
+Current local fixture benchmark against the vendored C minimap2:
 
-| Dataset | Rust cycles | C cycles | Rust advantage |
-|---------|------------|----------|----------------|
-| 10K reads (500bp, 10% err) | 8.02B | 8.50B | **Rust 5.6% faster** |
-| 30K reads (300-2000bp, 10% err) | 27.74B | 29.54B | **Rust 6.1% faster** |
+```bash
+scripts/benchmark_speed.py --reps 5 --threads 1,3
+```
 
-Instruction counts:
+Built with `--release`, `-C target-cpu=native`, LTO, and `codegen-units = 1`.
+Ratios below are Rust wall time divided by C minimap2 wall time; values below
+`1.00x` mean Rust was faster.
 
-| Dataset | Rust instructions | C instructions | Difference |
-|---------|------------------|----------------|------------|
-| 10K reads | 23.62B | 25.80B | Rust 8.5% fewer |
-| 30K reads | 82.47B | 89.31B | Rust 7.7% fewer |
+| Case | Threads | C mean | Rust mean | Rust/C mean | Rust/C median |
+|------|---------|--------|-----------|-------------|---------------|
+| MT default PAF | 1 | 0.0167s | 0.0151s | 0.90x | 0.91x |
+| MT default PAF | 3 | 0.0162s | 0.0149s | 0.92x | 0.95x |
+| MT default PAF+cg | 1 | 0.0283s | 0.0279s | 0.99x | 1.06x |
+| MT default PAF+cg | 3 | 0.0300s | 0.0274s | 0.91x | 0.94x |
+| MT map-hifi PAF+cg | 1 | 0.0319s | 0.0296s | 0.93x | 0.89x |
+| MT map-hifi PAF+cg | 3 | 0.0314s | 0.0328s | 1.05x | 1.01x |
+| MT map-hifi SAM | 1 | 0.0324s | 0.0296s | 0.91x | 0.97x |
+| MT map-hifi SAM | 3 | 0.0317s | 0.0327s | 1.03x | 1.00x |
+| chr11 single HiFi PAF+cg | 1 | 0.0564s | 0.0499s | 0.88x | 0.86x |
+| chr11 single HiFi PAF+cg | 3 | 0.0573s | 0.0554s | 0.97x | 0.92x |
+| chr11 x200 HiFi PAF+cg | 1 | 3.4601s | 3.5169s | 1.02x | 1.02x |
+| chr11 x200 HiFi PAF+cg | 3 | 1.2451s | 1.2991s | 1.04x | 1.00x |
+| chr11 x200 HiFi SAM | 1 | 3.5380s | 3.7272s | 1.05x | 1.04x |
+| chr11 x200 HiFi SAM | 3 | 1.3200s | 1.3298s | 1.01x | 1.01x |
 
-Key factors: SSE4.1+AVX2 SIMD kernel, bounds-check elimination in hot loops,
-thread-local buffer reuse to minimize allocations, const-generic kernel specialization.
+On these fixtures, Rust is effectively at parity with C minimap2. The MT cases
+are very small and include startup/indexing noise; the `chr11 x200` cases are
+the more useful local signal for alignment throughput.
+
+Key factors: SSE4.1+AVX2 SIMD extension alignment, SSE2 low-level local
+alignment (`ksw_ll_i16`), bounds-check elimination in hot loops, thread-local
+buffer reuse to minimize allocations, and const-generic kernel specialization.
 See [OPTIMIZATION.md](OPTIMIZATION.md) for details.
 
 ## License
