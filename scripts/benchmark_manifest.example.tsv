@@ -1,8 +1,15 @@
 # name	args
-# Copy this file and replace the paths with local benchmark data.
+# Copy this file to scripts/benchmark_manifest.local.tsv and replace the paths
+# with local benchmark data. Keep references and read sets large enough that
+# process startup and index construction are not the dominant cost.
 # Each args column is the minimap2 command line after the binary name.
-HiFi 10k PAF+cg	-x map-hifi -c data/ref.fa data/hifi.10k.fq
-HiFi 10k SAM	-x map-hifi -a data/ref.fa data/hifi.10k.fq
-ONT 10k PAF+cg	-x map-ont -c data/ref.fa data/ont.10k.fq
-ONT 10k SAM	-x map-ont -a data/ref.fa data/ont.10k.fq
+HiFi reads PAF+cg	-x map-hifi -c data/ref.fa data/hifi.fq
+HiFi reads SAM	-x map-hifi -a data/ref.fa data/hifi.fq
+ONT reads PAF+cg	-x map-ont -c data/ref.fa data/ont.fq
+ONT reads SAM	-x map-ont -a data/ref.fa data/ont.fq
+Short reads paired PAF+cg	-x sr -c data/ref.fa data/reads_R1.fq data/reads_R2.fq
+Short reads paired SAM	-x sr -a data/ref.fa data/reads_R1.fq data/reads_R2.fq
 Assembly asm5 PAF+cg	-x asm5 -c data/ref.fa data/contigs.fa
+Assembly asm10 SAM	-x asm10 -a data/ref.fa data/contigs.fa
+Splice annotated PAF+cg	-x splice -c --junc-bed data/junctions.bed data/ref.fa data/rna.fq
+Splice annotated SAM	-x splice -a --junc-bed data/junctions.bed data/ref.fa data/rna.fq

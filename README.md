@@ -3,7 +3,9 @@
 A pure Rust reimplementation of [minimap2](https://github.com/lh3/minimap2) v2.30 (commit `de3c6ec`), the versatile sequence alignment program for long and short reads.
 
 The current implementation has strong parity with the C version on the bundled
-DNA mapping fixtures and is effectively at C speed on the local benchmark suite.
+DNA mapping fixtures. On the larger local `chr11 x200` HiFi fixture it is
+currently within about 3-9% of C minimap2, depending on output mode and thread
+count.
 It is not yet a full minimap2 replacement; see [Known gaps](#known-gaps).
 
 This is a translation of the original code and not the authoritative
@@ -318,33 +320,44 @@ cargo test --all
 Current local fixture benchmark against the vendored C minimap2:
 
 ```bash
-scripts/benchmark_speed.py --reps 5 --threads 1,3
+scripts/benchmark_speed.py --threads 1 --reps 7 --warmups 1
+scripts/benchmark_speed.py --threads 1,4,8 --reps 3 --warmups 1 --case chr11
 ```
 
 Built with `--release`, `-C target-cpu=native`, LTO, and `codegen-units = 1`.
 Ratios below are Rust wall time divided by C minimap2 wall time; values below
 `1.00x` mean Rust was faster.
 
-| Case | Threads | C mean | Rust mean | Rust/C mean | Rust/C median |
-|------|---------|--------|-----------|-------------|---------------|
-| MT default PAF | 1 | 0.0167s | 0.0151s | 0.90x | 0.91x |
-| MT default PAF | 3 | 0.0162s | 0.0149s | 0.92x | 0.95x |
-| MT default PAF+cg | 1 | 0.0283s | 0.0279s | 0.99x | 1.06x |
-| MT default PAF+cg | 3 | 0.0300s | 0.0274s | 0.91x | 0.94x |
-| MT map-hifi PAF+cg | 1 | 0.0319s | 0.0296s | 0.93x | 0.89x |
-| MT map-hifi PAF+cg | 3 | 0.0314s | 0.0328s | 1.05x | 1.01x |
-| MT map-hifi SAM | 1 | 0.0324s | 0.0296s | 0.91x | 0.97x |
-| MT map-hifi SAM | 3 | 0.0317s | 0.0327s | 1.03x | 1.00x |
-| chr11 single HiFi PAF+cg | 1 | 0.0564s | 0.0499s | 0.88x | 0.86x |
-| chr11 single HiFi PAF+cg | 3 | 0.0573s | 0.0554s | 0.97x | 0.92x |
-| chr11 x200 HiFi PAF+cg | 1 | 3.4601s | 3.5169s | 1.02x | 1.02x |
-| chr11 x200 HiFi PAF+cg | 3 | 1.2451s | 1.2991s | 1.04x | 1.00x |
-| chr11 x200 HiFi SAM | 1 | 3.5380s | 3.7272s | 1.05x | 1.04x |
-| chr11 x200 HiFi SAM | 3 | 1.3200s | 1.3298s | 1.01x | 1.01x |
+| Case | Threads | C median | Rust median | Rust/C median |
+|------|---------|----------|-------------|---------------|
+| MT default PAF | 1 | 0.0167s | 0.0149s | 0.89x |
+| MT default PAF+cg | 1 | 0.0296s | 0.0252s | 0.85x |
+| MT map-hifi PAF+cg | 1 | 0.0312s | 0.0327s | 1.05x |
+| MT map-hifi SAM | 1 | 0.0304s | 0.0266s | 0.87x |
+| chr11 single HiFi PAF+cg | 1 | 0.0550s | 0.0564s | 1.02x |
+| chr11 x200 HiFi PAF+cg | 1 | 3.4860s | 3.6599s | 1.05x |
+| chr11 x200 HiFi SAM | 1 | 3.4380s | 3.7170s | 1.08x |
+| chr11 x200 HiFi PAF+cg | 4 | 0.9814s | 1.0420s | 1.06x |
+| chr11 x200 HiFi SAM | 4 | 0.9950s | 1.0476s | 1.05x |
+| chr11 x200 HiFi PAF+cg | 8 | 0.5866s | 0.5991s | 1.02x |
+| chr11 x200 HiFi SAM | 8 | 0.5969s | 0.6136s | 1.03x |
 
-On these fixtures, Rust is effectively at parity with C minimap2. The MT cases
-are very small and include startup/indexing noise; the `chr11 x200` cases are
-the more useful local signal for alignment throughput.
+The MT cases are upstream mitochondrial smoke fixtures and are too small for
+performance claims; startup, indexing, cache state, and timing noise dominate
+their wall time. The `chr11 x200` cases are a better local regression signal,
+but still only exercise a small HiFi fixture. Broad performance claims should be
+based on real-data manifests.
+
+For real-data benchmarking, copy `scripts/benchmark_manifest.example.tsv`, fill
+in local FASTA/FASTQ paths, and run:
+
+```bash
+scripts/benchmark_speed.py --threads 1,8 --reps 5 --warmups 1 \
+  --manifest scripts/benchmark_manifest.local.tsv --no-fixtures
+```
+
+A useful manifest should include at least HiFi reads, ONT reads, paired short
+reads, assembly contigs, and one splice/RNA case when splice performance matters.
 
 Key factors: SSE4.1+AVX2 SIMD extension alignment, SSE2 low-level local
 alignment (`ksw_ll_i16`), bounds-check elimination in hot loops, thread-local
