@@ -1,0 +1,8 @@
+# name	args
+# Copy this file and replace the paths with local benchmark data.
+# Each args column is the minimap2 command line after the binary name.
+HiFi 10k PAF+cg	-x map-hifi -c data/ref.fa data/hifi.10k.fq
+HiFi 10k SAM	-x map-hifi -a data/ref.fa data/hifi.10k.fq
+ONT 10k PAF+cg	-x map-ont -c data/ref.fa data/ont.10k.fq
+ONT 10k SAM	-x map-ont -a data/ref.fa data/ont.10k.fq
+Assembly asm5 PAF+cg	-x asm5 -c data/ref.fa data/contigs.fa

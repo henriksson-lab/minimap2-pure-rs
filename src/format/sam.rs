@@ -1,8 +1,10 @@
-use std::fmt::Write;
 use crate::flags::{CigarOp, MapFlags};
 use crate::index::MmIdx;
 use crate::seq::SEQ_COMP_TABLE;
-use crate::types::{AlignReg, MM_VERSION};
+use crate::types::{AlignExtra, AlignReg, MM_VERSION};
+use std::fmt::Write;
+
+const MAX_BAM_CIGAR_OP: usize = 65_535;
 
 /// Write SAM header. Matches mm_write_sam_hdr().
 pub fn write_sam_hdr(mi: &MmIdx, rg: Option<&str>, args: &[String]) -> String {
@@ -38,6 +40,23 @@ pub fn write_sam_record(
     flag: MapFlags,
     rep_len: i32,
 ) -> String {
+    write_sam_record_with_comment(
+        mi, qname, qseq, qual, r, _n_regs, _regs, flag, rep_len, None,
+    )
+}
+
+pub fn write_sam_record_with_comment(
+    mi: &MmIdx,
+    qname: &str,
+    qseq: &[u8],
+    qual: &[u8],
+    r: Option<&AlignReg>,
+    _n_regs: usize,
+    _regs: &[AlignReg],
+    flag: MapFlags,
+    rep_len: i32,
+    comment: Option<&str>,
+) -> String {
     let mut s = String::with_capacity(512);
     let qlen = qseq.len() as i32;
 
@@ -50,14 +69,26 @@ pub fn write_sam_record(
             if flag.contains(MapFlags::NO_QUAL) || qseq.is_empty() {
                 s.push('*');
             } else {
-                for &b in qseq { s.push(b as char); }
+                for &b in qseq {
+                    s.push(b as char);
+                }
             }
             s.push('\t');
             // Quality
             if qual.is_empty() || flag.contains(MapFlags::NO_QUAL) {
                 s.push('*');
             } else {
-                for &q in qual { s.push(q as char); }
+                for &q in qual {
+                    s.push(q as char);
+                }
+            }
+            if rep_len >= 0 {
+                write!(s, "\trl:i:{}", rep_len).unwrap();
+            }
+            if flag.contains(MapFlags::COPY_COMMENT) {
+                if let Some(comment) = comment.filter(|c| !c.is_empty()) {
+                    write!(s, "\t{}", comment).unwrap();
+                }
             }
             return s;
         }
@@ -70,13 +101,20 @@ pub fn write_sam_record(
     } else if !r.sam_pri {
         sam_flag |= 0x100; // secondary
     }
-    if r.rev { sam_flag |= 0x10; } // reverse
+    if r.rev {
+        sam_flag |= 0x10;
+    } // reverse
 
     // RNAME, POS
     let rname = &mi.seqs[r.rid as usize].name;
     let pos = r.rs + 1; // 1-based
 
-    write!(s, "{}\t{}\t{}\t{}\t{}\t", qname, sam_flag, rname, pos, r.mapq).unwrap();
+    write!(
+        s,
+        "{}\t{}\t{}\t{}\t{}\t",
+        qname, sam_flag, rname, pos, r.mapq
+    )
+    .unwrap();
 
     // CIGAR
     // Clip character: use hard-clip for supplementary/secondary (unless SOFTCLIP flag set),
@@ -85,24 +123,20 @@ pub fn write_sam_record(
         || ((sam_flag & 0x100) != 0 && flag.contains(MapFlags::SECONDARY_SEQ)))
         && !flag.contains(MapFlags::SOFTCLIP);
     let clip_char = if use_hard_clip { 'H' } else { 'S' };
+    let cigar_in_tag = sam_long_cigar_in_tag(r, qlen, flag);
 
     if let Some(ref p) = r.extra {
-        // Clip at start
-        let clip_start = if r.rev { qlen - r.qe } else { r.qs };
-        if clip_start > 0 {
-            write!(s, "{}{}", clip_start, clip_char).unwrap();
-        }
-        // Main CIGAR
-        for &c in &p.cigar.0 {
-            let op = c & 0xf;
-            let len = c >> 4;
-            let op_char = CigarOp::CHARS[op as usize] as char;
-            write!(s, "{}{}", len, op_char).unwrap();
-        }
-        // Clip at end
-        let clip_end = if r.rev { r.qs } else { qlen - r.qe };
-        if clip_end > 0 {
-            write!(s, "{}{}", clip_end, clip_char).unwrap();
+        if cigar_in_tag {
+            let slen = if (sam_flag & 0x900) == 0 || flag.contains(MapFlags::SOFTCLIP) {
+                qlen
+            } else if (sam_flag & 0x100) != 0 && !flag.contains(MapFlags::SECONDARY_SEQ) {
+                0
+            } else {
+                r.qe - r.qs
+            };
+            write!(s, "{}S{}N", slen, r.re - r.rs).unwrap();
+        } else {
+            write_sam_cigar_text(&mut s, r, p, qlen, clip_char);
         }
     } else {
         s.push('*');
@@ -133,7 +167,9 @@ pub fn write_sam_record(
             s.push(SEQ_COMP_TABLE[qseq[i] as usize] as char);
         }
     } else {
-        for &b in &qseq[seq_start..seq_end] { s.push(b as char); }
+        for &b in &qseq[seq_start..seq_end] {
+            s.push(b as char);
+        }
     }
 
     s.push('\t');
@@ -145,21 +181,38 @@ pub fn write_sam_record(
         let qual_start = seq_start.min(qual.len());
         let qual_end = seq_end.min(qual.len());
         if r.rev {
-            for i in (qual_start..qual_end).rev() { s.push(qual[i] as char); }
+            for i in (qual_start..qual_end).rev() {
+                s.push(qual[i] as char);
+            }
         } else {
-            for &q in &qual[qual_start..qual_end] { s.push(q as char); }
+            for &q in &qual[qual_start..qual_end] {
+                s.push(q as char);
+            }
         }
     }
 
     // Tags
     if let Some(ref p) = r.extra {
         let nm = r.blen - r.mlen + p.n_ambi as i32;
-        write!(s, "\tNM:i:{}\tms:i:{}\tAS:i:{}\tnn:i:{}", nm, p.dp_max, p.dp_score, p.n_ambi).unwrap();
+        write!(
+            s,
+            "\tNM:i:{}\tms:i:{}\tAS:i:{}\tnn:i:{}",
+            nm, p.dp_max, p.dp_score, p.n_ambi
+        )
+        .unwrap();
     }
     let type_char = if r.id == r.parent {
-        if r.inv { 'I' } else { 'P' }
+        if r.inv {
+            'I'
+        } else {
+            'P'
+        }
     } else {
-        if r.inv { 'i' } else { 'S' }
+        if r.inv {
+            'i'
+        } else {
+            'S'
+        }
     };
     write!(s, "\ttp:A:{}\tcm:i:{}\ts1:i:{}", type_char, r.cnt, r.score).unwrap();
     if r.parent == r.id {
@@ -173,16 +226,32 @@ pub fn write_sam_record(
     if r.split > 0 && _regs.len() > 1 {
         let mut sa_parts: Vec<String> = Vec::new();
         for other in _regs.iter() {
-            if other.id == r.id { continue; } // skip self
-            if other.split == 0 { continue; } // only include split pieces
-            if other.extra.is_none() { continue; }
+            if other.id == r.id {
+                continue;
+            } // skip self
+            if other.split == 0 {
+                continue;
+            } // only include split pieces
+            if other.extra.is_none() {
+                continue;
+            }
             let other_rname = if (other.rid as usize) < mi.seqs.len() {
                 &mi.seqs[other.rid as usize].name
-            } else { continue; };
+            } else {
+                continue;
+            };
             let strand = if other.rev { '-' } else { '+' };
             let cigar_str = crate::align::cigar_to_string(&other.extra.as_ref().unwrap().cigar.0);
             let nm = other.blen - other.mlen + other.extra.as_ref().unwrap().n_ambi as i32;
-            sa_parts.push(format!("{},{},{},{},{},{}", other_rname, other.rs + 1, strand, cigar_str, other.mapq, nm));
+            sa_parts.push(format!(
+                "{},{},{},{},{},{}",
+                other_rname,
+                other.rs + 1,
+                strand,
+                cigar_str,
+                other.mapq,
+                nm
+            ));
         }
         if !sa_parts.is_empty() {
             write!(s, "\tSA:Z:{}", sa_parts.join(";")).unwrap();
@@ -190,16 +259,100 @@ pub fn write_sam_record(
         }
     }
 
+    if cigar_in_tag {
+        if let Some(ref p) = r.extra {
+            write_sam_cigar_tag(&mut s, r, p, qlen, use_hard_clip);
+        }
+    }
+
+    if flag.contains(MapFlags::COPY_COMMENT) {
+        if let Some(comment) = comment.filter(|c| !c.is_empty()) {
+            write!(s, "\t{}", comment).unwrap();
+        }
+    }
+
     s
+}
+
+fn sam_long_cigar_in_tag(r: &AlignReg, qlen: i32, flag: MapFlags) -> bool {
+    if !flag.contains(MapFlags::LONG_CIGAR) {
+        return false;
+    }
+    let Some(ref p) = r.extra else {
+        return false;
+    };
+    if p.cigar.0.len() <= MAX_BAM_CIGAR_OP - 2 {
+        return false;
+    }
+    let mut n_cigar = p.cigar.0.len();
+    if r.qs != 0 {
+        n_cigar += 1;
+    }
+    if r.qe != qlen {
+        n_cigar += 1;
+    }
+    n_cigar > MAX_BAM_CIGAR_OP
+}
+
+fn write_sam_cigar_text(s: &mut String, r: &AlignReg, p: &AlignExtra, qlen: i32, clip_char: char) {
+    let clip_start = if r.rev { qlen - r.qe } else { r.qs };
+    if clip_start > 0 {
+        write!(s, "{}{}", clip_start, clip_char).unwrap();
+    }
+    for &c in &p.cigar.0 {
+        let op = c & 0xf;
+        let len = c >> 4;
+        let op_char = CigarOp::CHARS[op as usize] as char;
+        write!(s, "{}{}", len, op_char).unwrap();
+    }
+    let clip_end = if r.rev { r.qs } else { qlen - r.qe };
+    if clip_end > 0 {
+        write!(s, "{}{}", clip_end, clip_char).unwrap();
+    }
+}
+
+fn write_sam_cigar_tag(
+    s: &mut String,
+    r: &AlignReg,
+    p: &AlignExtra,
+    qlen: i32,
+    use_hard_clip: bool,
+) {
+    let clip_code = if use_hard_clip {
+        CigarOp::HardClip as u32
+    } else {
+        CigarOp::SoftClip as u32
+    };
+    let clip_start = if r.rev { qlen - r.qe } else { r.qs };
+    let clip_end = if r.rev { r.qs } else { qlen - r.qe };
+    s.push_str("\tCG:B:I");
+    if clip_start > 0 {
+        write!(s, ",{}", ((clip_start as u32) << 4) | clip_code).unwrap();
+    }
+    for &c in &p.cigar.0 {
+        write!(s, ",{}", c).unwrap();
+    }
+    if clip_end > 0 {
+        write!(s, ",{}", ((clip_end as u32) << 4) | clip_code).unwrap();
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::Cigar;
 
     #[test]
     fn test_write_sam_hdr() {
-        let mi = MmIdx::build_from_str(5, 10, false, 10, &[b"ACGTACGTACGT" as &[u8]], Some(&["chr1"])).unwrap();
+        let mi = MmIdx::build_from_str(
+            5,
+            10,
+            false,
+            10,
+            &[b"ACGTACGTACGT" as &[u8]],
+            Some(&["chr1"]),
+        )
+        .unwrap();
         let hdr = write_sam_hdr(&mi, None, &[]);
         assert!(hdr.contains("@HD\tVN:1.6"));
         assert!(hdr.contains("@SQ\tSN:chr1\tLN:12"));
@@ -208,8 +361,19 @@ mod tests {
 
     #[test]
     fn test_write_sam_unmapped() {
-        let mi = MmIdx::build_from_str(5, 10, false, 10, &[b"ACGTACGT" as &[u8]], Some(&["chr1"])).unwrap();
-        let rec = write_sam_record(&mi, "read1", b"ACGT", b"IIII", None, 0, &[], MapFlags::empty(), -1);
+        let mi = MmIdx::build_from_str(5, 10, false, 10, &[b"ACGTACGT" as &[u8]], Some(&["chr1"]))
+            .unwrap();
+        let rec = write_sam_record(
+            &mi,
+            "read1",
+            b"ACGT",
+            b"IIII",
+            None,
+            0,
+            &[],
+            MapFlags::empty(),
+            -1,
+        );
         let fields: Vec<&str> = rec.split('\t').collect();
         assert_eq!(fields[0], "read1");
         assert_eq!(fields[1], "4"); // unmapped flag
@@ -217,21 +381,156 @@ mod tests {
     }
 
     #[test]
-    fn test_write_sam_mapped() {
-        let mi = MmIdx::build_from_str(5, 10, false, 10,
-            &[b"ACGTACGTACGTACGTACGTACGTACGTACGT" as &[u8]], Some(&["chr1"])).unwrap();
-        let mut r = AlignReg::default();
-        r.rid = 0; r.qs = 0; r.qe = 8;
-        r.rs = 10; r.re = 18;
-        r.rev = false; r.mapq = 60;
-        r.id = 0; r.parent = 0; r.sam_pri = true;
-        r.score = 16; r.cnt = 3;
-        r.mlen = 8; r.blen = 8;
+    fn test_write_sam_unmapped_copy_comment() {
+        let mi = MmIdx::build_from_str(5, 10, false, 10, &[b"ACGTACGT" as &[u8]], Some(&["chr1"]))
+            .unwrap();
+        let rec = write_sam_record_with_comment(
+            &mi,
+            "read1",
+            b"ACGT",
+            b"IIII",
+            None,
+            0,
+            &[],
+            MapFlags::COPY_COMMENT,
+            -1,
+            Some("comment text"),
+        );
+        assert!(rec.ends_with("\tcomment text"));
+    }
 
-        let rec = write_sam_record(&mi, "read1", b"ACGTACGT", b"", Some(&r), 1, &[r.clone()], MapFlags::empty(), -1);
+    #[test]
+    fn test_write_sam_mapped() {
+        let mi = MmIdx::build_from_str(
+            5,
+            10,
+            false,
+            10,
+            &[b"ACGTACGTACGTACGTACGTACGTACGTACGT" as &[u8]],
+            Some(&["chr1"]),
+        )
+        .unwrap();
+        let mut r = AlignReg::default();
+        r.rid = 0;
+        r.qs = 0;
+        r.qe = 8;
+        r.rs = 10;
+        r.re = 18;
+        r.rev = false;
+        r.mapq = 60;
+        r.id = 0;
+        r.parent = 0;
+        r.sam_pri = true;
+        r.score = 16;
+        r.cnt = 3;
+        r.mlen = 8;
+        r.blen = 8;
+
+        let rec = write_sam_record(
+            &mi,
+            "read1",
+            b"ACGTACGT",
+            b"",
+            Some(&r),
+            1,
+            &[r.clone()],
+            MapFlags::empty(),
+            -1,
+        );
         let fields: Vec<&str> = rec.split('\t').collect();
         assert_eq!(fields[2], "chr1");
         assert_eq!(fields[3], "11"); // 1-based pos
         assert_eq!(fields[4], "60"); // MAPQ
+    }
+
+    #[test]
+    fn test_write_sam_mapped_copy_comment() {
+        let mi = MmIdx::build_from_str(
+            5,
+            10,
+            false,
+            10,
+            &[b"ACGTACGTACGTACGTACGTACGTACGTACGT" as &[u8]],
+            Some(&["chr1"]),
+        )
+        .unwrap();
+        let mut r = AlignReg::default();
+        r.rid = 0;
+        r.qs = 0;
+        r.qe = 8;
+        r.rs = 10;
+        r.re = 18;
+        r.rev = false;
+        r.mapq = 60;
+        r.id = 0;
+        r.parent = 0;
+        r.sam_pri = true;
+        r.score = 16;
+        r.cnt = 3;
+        r.mlen = 8;
+        r.blen = 8;
+
+        let rec = write_sam_record_with_comment(
+            &mi,
+            "read1",
+            b"ACGTACGT",
+            b"",
+            Some(&r),
+            1,
+            &[r.clone()],
+            MapFlags::COPY_COMMENT,
+            -1,
+            Some("comment text"),
+        );
+        assert!(rec.ends_with("\tcomment text"));
+    }
+
+    #[test]
+    fn test_write_sam_long_cigar_in_cg_tag() {
+        let mi = MmIdx::build_from_str(
+            5,
+            10,
+            false,
+            10,
+            &[b"ACGTACGTACGTACGTACGTACGTACGTACGT" as &[u8]],
+            Some(&["chr1"]),
+        )
+        .unwrap();
+        let mut r = AlignReg::default();
+        r.rid = 0;
+        r.qs = 0;
+        r.qe = 8;
+        r.rs = 10;
+        r.re = 18;
+        r.rev = false;
+        r.mapq = 60;
+        r.id = 0;
+        r.parent = 0;
+        r.sam_pri = true;
+        r.score = 16;
+        r.cnt = 3;
+        r.mlen = 8;
+        r.blen = 8;
+        let mut extra = AlignExtra::default();
+        extra.cigar = Cigar(vec![
+            (1u32 << 4) | (CigarOp::Match as u32);
+            MAX_BAM_CIGAR_OP + 1
+        ]);
+        r.extra = Some(Box::new(extra));
+
+        let rec = write_sam_record(
+            &mi,
+            "read1",
+            b"ACGTACGT",
+            b"",
+            Some(&r),
+            1,
+            &[r.clone()],
+            MapFlags::LONG_CIGAR,
+            -1,
+        );
+        let fields: Vec<&str> = rec.split('\t').collect();
+        assert_eq!(fields[5], "8S8N");
+        assert!(rec.contains("\tCG:B:I,16,16,16"));
     }
 }

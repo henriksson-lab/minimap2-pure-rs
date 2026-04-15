@@ -1,11 +1,13 @@
-use std::fmt::Write;
 use crate::flags::MapFlags;
 use crate::index::MmIdx;
 use crate::types::AlignReg;
+use std::fmt::Write;
 
 /// Compute event identity from alignment: mlen / blen.
 pub fn event_identity(r: &AlignReg) -> f64 {
-    if r.blen == 0 { return 0.0; }
+    if r.blen == 0 {
+        return 0.0;
+    }
     let Some(extra) = r.extra.as_ref() else {
         return r.mlen as f64 / r.blen as f64;
     };
@@ -24,13 +26,26 @@ pub fn event_identity(r: &AlignReg) -> f64 {
 /// Write PAF tags for an alignment. Matches write_tags() from format.c.
 fn write_tags(s: &mut String, r: &AlignReg) {
     let type_char = if r.id == r.parent {
-        if r.inv { 'I' } else { 'P' }
+        if r.inv {
+            'I'
+        } else {
+            'P'
+        }
     } else {
-        if r.inv { 'i' } else { 'S' }
+        if r.inv {
+            'i'
+        } else {
+            'S'
+        }
     };
     if let Some(ref p) = r.extra {
         let nm = r.blen - r.mlen + p.n_ambi as i32;
-        write!(s, "\tNM:i:{}\tms:i:{}\tAS:i:{}\tnn:i:{}", nm, p.dp_max, p.dp_score, p.n_ambi).unwrap();
+        write!(
+            s,
+            "\tNM:i:{}\tms:i:{}\tAS:i:{}\tnn:i:{}",
+            nm, p.dp_max, p.dp_score, p.n_ambi
+        )
+        .unwrap();
         if p.trans_strand == 1 || p.trans_strand == 2 {
             let ts = if p.trans_strand == 1 { '+' } else { '-' };
             write!(s, "\tts:A:{}", ts).unwrap();
@@ -71,6 +86,7 @@ pub fn write_paf(
     rep_len: i32,
     n_seg: i32,
     seg_idx: i32,
+    comment: Option<&str>,
 ) -> String {
     let mut s = String::with_capacity(256);
 
@@ -85,6 +101,11 @@ pub fn write_paf(
             write!(s, "\t{}\t0\t0\t*\t*\t0\t0\t0\t0\t0\t0", qlen).unwrap();
             if rep_len >= 0 {
                 write!(s, "\trl:i:{}", rep_len).unwrap();
+            }
+            if flag.contains(MapFlags::COPY_COMMENT) {
+                if let Some(comment) = comment.filter(|c| !c.is_empty()) {
+                    write!(s, "\t{}", comment).unwrap();
+                }
             }
             return s;
         }
@@ -103,7 +124,14 @@ pub fn write_paf(
 
     let rlen = mi.seqs[r.rid as usize].len;
     if flag.contains(MapFlags::QSTRAND) && r.rev {
-        write!(s, "\t{}\t{}\t{}", rlen, rlen as i32 - r.re, rlen as i32 - r.rs).unwrap();
+        write!(
+            s,
+            "\t{}\t{}\t{}",
+            rlen,
+            rlen as i32 - r.re,
+            rlen as i32 - r.rs
+        )
+        .unwrap();
     } else {
         write!(s, "\t{}\t{}\t{}", rlen, r.rs, r.re).unwrap();
     }
@@ -124,6 +152,12 @@ pub fn write_paf(
             let len = c >> 4;
             const OPS: &[u8] = b"MIDNSHP=XB";
             write!(s, "{}{}", len, OPS[op as usize] as char).unwrap();
+        }
+    }
+
+    if flag.contains(MapFlags::COPY_COMMENT) {
+        if let Some(comment) = comment.filter(|c| !c.is_empty()) {
+            write!(s, "\t{}", comment).unwrap();
         }
     }
 
@@ -150,29 +184,85 @@ mod tests {
 
     #[test]
     fn test_write_paf_no_hit() {
-        let mi = MmIdx::build_from_str(5, 10, false, 10, &[b"ACGTACGTACGT" as &[u8]], Some(&["ref1"])).unwrap();
-        let line = write_paf(&mi, "read1", 100, None, MapFlags::empty(), -1, 0, 0);
+        let mi = MmIdx::build_from_str(
+            5,
+            10,
+            false,
+            10,
+            &[b"ACGTACGTACGT" as &[u8]],
+            Some(&["ref1"]),
+        )
+        .unwrap();
+        let line = write_paf(&mi, "read1", 100, None, MapFlags::empty(), -1, 0, 0, None);
         assert!(line.starts_with("read1\t100\t0\t0\t*"));
     }
 
     #[test]
+    fn test_write_paf_no_hit_copy_comment() {
+        let mi = MmIdx::build_from_str(
+            5,
+            10,
+            false,
+            10,
+            &[b"ACGTACGTACGT" as &[u8]],
+            Some(&["ref1"]),
+        )
+        .unwrap();
+        let line = write_paf(
+            &mi,
+            "read1",
+            100,
+            None,
+            MapFlags::COPY_COMMENT,
+            -1,
+            0,
+            0,
+            Some("comment text"),
+        );
+        assert!(line.ends_with("\tcomment text"));
+    }
+
+    #[test]
     fn test_write_paf_with_hit() {
-        let mi = MmIdx::build_from_str(5, 10, false, 10, &[b"ACGTACGTACGTACGTACGTACGTACGTACGT" as &[u8]], Some(&["chr1"])).unwrap();
+        let mi = MmIdx::build_from_str(
+            5,
+            10,
+            false,
+            10,
+            &[b"ACGTACGTACGTACGTACGTACGTACGTACGT" as &[u8]],
+            Some(&["chr1"]),
+        )
+        .unwrap();
         let mut r = AlignReg::default();
         r.rid = 0;
-        r.qs = 10; r.qe = 50;
-        r.rs = 100; r.re = 140;
+        r.qs = 10;
+        r.qe = 50;
+        r.rs = 100;
+        r.re = 140;
         r.rev = false;
-        r.mlen = 35; r.blen = 40;
+        r.mlen = 35;
+        r.blen = 40;
         r.mapq = 60;
-        r.id = 0; r.parent = 0;
-        r.score = 80; r.cnt = 5;
+        r.id = 0;
+        r.parent = 0;
+        r.score = 80;
+        r.cnt = 5;
 
-        let line = write_paf(&mi, "read1", 100, Some(&r), MapFlags::empty(), -1, 0, 0);
+        let line = write_paf(
+            &mi,
+            "read1",
+            100,
+            Some(&r),
+            MapFlags::empty(),
+            -1,
+            0,
+            0,
+            None,
+        );
         let fields: Vec<&str> = line.split('\t').collect();
         assert_eq!(fields[0], "read1");
         assert_eq!(fields[1], "100"); // qlen
-        assert_eq!(fields[4], "+");   // strand
+        assert_eq!(fields[4], "+"); // strand
         assert_eq!(fields[5], "chr1");
     }
 

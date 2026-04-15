@@ -775,6 +775,374 @@ pub fn ksw_extd2(
     ez
 }
 
+/// Scalar splice-aware extension alignment.
+///
+/// This models the extra long-deletion splice state from minimap2's
+/// `ksw_exts2`: ordinary affine insertion/deletion gaps use `q/e`, while long
+/// reference skips use `q2` plus donor/acceptor splice signal penalties. It is
+/// intentionally scalar and is only dispatched for splice mode.
+pub fn ksw_exts2(
+    query: &[u8],
+    target: &[u8],
+    m: i8,
+    mat: &[i8],
+    q: i8,
+    e: i8,
+    q2: i8,
+    noncan: i8,
+    w: i32,
+    zdrop: i32,
+    end_bonus: i32,
+    flag: KswFlags,
+) -> KswResult {
+    let qlen = query.len();
+    let tlen = target.len();
+    let mut ez = KswResult::new();
+    if qlen == 0 || tlen == 0 || q2 <= q + e {
+        return ez;
+    }
+
+    let with_cigar = !flag.contains(KswFlags::SCORE_ONLY);
+    let is_extz = flag.contains(KswFlags::EXTZ_ONLY);
+    let band = if w < 0 { qlen.max(tlen) as i32 } else { w };
+    let qe = q as i32 + e as i32;
+    let splice_open = q2 as i32;
+    let m_u = m as usize;
+    let donor = splice_donor_scores(target, noncan as i32, flag);
+    let acceptor = splice_acceptor_scores(target, noncan as i32, flag);
+
+    let cols = tlen + 1;
+    let idx = |i: usize, j: usize| i * cols + j;
+    let mut h = vec![KSW_NEG_INF; (qlen + 1) * cols];
+    let mut ins = vec![KSW_NEG_INF; (qlen + 1) * cols];
+    let mut del = vec![KSW_NEG_INF; (qlen + 1) * cols];
+    let mut bt = if with_cigar {
+        vec![0u8; (qlen + 1) * cols]
+    } else {
+        Vec::new()
+    };
+    let mut skip_len = if with_cigar {
+        vec![0usize; (qlen + 1) * cols]
+    } else {
+        Vec::new()
+    };
+    h[idx(0, 0)] = 0;
+
+    for i in 0..=qlen {
+        let j_st = if i as i32 > band {
+            i - band as usize
+        } else {
+            0
+        };
+        let j_en = (i + band as usize).min(tlen);
+        let mut best_splice = KSW_NEG_INF;
+        let mut best_splice_j = 0usize;
+
+        for j in j_st..=j_en {
+            if i == 0 && j == 0 {
+                continue;
+            }
+            let cur = idx(i, j);
+            let mut best = KSW_NEG_INF;
+            let mut state = 0u8;
+
+            if i > 0 && j > 0 {
+                let sc = mat[query[i - 1] as usize * m_u + target[j - 1] as usize] as i32;
+                let diag = h[idx(i - 1, j - 1)] + sc;
+                if diag > best {
+                    best = diag;
+                    state = 0;
+                }
+            }
+            if i > 0 {
+                let up = idx(i - 1, j);
+                let ext = ins[up] - e as i32;
+                let open = h[up] - qe;
+                ins[cur] = ext.max(open);
+                if ins[cur] > best {
+                    best = ins[cur];
+                    state = 1;
+                }
+            }
+            if j > 0 {
+                let left = idx(i, j - 1);
+                let ext = del[left] - e as i32;
+                let open = h[left] - qe;
+                del[cur] = ext.max(open);
+                if del[cur] > best {
+                    best = del[cur];
+                    state = 2;
+                }
+            }
+            if j >= 6 && best_splice > KSW_NEG_INF / 2 {
+                let sp = best_splice - splice_open + acceptor[j];
+                if sp > best {
+                    best = sp;
+                    state = 3;
+                }
+            }
+            if is_extz && best < 0 {
+                best = 0;
+                state = 0;
+            }
+            h[cur] = best;
+            if with_cigar {
+                bt[cur] = state;
+                if state == 3 {
+                    skip_len[cur] = j - best_splice_j;
+                }
+            }
+
+            if best > ez.max {
+                ez.max = best;
+                ez.max_q = i as i32 - 1;
+                ez.max_t = j as i32 - 1;
+            }
+            if j == tlen && best > ez.mte {
+                ez.mte = best;
+                ez.mte_q = i as i32 - 1;
+            }
+            if i == qlen && best > ez.mqe {
+                ez.mqe = best;
+                ez.mqe_t = j as i32 - 1;
+            }
+            if j <= tlen.saturating_sub(6) {
+                let cand = best + donor[j];
+                if cand > best_splice {
+                    best_splice = cand;
+                    best_splice_j = j;
+                }
+            }
+        }
+
+        if zdrop >= 0 && !flag.contains(KswFlags::APPROX_MAX) && ez.max_q >= 0 && ez.max_t >= 0 {
+            let row_best_j = (j_st..=j_en).max_by_key(|&j| h[idx(i, j)]).unwrap_or(j_st);
+            let row_best = h[idx(i, row_best_j)];
+            if row_best > KSW_NEG_INF / 2
+                && apply_zdrop(&mut ez, row_best, i as i32 - 1, row_best_j as i32 - 1, zdrop, e)
+            {
+                break;
+            }
+        }
+    }
+
+    ez.score = h[idx(qlen, tlen)];
+    ez.reach_end = ez.score > KSW_NEG_INF / 2;
+    if end_bonus > 0 {
+        if ez.mqe != KSW_NEG_INF {
+            ez.mqe += end_bonus;
+        }
+        if ez.mte != KSW_NEG_INF {
+            ez.mte += end_bonus;
+        }
+    }
+
+    if with_cigar {
+        let (mut i, mut j) = if !ez.zdropped && !is_extz {
+            (qlen, tlen)
+        } else if !ez.zdropped && is_extz && ez.mqe + end_bonus > ez.max {
+            ez.reach_end = true;
+            (qlen, (ez.mqe_t + 1).max(0) as usize)
+        } else if ez.max_q >= 0 && ez.max_t >= 0 {
+            ((ez.max_q + 1) as usize, (ez.max_t + 1) as usize)
+        } else {
+            (0, 0)
+        };
+        let mut cigar = Vec::new();
+        while i > 0 || j > 0 {
+            let state = bt[idx(i, j)] & 7;
+            match state {
+                0 if i > 0 && j > 0 => {
+                    push_cigar_fn(&mut cigar, 0, 1);
+                    i -= 1;
+                    j -= 1;
+                }
+                1 if i > 0 => {
+                    push_cigar_fn(&mut cigar, 1, 1);
+                    i -= 1;
+                }
+                2 if j > 0 => {
+                    push_cigar_fn(&mut cigar, 2, 1);
+                    j -= 1;
+                }
+                3 if j > 0 => {
+                    let mut len = skip_len[idx(i, j)];
+                    if len == 0 || len > j {
+                        len = 1;
+                    }
+                    push_cigar_fn(&mut cigar, 3, len as i32);
+                    j -= len;
+                }
+                _ => {
+                    if i > 0 {
+                        push_cigar_fn(&mut cigar, 1, 1);
+                        i -= 1;
+                    } else if j > 0 {
+                        push_cigar_fn(&mut cigar, 2, 1);
+                        j -= 1;
+                    }
+                }
+            }
+        }
+        if !flag.contains(KswFlags::REV_CIGAR) {
+            cigar.reverse();
+        }
+        ez.cigar = cigar;
+    }
+    ez
+}
+
+fn splice_donor_scores(target: &[u8], noncan: i32, flag: KswFlags) -> Vec<i32> {
+    let mut scores = vec![-noncan; target.len() + 1];
+    if noncan <= 0 {
+        scores.fill(0);
+        return scores;
+    }
+    for pos in 0..target.len().saturating_sub(1) {
+        scores[pos] = splice_signal_penalty_at(target, pos, true, flag, noncan);
+    }
+    scores
+}
+
+fn splice_acceptor_scores(target: &[u8], noncan: i32, flag: KswFlags) -> Vec<i32> {
+    let mut scores = vec![-noncan; target.len() + 1];
+    if noncan <= 0 {
+        scores.fill(0);
+        return scores;
+    }
+    for pos in 2..=target.len() {
+        scores[pos] = splice_signal_penalty_at(target, pos, false, flag, noncan);
+    }
+    scores
+}
+
+fn splice_signal_penalty_at(
+    target: &[u8],
+    pos: usize,
+    donor: bool,
+    flag: KswFlags,
+    noncan: i32,
+) -> i32 {
+    if flag.contains(KswFlags::SPLICE_CMPLX) {
+        return splice_complex_signal_penalty_at(target, pos, donor, flag);
+    }
+    let half = if flag.contains(KswFlags::SPLICE_FLANK) {
+        noncan / 2
+    } else {
+        0
+    };
+    if flag.contains(KswFlags::SPLICE_REV) {
+        if donor {
+            if pos + 1 < target.len() && target[pos] == 1 && target[pos + 1] == 3 {
+                return 0;
+            }
+            if pos + 1 < target.len() && target[pos] == 2 && target[pos + 1] == 3 {
+                return -noncan;
+            }
+        } else if pos >= 2 {
+            if target[pos - 2] == 0 && target[pos - 1] == 1 {
+                return 0;
+            }
+            if target[pos - 2] == 2 && target[pos - 1] == 1
+                || target[pos - 2] == 0 && target[pos - 1] == 3
+            {
+                return -noncan;
+            }
+        }
+    } else if donor {
+        if pos + 1 < target.len() && target[pos] == 2 && target[pos + 1] == 3 {
+            return 0;
+        }
+        if pos + 1 < target.len()
+            && (target[pos] == 2 && target[pos + 1] == 1
+                || target[pos] == 0 && target[pos + 1] == 3)
+        {
+            return -noncan;
+        }
+    } else if pos >= 2 {
+        if target[pos - 2] == 0 && target[pos - 1] == 2 {
+            return 0;
+        }
+        if target[pos - 2] == 0 && target[pos - 1] == 1 {
+            return -noncan;
+        }
+    }
+    -half.max(noncan)
+}
+
+fn splice_complex_signal_penalty_at(
+    target: &[u8],
+    pos: usize,
+    donor: bool,
+    flag: KswFlags,
+) -> i32 {
+    let sp = [3, 5, 7, 10];
+    let z = if flag.contains(KswFlags::SPLICE_REV) {
+        if donor {
+            if pos + 2 < target.len() && target[pos] == 1 && target[pos + 1] == 3 {
+                if target[pos + 2] == 0 || target[pos + 2] == 2 {
+                    -1
+                } else {
+                    0
+                }
+            } else if pos + 1 < target.len() && target[pos] == 2 && target[pos + 1] == 3 {
+                2
+            } else {
+                3
+            }
+        } else if pos >= 3 {
+            if target[pos - 2] == 0 && target[pos - 1] == 1 {
+                if target[pos - 3] == 1 || target[pos - 3] == 3 {
+                    -1
+                } else {
+                    0
+                }
+            } else if target[pos - 2] == 2 && target[pos - 1] == 1 {
+                1
+            } else if target[pos - 2] == 0 && target[pos - 1] == 3 {
+                2
+            } else {
+                3
+            }
+        } else {
+            3
+        }
+    } else if donor {
+        if pos + 2 < target.len() && target[pos] == 2 && target[pos + 1] == 3 {
+            if target[pos + 2] == 0 || target[pos + 2] == 2 {
+                -1
+            } else {
+                0
+            }
+        } else if pos + 1 < target.len() && target[pos] == 2 && target[pos + 1] == 1 {
+            1
+        } else if pos + 1 < target.len() && target[pos] == 0 && target[pos + 1] == 3 {
+            2
+        } else {
+            3
+        }
+    } else if pos >= 3 {
+        if target[pos - 2] == 0 && target[pos - 1] == 2 {
+            if target[pos - 3] == 1 || target[pos - 3] == 3 {
+                -1
+            } else {
+                0
+            }
+        } else if target[pos - 2] == 0 && target[pos - 1] == 1 {
+            2
+        } else {
+            3
+        }
+    } else {
+        3
+    };
+    if z < 0 {
+        0
+    } else {
+        -sp[z as usize]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -897,7 +1265,7 @@ mod tests {
             &mat,
             4,
             2,
-            24,
+            4,
             1,
             -1,
             400,
@@ -921,7 +1289,7 @@ mod tests {
             &mat,
             4,
             2,
-            24,
+            4,
             1,
             -1,
             400,
@@ -930,5 +1298,32 @@ mod tests {
         );
         // Should still find the alignment
         assert!(ez.mqe > 0 || ez.mte > 0);
+    }
+
+    #[test]
+    fn test_exts2_prefers_canonical_splice_skip() {
+        let mat = make_mat();
+        let query = [0u8, 1, 2, 3, 0, 1, 2, 3];
+        let target = [
+            0u8, 1, 2, 3, // ACGT
+            2, 3, 0, 0, 0, 0, 0, 2, // GT.....AG
+            0, 1, 2, 3, // ACGT
+        ];
+        let ez = ksw_exts2(
+            &query,
+            &target,
+            5,
+            &mat,
+            2,
+            1,
+            4,
+            9,
+            50,
+            200,
+            -1,
+            KswFlags::SPLICE_FOR | KswFlags::SPLICE_FLANK,
+        );
+        assert!(ez.score > 0);
+        assert!(ez.cigar.iter().any(|&c| (c & 0xf) == 3));
     }
 }

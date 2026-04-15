@@ -1,14 +1,16 @@
 pub mod bucket;
 pub mod io;
+pub mod split;
 
-use hashbrown::HashMap;
-use crate::bseq::BseqFile;
+use crate::bseq::{BseqFile, BseqRecord};
 use crate::flags::IdxFlags;
-use crate::seq::{SEQ_NT4_TABLE, packed};
+use crate::seq::{packed, SEQ_NT4_TABLE};
 use crate::sketch::mm_sketch;
 use crate::sort::ksmall_u32;
 use crate::types::{IdxSeq, Mm128};
 use bucket::IdxBucket;
+use hashbrown::HashMap;
+use std::io::{BufRead, Read};
 
 /// The minimap2 index. Mirrors mm_idx_t.
 pub struct MmIdx {
@@ -28,7 +30,11 @@ pub struct MmIdx {
 impl MmIdx {
     /// Initialize an empty index. Matches mm_idx_init().
     pub fn new(w: i32, k: i32, bucket_bits: i32, flag: IdxFlags) -> Self {
-        let b = if k * 2 < bucket_bits { k * 2 } else { bucket_bits };
+        let b = if k * 2 < bucket_bits {
+            k * 2
+        } else {
+            bucket_bits
+        };
         let w = if w < 1 { 1 } else { w };
         let n_buckets = 1usize << b;
         let mut buckets = Vec::with_capacity(n_buckets);
@@ -70,9 +76,12 @@ impl MmIdx {
         let en = en.min(self.seqs[rid as usize].len);
         let offset = self.seqs[rid as usize].offset;
         let n = (en - st) as usize;
-        if n > buf.len() { return -1; }
+        if n > buf.len() {
+            return -1;
+        }
         for i in st..en {
-            buf[(i - st) as usize] = packed::seq4_get(&self.packed_seq, (offset + i as u64) as usize);
+            buf[(i - st) as usize] =
+                packed::seq4_get(&self.packed_seq, (offset + i as u64) as usize);
         }
         n as i32
     }
@@ -85,7 +94,9 @@ impl MmIdx {
         let s = &self.seqs[rid as usize];
         let en = en.min(s.len);
         let n = (en - st) as usize;
-        if n > buf.len() { return -1; }
+        if n > buf.len() {
+            return -1;
+        }
         let st1 = s.offset + (s.len - en) as u64;
         let en1 = s.offset + (s.len - st) as u64;
         for i in st1..en1 {
@@ -170,10 +181,17 @@ impl MmIdx {
                 }
             }
         }
-        let is_hpc = if self.flag.contains(IdxFlags::HPC) { 1 } else { 0 };
+        let is_hpc = if self.flag.contains(IdxFlags::HPC) {
+            1
+        } else {
+            0
+        };
         eprintln!(
             "[M::idx_stat] kmer size: {}; skip: {}; is_hpc: {}; #seq: {}",
-            self.k, self.w, is_hpc, self.seqs.len()
+            self.k,
+            self.w,
+            is_hpc,
+            self.seqs.len()
         );
         if n_keys > 0 {
             eprintln!(
@@ -243,7 +261,11 @@ impl MmIdx {
             // Step 0: store sequence metadata and packed sequence
             for rec in &records {
                 let seq_entry = IdxSeq {
-                    name: if store_name { rec.name.clone() } else { String::new() },
+                    name: if store_name {
+                        rec.name.clone()
+                    } else {
+                        String::new()
+                    },
                     offset: sum_len,
                     len: rec.l_seq as u32,
                     is_alt: false,
@@ -271,7 +293,14 @@ impl MmIdx {
             for (i, rec) in records.iter().enumerate() {
                 if rec.l_seq > 0 {
                     let rid = (n_prev_seqs + i) as u32;
-                    mm_sketch(&rec.seq, w as usize, k as usize, rid, is_hpc, &mut all_minimizers);
+                    mm_sketch(
+                        &rec.seq,
+                        w as usize,
+                        k as usize,
+                        rid,
+                        is_hpc,
+                        &mut all_minimizers,
+                    );
                 }
             }
 
@@ -283,6 +312,100 @@ impl MmIdx {
         mi.post_process();
 
         Ok(Some(mi))
+    }
+
+    /// Build all index parts from a FASTA/FASTQ file using a C minimap2-style
+    /// batch boundary. Each part contains whole records and may exceed
+    /// `batch_size` by the final record that crosses the boundary.
+    pub fn build_parts_from_file(
+        path: &str,
+        w: i32,
+        k: i32,
+        bucket_bits: i16,
+        flag: IdxFlags,
+        batch_size: u64,
+    ) -> std::io::Result<Vec<Self>> {
+        let mut fp = BseqFile::open(path)?;
+        let mut parts = Vec::new();
+        let mut records = Vec::new();
+        let mut sum_len = 0u64;
+
+        while let Some(rec) = fp.read_record()? {
+            sum_len += rec.l_seq as u64;
+            records.push(rec);
+            if sum_len > batch_size && !records.is_empty() {
+                let mut part = Self::build_from_records(w, k, bucket_bits, flag, &records);
+                part.index_part = parts.len() as i32;
+                parts.push(part);
+                records.clear();
+                sum_len = 0;
+            }
+        }
+        if !records.is_empty() {
+            let mut part = Self::build_from_records(w, k, bucket_bits, flag, &records);
+            part.index_part = parts.len() as i32;
+            parts.push(part);
+        }
+
+        Ok(parts)
+    }
+
+    fn build_from_records(
+        w: i32,
+        k: i32,
+        bucket_bits: i16,
+        flag: IdxFlags,
+        records: &[BseqRecord],
+    ) -> Self {
+        let mut mi = MmIdx::new(w, k, bucket_bits as i32, flag);
+        let is_hpc = flag.contains(IdxFlags::HPC);
+        let store_seq = !flag.contains(IdxFlags::NO_SEQ);
+        let store_name = !flag.contains(IdxFlags::NO_NAME);
+        let mut sum_len = 0u64;
+
+        for rec in records {
+            let seq_entry = IdxSeq {
+                name: if store_name {
+                    rec.name.clone()
+                } else {
+                    String::new()
+                },
+                offset: sum_len,
+                len: rec.l_seq as u32,
+                is_alt: false,
+            };
+
+            if store_seq {
+                let needed = ((sum_len + rec.l_seq as u64).div_ceil(8)) as usize;
+                if mi.packed_seq.len() < needed {
+                    mi.packed_seq.resize(needed, 0);
+                }
+                for (j, &b) in rec.seq.iter().enumerate() {
+                    let c = SEQ_NT4_TABLE[b as usize];
+                    packed::seq4_set(&mut mi.packed_seq, (sum_len + j as u64) as usize, c);
+                }
+            }
+
+            sum_len += rec.l_seq as u64;
+            mi.seqs.push(seq_entry);
+        }
+
+        let mut all_minimizers = Vec::new();
+        for (rid, rec) in records.iter().enumerate() {
+            if rec.l_seq > 0 {
+                mm_sketch(
+                    &rec.seq,
+                    w as usize,
+                    k as usize,
+                    rid as u32,
+                    is_hpc,
+                    &mut all_minimizers,
+                );
+            }
+        }
+        mi.add_minimizers(&all_minimizers);
+        mi.post_process();
+        mi
     }
 
     /// Build an index from in-memory sequences. Matches mm_idx_str().
@@ -327,7 +450,14 @@ impl MmIdx {
             // Sketch
             if !seq.is_empty() {
                 let mut minimizers = Vec::new();
-                mm_sketch(seq, w as usize, k as usize, i as u32, is_hpc, &mut minimizers);
+                mm_sketch(
+                    seq,
+                    w as usize,
+                    k as usize,
+                    i as u32,
+                    is_hpc,
+                    &mut minimizers,
+                );
                 mi.add_minimizers(&minimizers);
             }
             offset += seq.len() as u64;
@@ -340,6 +470,36 @@ impl MmIdx {
 
         mi.post_process();
         Some(mi)
+    }
+
+    /// Read ALT contig names and mark matching reference sequences.
+    ///
+    /// Matches `mm_idx_alt_read()`: each non-empty line contributes the first
+    /// whitespace-delimited token as a contig name.
+    pub fn read_alt_file(&mut self, path: &str) -> std::io::Result<usize> {
+        let input: Box<dyn Read> = if path == "-" {
+            Box::new(std::io::stdin())
+        } else {
+            Box::new(std::fs::File::open(path)?)
+        };
+        let reader = std::io::BufReader::new(input);
+        self.index_names();
+        let mut n_alt = 0usize;
+        for line in reader.lines() {
+            let line = line?;
+            let Some(name) = line.split_whitespace().next() else {
+                continue;
+            };
+            if let Some(id) = self.name2id(name) {
+                let seq = &mut self.seqs[id as usize];
+                if !seq.is_alt {
+                    seq.is_alt = true;
+                    n_alt += 1;
+                }
+            }
+        }
+        self.n_alt = self.seqs.iter().filter(|seq| seq.is_alt).count() as i32;
+        Ok(n_alt)
     }
 }
 
@@ -374,10 +534,28 @@ mod tests {
     }
 
     #[test]
+    fn test_read_alt_file() {
+        use std::io::Write;
+
+        let seqs: Vec<&[u8]> = vec![b"ACGTACGTACGT", b"TGCATGCATGCA"];
+        let names = vec!["chr1", "chr1_alt"];
+        let mut mi = MmIdx::build_from_str(5, 10, false, 10, &seqs, Some(&names)).unwrap();
+
+        let mut alt = tempfile::NamedTempFile::new().unwrap();
+        writeln!(alt, "chr1_alt comment").unwrap();
+        writeln!(alt, "missing").unwrap();
+        alt.flush().unwrap();
+
+        let n = mi.read_alt_file(alt.path().to_str().unwrap()).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(mi.n_alt, 1);
+        assert!(!mi.seqs[0].is_alt);
+        assert!(mi.seqs[1].is_alt);
+    }
+
+    #[test]
     fn test_index_get() {
-        let seqs: Vec<&[u8]> = vec![
-            b"ACGTACGTACGTACGTACGTACGTACGTACGT",
-        ];
+        let seqs: Vec<&[u8]> = vec![b"ACGTACGTACGTACGTACGTACGTACGTACGT"];
         let mi = MmIdx::build_from_str(5, 10, false, 10, &seqs, None).unwrap();
 
         // The index should have some minimizers
@@ -404,9 +582,7 @@ mod tests {
 
     #[test]
     fn test_cal_max_occ() {
-        let seqs: Vec<&[u8]> = vec![
-            b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT",
-        ];
+        let seqs: Vec<&[u8]> = vec![b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"];
         let mi = MmIdx::build_from_str(5, 10, false, 10, &seqs, None).unwrap();
         let occ = mi.cal_max_occ(0.02);
         assert!(occ > 0);
@@ -424,7 +600,9 @@ mod tests {
 
         let mi = MmIdx::build_from_file(
             f.path().to_str().unwrap(),
-            10, 15, 14,
+            10,
+            15,
+            14,
             IdxFlags::empty(),
             1_000_000,
             u64::MAX,
@@ -435,5 +613,37 @@ mod tests {
         assert_eq!(mi.seqs.len(), 2);
         assert_eq!(mi.seqs[0].name, "seq1");
         assert_eq!(mi.seqs[1].name, "seq2");
+    }
+
+    #[test]
+    fn test_build_parts_from_file() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        writeln!(f, ">seq1").unwrap();
+        writeln!(f, "ACGTACGTACGTACGTACGTACGTACGTACGT").unwrap();
+        writeln!(f, ">seq2").unwrap();
+        writeln!(f, "TGCATGCATGCATGCATGCATGCATGCATGCA").unwrap();
+        writeln!(f, ">seq3").unwrap();
+        writeln!(f, "AAAACCCCGGGGTTTTAAAACCCCGGGGTTTT").unwrap();
+        f.flush().unwrap();
+
+        let parts = MmIdx::build_parts_from_file(
+            f.path().to_str().unwrap(),
+            10,
+            15,
+            14,
+            IdxFlags::empty(),
+            40,
+        )
+        .unwrap();
+
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0].index_part, 0);
+        assert_eq!(parts[1].index_part, 1);
+        assert_eq!(parts[0].seqs.len(), 2);
+        assert_eq!(parts[1].seqs.len(), 1);
+        assert_eq!(parts[0].seqs[0].name, "seq1");
+        assert_eq!(parts[0].seqs[1].name, "seq2");
+        assert_eq!(parts[1].seqs[0].name, "seq3");
     }
 }

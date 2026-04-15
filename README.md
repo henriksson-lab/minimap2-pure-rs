@@ -2,25 +2,40 @@
 
 A pure Rust reimplementation of [minimap2](https://github.com/lh3/minimap2) v2.30 (commit `de3c6ec`), the versatile sequence alignment program for long and short reads.
 
-It has been tested to be equivalent to the C version, but 7% faster. Let us know if you find differences and provide test data!
+The current implementation has strong parity with the C version on the bundled
+DNA mapping fixtures and is effectively at C speed on the local benchmark suite.
+It is not yet a full minimap2 replacement; see [Known gaps](#known-gaps).
 
-This is a translation of the original code and not the authorative implementation. This code should generate bitwise
-equal output to the original. Please report any deviations
+This is a translation of the original code and not the authoritative
+implementation. For supported workflows, the goal is to generate the same output
+as C minimap2. Please report deviations with test data.
 
 The aim of this project is to increase performance, especially by providing this code through a type-safe library interface.
 The code can also be compiled to be used for webassembly.
 
-**some issues/polishing still remain. this is the latest release but don't yet use it for production code yet**
+**Do not use this for production yet. Some minimap2 features are incomplete or
+not wired through the CLI.**
 
 ## Features
 
 - **Pure Rust** -- no C dependencies or FFI
-- **Cross-compatible index I/O** -- reads and writes `.mmi` index files interchangeable with C minimap2
-- **PAF output matches C minimap2** on all test cases
-- **Full CIGAR generation** via anchor-based gap-filling alignment
-- **All major presets**: `map-ont`, `map-pb`, `map-hifi`, `sr`, `splice`, `asm5`, `asm10`, `asm20`, `ava-ont`, `ava-pb`, and more
+- **Cross-compatible single-part index I/O** -- reads and writes standard `.mmi`
+  index files
+- **PAF/SAM parity on tested fixtures** -- checked against the vendored C
+  minimap2 for representative long-read, HiFi, assembly, and split-alignment
+  cases
+- **CIGAR generation for supported workflows** via anchor-based gap-filling
+  alignment
+- **Major DNA presets**: `map-ont`, `map-pb`, `map-hifi`, `sr`, `asm5`,
+  `asm10`, `asm20`, `ava-ont`, `ava-pb`, and related presets
+- **Splice presets**: `splice`, `splice:hq`, `splice:sr`, and `cdna` set
+  minimap2-like options, including splice-aware chaining, `N` CIGAR skips,
+  transcript-strand tags, junction annotation handling, and splice-specific
+  DP scoring
 - **Multi-threaded** mapping with [rayon](https://github.com/rayon-rs/rayon)
-- **Paired-end** support (two-file input with proper SAM flags)
+- **Paired-end and grouped fragment** support is implemented for two-file
+  pairs and adjacent same-name single-file fragments, with C-vs-Rust parity
+  coverage on bundled fixtures
 
 ## Installation
 
@@ -69,7 +84,7 @@ minimap2-pure-rs -x map-pb   ref.fa pb_reads.fq      # PacBio CLR
 minimap2-pure-rs -x map-hifi ref.fa hifi_reads.fq    # PacBio HiFi
 minimap2-pure-rs -x sr       ref.fa reads.fq         # Short reads
 minimap2-pure-rs -x asm5     ref.fa assembly.fa       # Assembly-to-reference
-minimap2-pure-rs -x splice   ref.fa rna_reads.fq     # Spliced alignment
+minimap2-pure-rs -x splice   ref.fa rna_reads.fq     # Incomplete; see Known gaps
 ```
 
 ### Index management
@@ -99,26 +114,47 @@ Options:
   -a, --sam                 Output SAM
   -c                        Output CIGAR in PAF
       --cs                  Output cs tag
+      --ds                  Output ds tag
       --MD                  Output MD tag
       --eqx                 Use =/X instead of M in CIGAR
   -A <MATCH_SCORE>          Matching score
   -B <MISMATCH>             Mismatch penalty
+  -f <FLOAT>                Filter top fraction of repetitive minimizers
   -O <INT[,INT]>            Gap open penalty [,second]
   -E <INT[,INT]>            Gap extension penalty [,second]
   -r <INT[,INT]>            Bandwidth [,long]
+  -F <MAX_FRAG_LEN>         Max fragment length
   -N <BEST_N>               Top N secondary alignments
       --secondary <yes|no>  Output secondary alignments
   -s <MIN_DP_SCORE>         Min alignment score
+  -Q                        Do not output base qualities in SAM
+      --sam-hit-only        Only output SAM records with hits
+      --secondary-seq       Output SEQ/QUAL for secondary alignments with hard clipping
       --paf-no-hit          Output unmapped in PAF
   -d <FILE>                 Dump index to file
   -Y                        Soft clipping
+  -L                        Long CIGAR in CG tag for BAM compatibility
   -R <STR>                  Read group line
   -H                        HPC mode (homopolymer compression)
   -P                        Output all chains
       --for-only            Only map to forward strand
       --rev-only            Only map to reverse strand
+      --qstrand             Preserve query-strand coordinates for reverse-strand PAF output
+      --copy-comment        Copy FASTA/FASTQ comments to output
+      --idx-no-seq          Build an index without target sequences
+      --junc-bed <FILE>     Parsed, but junction annotations are not consumed by DP
+      --write-junc          Emit junction lines from spliced alignments
+      --junc-bonus <INT>    Splice junction score bonus
+      --junc-pen <INT>      Splice junction penalty
+  -J <INT>                  Splice model selector (0 old, 1 new)
+  -u <CHAR>                 Splice strand mode (f, r, b, n)
+      --alt <FILE>          ALT contig name list
+      --alt-drop <FLOAT>    ALT contig score drop fraction
+      --split-prefix <PFX>  Split-index merge for single-end mapping
   -G <MAX_INTRON>           Max intron length (splice mode)
-      --sdust-thres <INT>   SDUST threshold (0 to disable)
+  -T, --sdust-thres <INT>   SDUST threshold (0 to disable)
+  -K <NUM>                  Mini-batch size for mapping
+  -I <NUM>                  Split index for every NUM input bases
   -h, --help                Print help
   -V, --version             Print version
 ```
@@ -200,7 +236,7 @@ src/
   hit.rs              Hit filtering, MAPQ, parent/secondary
   esterr.rs           Divergence estimation
   pe.rs               Paired-end pairing
-  jump.rs             Splice junction extension (stub)
+  jump.rs             Splice junction extension helpers
   map.rs              Core mapping pipeline
   pipeline.rs         Multi-threaded file mapping (SE + PE)
   index/
@@ -226,18 +262,51 @@ src/
 
 ## Differences from C minimap2
 
-- **Functionally equivalent**, not bit-exact: coordinates and scores match on all test cases; minor floating-point differences in divergence tags
+- **Fixture-equivalent, not globally feature-complete**: coordinates, scores,
+  CIGARs, and selected SAM tags match on the current regression suite; untested
+  workflows may still differ
 - **SIMD alignment**: SSE4.1 rotated-band DP kernels with AVX2 H-score tracking, const-generic CIGAR/score-only specialization, and runtime dispatch (SSE4.1 -> SSE2 -> scalar fallback)
 - **Anchor-based gap-filling**: CIGAR is generated by aligning inter-anchor gaps individually, same approach as C minimap2
-- **Splice junctions**: `jump.rs` is a stub; splice-aware alignment via `--splice` uses the standard DP
+- **RMQ chaining**: implemented with a simpler `BTreeMap` range scan rather than
+  C minimap2's augmented red-black tree; intended to preserve behavior, but the
+  asymptotic performance differs on very large anchor sets
+
+## Known gaps
+
+These are known differences or validation limits relative to full C minimap2
+behavior:
+
+- **Splice and junction-aware alignment is implemented for the tracked Rust
+  translation gaps.** `--splice` applies splice preset parameters and
+  splice-aware chaining, converts splice-sized reference skips to `N`, emits
+  transcript-strand tags, handles BED12 junction annotations, supports exact
+  clipped-junction extension including ambiguous annotated candidates, and uses
+  splice-specific DP scoring. Coverage is still fixture-based rather than a
+  full upstream minimap2 conformance suite.
+- **Multi-part index mapping is implemented for the tested CLI paths.**
+  `--split-prefix` maps single-end, grouped fragment, and two-file paired-end
+  reads through split index parts and merges per-query hits. Strict interleaved
+  split helpers are also present.
+- **Short-read high-occurrence re-chaining is implemented for the tested
+  single-segment and paired-end paths.** Broader short-read datasets may still
+  expose differences in secondary ordering or pairing heuristics.
+- **ALT contig metadata follows C minimap2's mapping-time model.** `--alt` and
+  `--alt-drop` are supported, and ALT lists are applied when mapping. `.mmi`
+  files do not carry ALT state; provide `--alt` again when loading an index.
+- **Some advanced CLI/output modes are partial.** `--qstrand` is currently
+  supported only for PAF without CIGAR/SAM. `--ds`, `--write-junc`,
+  `--copy-comment`, `--sam-hit-only`, `--secondary-seq`, `--idx-no-seq`, `-L`,
+  `-f`, `-F`, `-I`, `-J`, `-u`, `-Q`, `--alt`, `--alt-drop`, `--junc-bonus`,
+  and `--junc-pen` are wired, with fixture coverage for the most important
+  output paths.
 
 ## Testing
 
 ```bash
-# Unit tests (111)
+# Unit tests
 cargo test
 
-# Integration tests against C minimap2 (18)
+# Integration tests against C minimap2
 cargo test --test integration
 
 # All tests

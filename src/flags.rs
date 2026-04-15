@@ -68,6 +68,8 @@ bitflags! {
         const SPLICE_FOR  = 0x80;
         const SPLICE_REV  = 0x100;
         const SPLICE_FLANK= 0x200;
+        const SPLICE_CMPLX= 0x400;
+        const SPLICE_SCORE= 0x800;
     }
 }
 

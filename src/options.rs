@@ -174,7 +174,8 @@ pub fn set_opt(preset: Option<&str>, io: &mut IdxOpt, mo: &mut MapOpt) -> Result
             io.flag = IdxFlags::empty();
             io.k = 15;
             io.w = 5;
-            mo.flag |= MapFlags::ALL_CHAINS | MapFlags::NO_DIAG | MapFlags::NO_DUAL | MapFlags::NO_LJOIN;
+            mo.flag |=
+                MapFlags::ALL_CHAINS | MapFlags::NO_DIAG | MapFlags::NO_DUAL | MapFlags::NO_LJOIN;
             mo.min_chain_score = 100;
             mo.pri_ratio = 0.0;
             mo.max_chain_skip = 25;
@@ -190,7 +191,8 @@ pub fn set_opt(preset: Option<&str>, io: &mut IdxOpt, mo: &mut MapOpt) -> Result
             io.flag |= IdxFlags::HPC;
             io.k = 19;
             io.w = 5;
-            mo.flag |= MapFlags::ALL_CHAINS | MapFlags::NO_DIAG | MapFlags::NO_DUAL | MapFlags::NO_LJOIN;
+            mo.flag |=
+                MapFlags::ALL_CHAINS | MapFlags::NO_DIAG | MapFlags::NO_DUAL | MapFlags::NO_LJOIN;
             mo.min_chain_score = 100;
             mo.pri_ratio = 0.0;
             mo.max_chain_skip = 25;
@@ -325,7 +327,10 @@ pub fn set_opt(preset: Option<&str>, io: &mut IdxOpt, mo: &mut MapOpt) -> Result
             io.flag = IdxFlags::empty();
             io.k = 15;
             io.w = 5;
-            mo.flag |= MapFlags::SPLICE | MapFlags::SPLICE_FOR | MapFlags::SPLICE_REV | MapFlags::SPLICE_FLANK;
+            mo.flag |= MapFlags::SPLICE
+                | MapFlags::SPLICE_FOR
+                | MapFlags::SPLICE_REV
+                | MapFlags::SPLICE_FLANK;
             mo.max_sw_mat = 0;
             mo.max_gap = 2000;
             mo.max_gap_ref = 200_000;
@@ -411,18 +416,20 @@ pub fn check_opt(io: &IdxOpt, mo: &MapOpt) -> Result<(), String> {
             mo.bw, mo.bw_long
         ));
     }
-    if mo.flag.contains(MapFlags::RMQ)
-        && mo.flag.intersects(MapFlags::SR | MapFlags::SPLICE)
-    {
+    if mo.flag.contains(MapFlags::RMQ) && mo.flag.intersects(MapFlags::SR | MapFlags::SPLICE) {
         return Err("--rmq doesn't work with --sr or --splice".into());
     }
-    if mo.split_prefix.is_some()
-        && mo.flag.intersects(MapFlags::OUT_CS | MapFlags::OUT_MD)
-    {
+    if mo.split_prefix.is_some() && mo.flag.intersects(MapFlags::OUT_CS | MapFlags::OUT_MD) {
         return Err("--cs or --MD doesn't work with --split-prefix".into());
     }
     if io.k <= 0 || io.w <= 0 {
         return Err("-k and -w must be positive".into());
+    }
+    if mo.flag.contains(MapFlags::CIGAR) && io.flag.contains(IdxFlags::NO_SEQ) {
+        return Err("CIGAR/SAM/cs/MD output requires target sequences in the index".into());
+    }
+    if mo.flag.contains(MapFlags::QSTRAND) && mo.flag.contains(MapFlags::CIGAR) {
+        return Err("--qstrand is currently supported for PAF without CIGAR/SAM only".into());
     }
     if mo.best_n < 0 {
         return Err("-N must be no less than 0".into());
@@ -436,9 +443,7 @@ pub fn check_opt(io: &IdxOpt, mo: &MapOpt) -> Result<(), String> {
     if mo.e <= 0 || mo.q <= 0 {
         return Err("-O and -E must be positive".into());
     }
-    if (mo.q != mo.q2 || mo.e != mo.e2)
-        && !(mo.e > mo.e2 && mo.q + mo.e < mo.q2 + mo.e2)
-    {
+    if (mo.q != mo.q2 || mo.e != mo.e2) && !(mo.e > mo.e2 && mo.q + mo.e < mo.q2 + mo.e2) {
         return Err("dual gap penalties violating E1>E2 and O1+E1<O2+E2".into());
     }
     if (mo.q + mo.e) + (mo.q2 + mo.e2) > 127 {
@@ -454,7 +459,9 @@ pub fn check_opt(io: &IdxOpt, mo: &MapOpt) -> Result<(), String> {
         return Err("-X/-P and --secondary=no can't be applied at the same time".into());
     }
     if mo.flag.contains(MapFlags::QSTRAND)
-        && (mo.flag.intersects(MapFlags::OUT_SAM | MapFlags::SPLICE | MapFlags::FRAG_MODE)
+        && (mo
+            .flag
+            .intersects(MapFlags::OUT_SAM | MapFlags::SPLICE | MapFlags::FRAG_MODE)
             || io.flag.contains(IdxFlags::HPC))
     {
         return Err("--qstrand doesn't work with -a, -H, --frag or --splice".into());
