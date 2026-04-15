@@ -200,6 +200,10 @@ pub fn write_sam_record_with_comment(
             nm, p.dp_max, p.dp_score, p.n_ambi
         )
         .unwrap();
+        if r.is_spliced && (p.trans_strand == 1 || p.trans_strand == 2) {
+            let ts = if p.trans_strand == 1 { '+' } else { '-' };
+            write!(s, "\tts:A:{}", ts).unwrap();
+        }
     }
     let type_char = if r.id == r.parent {
         if r.inv {

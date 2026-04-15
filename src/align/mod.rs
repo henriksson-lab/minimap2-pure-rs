@@ -1073,6 +1073,51 @@ fn rescue_exact_annotated_introns(
 
     let min_first_exon = opt.min_chain_score.max(15) as usize;
     let mut best: Option<SpliceRescue> = None;
+    for (jidx, first_junc) in juncs.iter().enumerate() {
+        if first_junc.st < win_st || first_junc.en > win_en || first_junc.en <= first_junc.st {
+            continue;
+        }
+        let junc_st = (first_junc.st - win_st) as usize;
+        let max_prefix = junc_st.min(qseq.len());
+        for prefix_len in (1..=max_prefix).rev() {
+            if prefix_len < 8 {
+                break;
+            }
+            if tseq[junc_st - prefix_len..junc_st] != qseq[..prefix_len] {
+                continue;
+            }
+            let mut cigar = Vec::new();
+            append_cigar(&mut cigar, &[(prefix_len as u32) << 4]);
+            append_cigar(
+                &mut cigar,
+                &[((first_junc.en - first_junc.st) as u32) << 4 | 3],
+            );
+            if let Some(rescue) = extend_annotated_junction_chain(
+                opt,
+                win_st,
+                win_en,
+                &tseq,
+                qseq,
+                juncs,
+                jidx + 1,
+                first_junc.en,
+                prefix_len,
+                first_junc.st - prefix_len as i32,
+                cigar,
+                1,
+            ) {
+                let replace = best
+                    .as_ref()
+                    .map(|b| rescue.rs < b.rs || (rescue.rs == b.rs && rescue.re > b.re))
+                    .unwrap_or(true);
+                if replace {
+                    best = Some(rescue);
+                }
+                break;
+            }
+        }
+    }
+
     for ts_off in 0..win_len {
         if ts_off + min_first_exon > win_len || qseq.first() != tseq.get(ts_off) {
             continue;
@@ -1134,6 +1179,75 @@ fn rescue_exact_annotated_introns(
         }
     }
     best
+}
+
+#[allow(clippy::too_many_arguments)]
+fn extend_annotated_junction_chain(
+    opt: &MapOpt,
+    win_st: i32,
+    win_en: i32,
+    tseq: &[u8],
+    qseq: &[u8],
+    juncs: &[crate::junc::JuncIntv],
+    next_jidx: usize,
+    t_abs: i32,
+    q_off: usize,
+    rs: i32,
+    cigar: Vec<u32>,
+    n_introns: i32,
+) -> Option<SpliceRescue> {
+    if t_abs < win_st || t_abs > win_en || q_off > qseq.len() {
+        return None;
+    }
+    let t_loc = (t_abs - win_st) as usize;
+    let remaining = qseq.len() - q_off;
+    if t_loc + remaining <= tseq.len() && tseq[t_loc..t_loc + remaining] == qseq[q_off..] {
+        let mut final_cigar = cigar;
+        append_cigar(&mut final_cigar, &[(remaining as u32) << 4]);
+        let splice_bonus = n_introns * (opt.junc_bonus - (opt.q2 + 3));
+        return Some(SpliceRescue {
+            rs,
+            re: t_abs + remaining as i32,
+            cigar: final_cigar,
+            bonus: splice_bonus,
+        });
+    }
+
+    for (jidx, j) in juncs.iter().enumerate().skip(next_jidx) {
+        if j.st < t_abs || j.en > win_en || j.en <= j.st {
+            continue;
+        }
+        let exon_len = (j.st - t_abs) as usize;
+        if q_off + exon_len > qseq.len() {
+            continue;
+        }
+        if t_loc + exon_len > tseq.len() {
+            continue;
+        }
+        if tseq[t_loc..t_loc + exon_len] != qseq[q_off..q_off + exon_len] {
+            continue;
+        }
+        let mut next_cigar = cigar.clone();
+        append_cigar(&mut next_cigar, &[(exon_len as u32) << 4]);
+        append_cigar(&mut next_cigar, &[((j.en - j.st) as u32) << 4 | 3]);
+        if let Some(rescue) = extend_annotated_junction_chain(
+            opt,
+            win_st,
+            win_en,
+            tseq,
+            qseq,
+            juncs,
+            jidx + 1,
+            j.en,
+            q_off + exon_len,
+            rs,
+            next_cigar,
+            n_introns + 1,
+        ) {
+            return Some(rescue);
+        }
+    }
+    None
 }
 
 fn rescue_exact_single_intron(
