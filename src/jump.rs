@@ -330,7 +330,12 @@ fn left_candidate_mismatches(
     if left_st < 0 || off > r.rs + ext || off < off2 {
         return None;
     }
-    mi.getseq(r.rid as u32, left_st as u32, off2 as u32, &mut tseq[..tl1 as usize]);
+    mi.getseq(
+        r.rid as u32,
+        left_st as u32,
+        off2 as u32,
+        &mut tseq[..tl1 as usize],
+    );
     mi.getseq(
         r.rid as u32,
         off as u32,

@@ -1,8 +1,9 @@
-use std::io::{self, Read, Write, BufReader, BufWriter};
+use super::MmIdx;
 use crate::flags::IdxFlags;
 use crate::types::{IdxSeq, MM_IDX_MAGIC};
-use super::MmIdx;
+use std::io::{self, BufReader, BufWriter, Read, Write};
 
+const MM2RS_ALT_MAGIC: &[u8; 4] = b"ALT\0";
 
 /// Write an index to a binary .mmi file. Matches mm_idx_dump().
 pub fn idx_dump<W: Write>(w: &mut W, mi: &MmIdx) -> io::Result<()> {
@@ -52,8 +53,19 @@ pub fn idx_dump<W: Write>(w: &mut W, mi: &MmIdx) -> io::Result<()> {
     if !mi.flag.contains(IdxFlags::NO_SEQ) {
         let n_words = (sum_len.div_ceil(8)) as usize;
         for i in 0..n_words {
-            let val = if i < mi.packed_seq.len() { mi.packed_seq[i] } else { 0 };
+            let val = if i < mi.packed_seq.len() {
+                mi.packed_seq[i]
+            } else {
+                0
+            };
             w.write_all(&val.to_le_bytes())?;
+        }
+    }
+    if mi.n_alt > 0 || mi.seqs.iter().any(|seq| seq.is_alt) {
+        w.write_all(MM2RS_ALT_MAGIC)?;
+        w.write_all(&(mi.seqs.len() as u32).to_le_bytes())?;
+        for seq in &mi.seqs {
+            w.write_all(&[seq.is_alt as u8])?;
         }
     }
     w.flush()?;
@@ -127,8 +139,15 @@ pub fn idx_load<R: Read>(r: &mut R) -> io::Result<Option<MmIdx>> {
             for _ in 0..size {
                 let mut kv = [0u8; 16];
                 r.read_exact(&mut kv)?;
-                let key = u64::from_le_bytes(kv[0..8].try_into().unwrap());
+                let mut key = u64::from_le_bytes(kv[0..8].try_into().unwrap());
                 let val = u64::from_le_bytes(kv[8..16].try_into().unwrap());
+                if key & 1 != 0 {
+                    key &= !1;
+                    let offset = bucket.p.len() as u64;
+                    bucket.p.push(val);
+                    h.insert(key, (offset << 32) | 1);
+                    continue;
+                }
                 h.insert(key, val);
             }
             bucket.h = Some(h);
@@ -145,8 +164,38 @@ pub fn idx_load<R: Read>(r: &mut R) -> io::Result<Option<MmIdx>> {
             mi.packed_seq.push(u32::from_le_bytes(buf));
         }
     }
+    read_optional_alt_extension(&mut r, &mut mi)?;
 
     Ok(Some(mi))
+}
+
+fn read_optional_alt_extension<R: Read>(r: &mut R, mi: &mut MmIdx) -> io::Result<()> {
+    let mut magic = [0u8; 4];
+    match r.read_exact(&mut magic) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+        Err(e) => return Err(e),
+    }
+    if &magic != MM2RS_ALT_MAGIC {
+        return Ok(());
+    }
+
+    let mut n_buf = [0u8; 4];
+    r.read_exact(&mut n_buf)?;
+    let n_seq = u32::from_le_bytes(n_buf) as usize;
+    let mut n_alt = 0i32;
+    for i in 0..n_seq {
+        let mut flag = [0u8; 1];
+        r.read_exact(&mut flag)?;
+        if let Some(seq) = mi.seqs.get_mut(i) {
+            seq.is_alt = flag[0] != 0;
+            if seq.is_alt {
+                n_alt += 1;
+            }
+        }
+    }
+    mi.n_alt = n_alt;
+    Ok(())
 }
 
 /// Check if a file is a minimap2 index by reading the magic bytes.
@@ -198,6 +247,28 @@ mod tests {
         mi.getseq(0, 0, 4, &mut buf1);
         mi2.getseq(0, 0, 4, &mut buf2);
         assert_eq!(buf1, buf2);
+    }
+
+    #[test]
+    fn test_dump_load_roundtrip_preserves_alt() {
+        let seqs: Vec<&[u8]> = vec![
+            b"ACGTACGTACGTACGTACGTACGTACGTACGT",
+            b"TGCATGCATGCATGCATGCATGCATGCATGCA",
+        ];
+        let names = vec!["seq1", "seq2_alt"];
+        let mut mi = MmIdx::build_from_str(10, 15, false, 14, &seqs, Some(&names)).unwrap();
+        mi.seqs[1].is_alt = true;
+        mi.n_alt = 1;
+
+        let mut buf = Vec::new();
+        idx_dump(&mut buf, &mi).unwrap();
+
+        let mut cursor = io::Cursor::new(buf);
+        let mi2 = idx_load(&mut cursor).unwrap().unwrap();
+
+        assert_eq!(mi2.n_alt, 1);
+        assert!(!mi2.seqs[0].is_alt);
+        assert!(mi2.seqs[1].is_alt);
     }
 
     #[test]

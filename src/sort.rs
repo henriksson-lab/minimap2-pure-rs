@@ -1,30 +1,86 @@
 use crate::types::Mm128;
 
-/// Radix sort for Mm128, sorting by the x field (8 bytes, LSB first).
+/// Radix sort for Mm128, sorting by the x field.
 /// This matches radix_sort_128x from misc.c.
 pub fn radix_sort_mm128(data: &mut [Mm128]) {
-    if data.len() < 256 {
-        data.sort_unstable();
+    if data.len() <= RS_MIN_SIZE {
+        insertion_sort_mm128_x(data);
         return;
     }
-    let mut buf = vec![Mm128::default(); data.len()];
-    // 8 passes of 8-bit radix sort on the x field
-    for shift in (0..64).step_by(8) {
-        let mut counts = [0u32; 256];
-        for item in data.iter() {
-            let byte = ((item.x >> shift) & 0xff) as usize;
-            counts[byte] += 1;
+    radix_sort_mm128_x(data, 56);
+}
+
+const RS_MIN_SIZE: usize = 64;
+
+fn insertion_sort_mm128_x(data: &mut [Mm128]) {
+    for i in 1..data.len() {
+        if data[i].x < data[i - 1].x {
+            let tmp = data[i];
+            let mut j = i;
+            while j > 0 && tmp.x < data[j - 1].x {
+                data[j] = data[j - 1];
+                j -= 1;
+            }
+            data[j] = tmp;
         }
-        let mut offsets = [0u32; 256];
-        for i in 1..256 {
-            offsets[i] = offsets[i - 1] + counts[i - 1];
+    }
+}
+
+fn radix_sort_mm128_x(data: &mut [Mm128], shift: u32) {
+    const SIZE: usize = 256;
+    let mut bucket_b = [0usize; SIZE];
+    let mut bucket_e = [0usize; SIZE];
+
+    for item in data.iter() {
+        bucket_e[((item.x >> shift) & 0xff) as usize] += 1;
+    }
+    for k in 1..SIZE {
+        bucket_e[k] += bucket_e[k - 1];
+        bucket_b[k] = bucket_e[k - 1];
+    }
+
+    let mut k = 0usize;
+    while k < SIZE {
+        if bucket_b[k] != bucket_e[k] {
+            let mut l = ((data[bucket_b[k]].x >> shift) & 0xff) as usize;
+            if l != k {
+                let mut tmp = data[bucket_b[k]];
+                loop {
+                    let swap = tmp;
+                    tmp = data[bucket_b[l]];
+                    data[bucket_b[l]] = swap;
+                    bucket_b[l] += 1;
+                    l = ((tmp.x >> shift) & 0xff) as usize;
+                    if l == k {
+                        break;
+                    }
+                }
+                data[bucket_b[k]] = tmp;
+                bucket_b[k] += 1;
+            } else {
+                bucket_b[k] += 1;
+            }
+        } else {
+            k += 1;
         }
-        for item in data.iter() {
-            let byte = ((item.x >> shift) & 0xff) as usize;
-            buf[offsets[byte] as usize] = *item;
-            offsets[byte] += 1;
+    }
+
+    bucket_b[0] = 0;
+    for k in 1..SIZE {
+        bucket_b[k] = bucket_e[k - 1];
+    }
+    if shift > 0 {
+        let next_shift = shift.saturating_sub(8);
+        for k in 0..SIZE {
+            let start = bucket_b[k];
+            let end = bucket_e[k];
+            let len = end - start;
+            if len > RS_MIN_SIZE {
+                radix_sort_mm128_x(&mut data[start..end], next_shift);
+            } else if len > 1 {
+                insertion_sort_mm128_x(&mut data[start..end]);
+            }
         }
-        data.copy_from_slice(&buf);
     }
 }
 

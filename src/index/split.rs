@@ -125,6 +125,7 @@ pub fn merge_split_query_records(
     records: &[SplitQueryRecord],
     rid_shifts: &[u32],
     opt: &MapOpt,
+    idx_k: i32,
     qlen: i32,
 ) -> SplitQueryRecord {
     let mut merged = SplitQueryRecord::default();
@@ -162,7 +163,7 @@ pub fn merge_split_query_records(
         opt.alt_drop,
     );
     if !opt.flag.contains(MapFlags::ALL_CHAINS) {
-        hit::select_sub(opt.pri_ratio, opt.min_chain_score * 2, opt.best_n, &mut merged.regs);
+        hit::select_sub(opt.pri_ratio, idx_k * 2, opt.best_n, &mut merged.regs);
         hit::set_sam_pri(&mut merged.regs);
     }
     hit::set_mapq(
@@ -449,7 +450,7 @@ mod tests {
             },
         ];
         let opt = crate::options::MapOpt::default();
-        let merged = merge_split_query_records(&records, &[0, 5], &opt, 100);
+        let merged = merge_split_query_records(&records, &[0, 5], &opt, 15, 100);
 
         assert_eq!(merged.n_reg, 2);
         assert_eq!(merged.rep_len, 7);

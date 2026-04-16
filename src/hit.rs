@@ -71,7 +71,7 @@ pub fn gen_regs(hash: u32, qlen: i32, u: &[u64], a: &[Mm128], is_qstrand: bool) 
     let mut z: Vec<Mm128> = Vec::with_capacity(n_u);
     let mut k = 0usize;
     for i in 0..n_u {
-        let h = hash64(hash64(a[k].x).wrapping_add(hash64(a[k].y))) ^ hash as u64;
+        let h = hash64(hash64(a[k].x).wrapping_add(hash64(a[k].y)) ^ hash as u64);
         let h = h as u32;
         z.push(Mm128::new(
             u[i] ^ h as u64,
@@ -328,7 +328,7 @@ pub fn hit_sort(regs: &mut Vec<AlignReg>, alt_diff_frac: f32) {
             kept.push(((score as u64) << 32 | r.hash as u64, i));
         }
     }
-    kept.sort_unstable_by(|a, b| b.0.cmp(&a.0)); // descending
+    kept.sort_unstable_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1))); // descending, C radix reverse tie order
     let new_regs: Vec<AlignReg> = kept.iter().map(|&(_, i)| regs[i].clone()).collect();
     *regs = new_regs;
 }
@@ -451,12 +451,14 @@ pub fn select_sub(pri_ratio: f32, min_diff: i32, best_n: i32, regs: &mut Vec<Ali
     if pri_ratio <= 0.0 || regs.is_empty() {
         return;
     }
-    let mut kept = Vec::new();
+    let n = regs.len();
     let mut n_2nd = 0i32;
-    for i in 0..regs.len() {
+    let mut k = 0usize;
+    for i in 0..n {
         let p = regs[i].parent as usize;
-        if regs[i].parent == regs[i].id || regs[i].inv {
-            kept.push(regs[i].clone());
+        let mut to_keep = false;
+        if regs[i].parent == i as i32 || regs[i].inv {
+            to_keep = true;
         } else if p < regs.len()
             && (regs[i].score as f32 >= regs[p].score as f32 * pri_ratio
                 || regs[i].score + min_diff >= regs[p].score)
@@ -469,13 +471,19 @@ pub fn select_sub(pri_ratio: f32, min_diff: i32, best_n: i32, regs: &mut Vec<Ali
                 && regs[i].rs == regs[p].rs
                 && regs[i].re == regs[p].re)
             {
-                kept.push(regs[i].clone());
+                to_keep = true;
                 n_2nd += 1;
             }
         }
+        if to_keep {
+            if k != i {
+                regs[k] = regs[i].clone();
+            }
+            k += 1;
+        }
     }
-    let changed = kept.len() != regs.len();
-    *regs = kept;
+    let changed = k != n;
+    regs.truncate(k);
     if changed {
         sync_regs(regs);
     }

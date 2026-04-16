@@ -3,8 +3,8 @@
 //! Reads junction annotations from BED12 format files and stores them
 //! in the index for use during splice-aware alignment.
 
-use std::io::{self, BufRead};
 use crate::index::MmIdx;
+use std::io::{self, BufRead};
 
 /// A junction interval on a reference sequence.
 #[derive(Clone, Debug)]
@@ -28,7 +28,9 @@ impl JuncDb {
     pub fn get_junc_array(&self, rid: u32, st: i32, en: i32, rev: bool) -> Vec<u8> {
         let len = (en - st) as usize;
         let mut junc = vec![0u8; len];
-        if (rid as usize) >= self.juncs.len() { return junc; }
+        if (rid as usize) >= self.juncs.len() {
+            return junc;
+        }
         for j in &self.juncs[rid as usize] {
             // Mark donor and acceptor sites
             let donor = j.st - st;
@@ -54,7 +56,9 @@ pub fn read_junc_bed(mi: &mut MmIdx, path: &str) -> io::Result<usize> {
     let file = std::fs::File::open(path)?;
     let reader = io::BufReader::new(file);
     let mut n_junc = 0usize;
-    let mut db = JuncDb { juncs: vec![Vec::new(); mi.seqs.len()] };
+    let mut db = JuncDb {
+        juncs: vec![Vec::new(); mi.seqs.len()],
+    };
 
     // Build name index if not present
     mi.index_names();
@@ -62,32 +66,50 @@ pub fn read_junc_bed(mi: &mut MmIdx, path: &str) -> io::Result<usize> {
     for line in reader.lines() {
         let line = line?;
         let line = line.trim();
-        if line.is_empty() || line.starts_with('#') || line.starts_with("track") || line.starts_with("browser") {
+        if line.is_empty()
+            || line.starts_with('#')
+            || line.starts_with("track")
+            || line.starts_with("browser")
+        {
             continue;
         }
         let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() < 12 { continue; }
+        if fields.len() < 12 {
+            continue;
+        }
 
         let chrom = fields[0];
-        let chrom_start: i32 = match fields[1].parse() { Ok(v) => v, Err(_) => continue };
+        let chrom_start: i32 = match fields[1].parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
         let _strand = match fields[5] {
             "+" => 1i8,
             "-" => 2i8,
             _ => 0i8,
         };
-        let block_count: usize = match fields[9].parse() { Ok(v) => v, Err(_) => continue };
-        if block_count < 2 { continue; }
+        let block_count: usize = match fields[9].parse() {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if block_count < 2 {
+            continue;
+        }
 
-        let block_sizes: Vec<i32> = fields[10].split(',')
+        let block_sizes: Vec<i32> = fields[10]
+            .split(',')
             .filter(|s| !s.is_empty())
             .filter_map(|s| s.parse().ok())
             .collect();
-        let block_starts: Vec<i32> = fields[11].split(',')
+        let block_starts: Vec<i32> = fields[11]
+            .split(',')
             .filter(|s| !s.is_empty())
             .filter_map(|s| s.parse().ok())
             .collect();
 
-        if block_sizes.len() < block_count || block_starts.len() < block_count { continue; }
+        if block_sizes.len() < block_count || block_starts.len() < block_count {
+            continue;
+        }
 
         let rid = match mi.name2id(chrom) {
             Some(id) => id,
@@ -106,7 +128,9 @@ pub fn read_junc_bed(mi: &mut MmIdx, path: &str) -> io::Result<usize> {
             let junc_end = chrom_start + block_starts[i];
             if junc_end > junc_start {
                 db.juncs[rid as usize].push(JuncIntv {
-                    st: junc_start, en: junc_end, strand: strand_val,
+                    st: junc_start,
+                    en: junc_end,
+                    strand: strand_val,
                 });
                 n_junc += 1;
             }
@@ -134,13 +158,24 @@ mod tests {
     fn test_read_junc_bed() {
         let mut ref_file = tempfile::NamedTempFile::new().unwrap();
         writeln!(ref_file, ">chr1").unwrap();
-        writeln!(ref_file, "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT").unwrap();
+        writeln!(
+            ref_file,
+            "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+        )
+        .unwrap();
         ref_file.flush().unwrap();
 
         let mut mi = MmIdx::build_from_file(
-            ref_file.path().to_str().unwrap(), 10, 15, 14,
-            crate::flags::IdxFlags::empty(), 50_000_000, u64::MAX,
-        ).unwrap().unwrap();
+            ref_file.path().to_str().unwrap(),
+            10,
+            15,
+            14,
+            crate::flags::IdxFlags::empty(),
+            50_000_000,
+            u64::MAX,
+        )
+        .unwrap()
+        .unwrap();
 
         // Create BED12 file
         let mut bed = tempfile::NamedTempFile::new().unwrap();

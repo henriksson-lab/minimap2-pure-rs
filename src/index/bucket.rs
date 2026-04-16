@@ -1,6 +1,6 @@
-use hashbrown::HashMap;
-use crate::types::Mm128;
 use crate::sort::{radix_sort_mm128, radix_sort_u64};
+use crate::types::Mm128;
+use hashbrown::HashMap;
 
 /// Index bucket. Each bucket holds minimizers whose hash falls into this bucket.
 ///

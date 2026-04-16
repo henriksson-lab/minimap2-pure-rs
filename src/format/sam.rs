@@ -1,4 +1,5 @@
 use crate::flags::{CigarOp, MapFlags};
+use crate::format::paf::event_identity;
 use crate::index::MmIdx;
 use crate::seq::SEQ_COMP_TABLE;
 use crate::types::{AlignExtra, AlignReg, MM_VERSION};
@@ -14,7 +15,7 @@ pub fn write_sam_hdr(mi: &MmIdx, rg: Option<&str>, args: &[String]) -> String {
         writeln!(s, "@SQ\tSN:{}\tLN:{}", seq.name, seq.len).unwrap();
     }
     if let Some(rg) = rg {
-        writeln!(s, "{}", rg).unwrap();
+        writeln!(s, "{}", normalize_rg_line(rg)).unwrap();
     }
     write!(s, "@PG\tID:minimap2\tPN:minimap2\tVN:{}", MM_VERSION).unwrap();
     if !args.is_empty() {
@@ -24,6 +25,16 @@ pub fn write_sam_hdr(mi: &MmIdx, rg: Option<&str>, args: &[String]) -> String {
         }
     }
     s
+}
+
+pub fn normalize_rg_line(rg: &str) -> String {
+    rg.replace("\\t", "\t")
+}
+
+pub fn read_group_id(rg: &str) -> Option<String> {
+    normalize_rg_line(rg)
+        .split('\t')
+        .find_map(|field| field.strip_prefix("ID:").map(str::to_owned))
 }
 
 /// Write a single SAM record.
@@ -96,10 +107,10 @@ pub fn write_sam_record_with_comment(
 
     // SAM flag
     let mut sam_flag: u16 = 0;
-    if r.split > 0 && !r.sam_pri {
-        sam_flag |= 0x800; // supplementary
-    } else if !r.sam_pri {
+    if r.id != r.parent {
         sam_flag |= 0x100; // secondary
+    } else if !r.sam_pri {
+        sam_flag |= 0x800; // supplementary
     }
     if r.rev {
         sam_flag |= 0x10;
@@ -151,8 +162,8 @@ pub fn write_sam_record_with_comment(
     } else {
         // Hard clip: output only aligned portion (supplementary/secondary)
         if r.rev {
-            let qs_fwd = (qlen - r.qe).max(0) as usize;
-            let qe_fwd = (qlen - r.qs).min(qlen) as usize;
+            let qs_fwd = r.qs.max(0) as usize;
+            let qe_fwd = r.qe.min(qlen) as usize;
             (qs_fwd.min(qseq.len()), qe_fwd.min(qseq.len()))
         } else {
             (r.qs.max(0) as usize, r.qe.min(qlen) as usize)
@@ -222,20 +233,27 @@ pub fn write_sam_record_with_comment(
     if r.parent == r.id {
         write!(s, "\ts2:i:{}", r.subsc).unwrap();
     }
-    if rep_len >= 0 {
-        write!(s, "\trl:i:{}", rep_len).unwrap();
+    if r.extra.is_some() {
+        let div = 1.0 - event_identity(r);
+        if div == 0.0 {
+            write!(s, "\tde:f:0").unwrap();
+        } else {
+            write!(s, "\tde:f:{:.4}", div).unwrap();
+        }
     }
-
+    if r.split > 0 {
+        write!(s, "\tzd:i:{}", r.split).unwrap();
+    }
     // SA tag for split/supplementary alignments
-    if r.split > 0 && _regs.len() > 1 {
+    if r.parent == r.id && r.extra.is_some() && _regs.len() > 1 {
         let mut sa_parts: Vec<String> = Vec::new();
         for other in _regs.iter() {
             if other.id == r.id {
                 continue;
-            } // skip self
-            if other.split == 0 {
+            }
+            if other.parent != other.id {
                 continue;
-            } // only include split pieces
+            }
             if other.extra.is_none() {
                 continue;
             }
@@ -245,7 +263,7 @@ pub fn write_sam_record_with_comment(
                 continue;
             };
             let strand = if other.rev { '-' } else { '+' };
-            let cigar_str = crate::align::cigar_to_string(&other.extra.as_ref().unwrap().cigar.0);
+            let cigar_str = sam_sa_cigar(other, qlen);
             let nm = other.blen - other.mlen + other.extra.as_ref().unwrap().n_ambi as i32;
             sa_parts.push(format!(
                 "{},{},{},{},{},{}",
@@ -269,6 +287,10 @@ pub fn write_sam_record_with_comment(
         }
     }
 
+    if rep_len >= 0 {
+        write!(s, "\trl:i:{}", rep_len).unwrap();
+    }
+
     if flag.contains(MapFlags::COPY_COMMENT) {
         if let Some(comment) = comment.filter(|c| !c.is_empty()) {
             write!(s, "\t{}", comment).unwrap();
@@ -276,6 +298,33 @@ pub fn write_sam_record_with_comment(
     }
 
     s
+}
+
+fn sam_sa_cigar(r: &AlignReg, qlen: i32) -> String {
+    let q_span = r.qe - r.qs;
+    let r_span = r.re - r.rs;
+    let l_m = q_span.min(r_span).max(0);
+    let l_i = (q_span - l_m).max(0);
+    let l_d = (r_span - l_m).max(0);
+    let clip5 = if r.rev { qlen - r.qe } else { r.qs }.max(0);
+    let clip3 = if r.rev { r.qs } else { qlen - r.qe }.max(0);
+    let mut cigar = String::new();
+    if clip5 > 0 {
+        write!(cigar, "{}S", clip5).unwrap();
+    }
+    if l_m > 0 {
+        write!(cigar, "{}M", l_m).unwrap();
+    }
+    if l_i > 0 {
+        write!(cigar, "{}I", l_i).unwrap();
+    }
+    if l_d > 0 {
+        write!(cigar, "{}D", l_d).unwrap();
+    }
+    if clip3 > 0 {
+        write!(cigar, "{}S", clip3).unwrap();
+    }
+    cigar
 }
 
 fn sam_long_cigar_in_tag(r: &AlignReg, qlen: i32, flag: MapFlags) -> bool {

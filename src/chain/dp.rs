@@ -1,7 +1,7 @@
-use std::cell::RefCell;
-use crate::types::Mm128;
 use super::backtrack::{chain_backtrack, compact_a};
 use super::{comput_sc, ChainResult};
+use crate::types::Mm128;
+use std::cell::RefCell;
 
 // Thread-local scratch buffers for chain DP to avoid per-call allocations.
 thread_local! {
@@ -61,10 +61,14 @@ pub fn lchain_dp(
     let mut v_scores = CHAIN_V.with(|c| std::mem::take(&mut *c.borrow_mut()));
     let mut t = CHAIN_T.with(|c| std::mem::take(&mut *c.borrow_mut()));
     let nu = n as usize;
-    p.clear(); p.resize(nu, -1i64);
-    f.clear(); f.resize(nu, 0i32);
-    v_scores.clear(); v_scores.resize(nu, 0i32);
-    t.clear(); t.resize(nu, 0i32);
+    p.clear();
+    p.resize(nu, -1i64);
+    f.clear();
+    f.resize(nu, 0i32);
+    v_scores.clear();
+    v_scores.resize(nu, 0i32);
+    t.clear();
+    t.resize(nu, 0i32);
 
     // Fill score and backtrack arrays
     let mut st: i64 = 0;
@@ -87,24 +91,38 @@ pub fn lchain_dp(
             let su = st as usize;
             unsafe {
                 if (*ap.add(iu)).x >> 32 != (*ap.add(su)).x >> 32
-                    || (*ap.add(iu)).x > (*ap.add(su)).x + max_dist_x as u64 {
+                    || (*ap.add(iu)).x > (*ap.add(su)).x + max_dist_x as u64
+                {
                     st += 1;
-                } else { break; }
+                } else {
+                    break;
+                }
             }
         }
         if i - st > max_iter as i64 {
             st = i - max_iter as i64;
         }
 
-        let mut end_j = st;
+        let mut end_j = st - 1;
+        let mut j = i - 1;
         // DP: scan predecessors
-        for j in (st..i).rev() {
+        while j >= st {
             let ju = j as usize;
-            let sc = unsafe { comput_sc(
-                &*ap.add(iu), &*ap.add(ju), max_dist_x, max_dist_y, bw,
-                chn_pen_gap, chn_pen_skip, is_cdna, n_seg,
-            ) };
+            let sc = unsafe {
+                comput_sc(
+                    &*ap.add(iu),
+                    &*ap.add(ju),
+                    max_dist_x,
+                    max_dist_y,
+                    bw,
+                    chn_pen_gap,
+                    chn_pen_skip,
+                    is_cdna,
+                    n_seg,
+                )
+            };
             if sc == i32::MIN {
+                j -= 1;
                 continue;
             }
             let sc = sc + unsafe { *fp.add(ju) };
@@ -117,6 +135,7 @@ pub fn lchain_dp(
             } else if unsafe { *tp.add(ju) } == i as i32 {
                 n_skip += 1;
                 if n_skip > max_skip {
+                    end_j = j;
                     break;
                 }
             }
@@ -125,11 +144,14 @@ pub fn lchain_dp(
                     *tp.add((*pp.add(ju)) as usize) = i as i32;
                 }
             }
-            end_j = j;
+            j -= 1;
         }
 
         // Check the global maximum in range (for skip recovery)
-        if max_ii < 0 || unsafe { (*ap.add(iu)).x.wrapping_sub((*ap.add(max_ii as usize)).x) } > max_dist_x as u64 {
+        if max_ii < 0
+            || unsafe { (*ap.add(iu)).x.wrapping_sub((*ap.add(max_ii as usize)).x) }
+                > max_dist_x as u64
+        {
             let mut max_val = i32::MIN;
             max_ii = -1;
             for j in (st..i).rev() {
@@ -142,10 +164,19 @@ pub fn lchain_dp(
             }
         }
         if max_ii >= 0 && max_ii < end_j {
-            let tmp = unsafe { comput_sc(
-                &*ap.add(iu), &*ap.add(max_ii as usize), max_dist_x, max_dist_y, bw,
-                chn_pen_gap, chn_pen_skip, is_cdna, n_seg,
-            ) };
+            let tmp = unsafe {
+                comput_sc(
+                    &*ap.add(iu),
+                    &*ap.add(max_ii as usize),
+                    max_dist_x,
+                    max_dist_y,
+                    bw,
+                    chn_pen_gap,
+                    chn_pen_skip,
+                    is_cdna,
+                    n_seg,
+                )
+            };
             if tmp != i32::MIN && max_f < tmp + unsafe { *fp.add(max_ii as usize) } {
                 max_f = tmp + unsafe { *fp.add(max_ii as usize) };
                 max_j = max_ii;
@@ -164,8 +195,10 @@ pub fn lchain_dp(
             };
         }
         if max_ii < 0
-            || unsafe { (*ap.add(iu)).x.wrapping_sub((*ap.add(max_ii as usize)).x) <= max_dist_x as u64
-                && *fp.add(max_ii as usize) < *fp.add(iu) }
+            || unsafe {
+                (*ap.add(iu)).x.wrapping_sub((*ap.add(max_ii as usize)).x) <= max_dist_x as u64
+                    && *fp.add(max_ii as usize) < *fp.add(iu)
+            }
         {
             max_ii = i;
         }
@@ -187,10 +220,7 @@ pub fn lchain_dp(
 
     // Compact
     let anchors = compact_a(&mut u, &v_indices, a);
-    Some(ChainResult {
-        anchors,
-        chains: u,
-    })
+    Some(ChainResult { anchors, chains: u })
 }
 
 #[cfg(test)]
@@ -206,8 +236,8 @@ mod tests {
             let q_pos = (i * 100 + 50) as u64;
             let q_span = 15u64;
             a.push(Mm128::new(
-                0u64 << 32 | ref_pos,   // rid=0, ref_pos
-                q_span << 32 | q_pos,    // q_span=15, q_pos
+                0u64 << 32 | ref_pos, // rid=0, ref_pos
+                q_span << 32 | q_pos, // q_span=15, q_pos
             ));
         }
         a
@@ -217,13 +247,11 @@ mod tests {
     fn test_lchain_dp_basic() {
         let a = make_linear_anchors();
         let result = lchain_dp(
-            5000, 5000, 500, 25, 5000,
-            3,   // min_cnt
+            5000, 5000, 500, 25, 5000, 3,   // min_cnt
             40,  // min_sc
             0.8, // chn_pen_gap
             0.0, // chn_pen_skip
-            false, 1,
-            &a,
+            false, 1, &a,
         );
         assert!(result.is_some(), "Should find at least one chain");
         let r = result.unwrap();
@@ -234,11 +262,7 @@ mod tests {
 
     #[test]
     fn test_lchain_dp_empty() {
-        let result = lchain_dp(
-            5000, 5000, 500, 25, 5000,
-            3, 40, 0.8, 0.0, false, 1,
-            &[],
-        );
+        let result = lchain_dp(5000, 5000, 500, 25, 5000, 3, 40, 0.8, 0.0, false, 1, &[]);
         assert!(result.is_none());
     }
 
@@ -263,13 +287,13 @@ mod tests {
         // Sort by (rid, ref_pos)
         a.sort_unstable();
 
-        let result = lchain_dp(
-            5000, 5000, 500, 25, 5000,
-            2, 20, 0.8, 0.0, false, 1,
-            &a,
-        );
+        let result = lchain_dp(5000, 5000, 500, 25, 5000, 2, 20, 0.8, 0.0, false, 1, &a);
         assert!(result.is_some());
         let r = result.unwrap();
-        assert!(r.chains.len() >= 2, "Should find at least 2 chains, found {}", r.chains.len());
+        assert!(
+            r.chains.len() >= 2,
+            "Should find at least 2 chains, found {}",
+            r.chains.len()
+        );
     }
 }

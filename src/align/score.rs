@@ -54,14 +54,14 @@ mod tests {
         gen_simple_mat(5, &mut mat, 2, 4, 1);
         assert_eq!(mat.len(), 25);
         // Diagonal (match)
-        assert_eq!(mat[0], 2);  // A-A
-        assert_eq!(mat[6], 2);  // C-C
+        assert_eq!(mat[0], 2); // A-A
+        assert_eq!(mat[6], 2); // C-C
         assert_eq!(mat[12], 2); // G-G
         assert_eq!(mat[18], 2); // T-T
-        // Off-diagonal (mismatch)
+                                // Off-diagonal (mismatch)
         assert_eq!(mat[1], -4); // A-C
-        // N column/row
-        assert_eq!(mat[4], -1);  // A-N
+                                // N column/row
+        assert_eq!(mat[4], -1); // A-N
         assert_eq!(mat[20], -1); // N-A
         assert_eq!(mat[24], -1); // N-N
     }

@@ -40,34 +40,34 @@
 //! - [`options::set_opt`] — configure presets
 //! - [`pipeline`] — multi-threaded file mapping
 
-pub mod flags;
-pub mod types;
-pub mod options;
-pub mod seq;
-pub mod sort;
-pub mod sketch;
-pub mod sdust;
-pub mod bseq;
-pub mod index;
-pub mod seed;
-pub mod chain;
 pub mod align;
-pub mod hit;
+pub mod aligner;
+pub mod bseq;
+pub mod chain;
 pub mod esterr;
+pub mod flags;
 pub mod format;
-pub mod map;
-pub mod pipeline;
-pub mod pe;
+pub mod hit;
+pub mod index;
 pub mod jump;
 pub mod junc;
-pub mod aligner;
+pub mod map;
+pub mod options;
+pub mod pe;
+pub mod pipeline;
+pub mod sdust;
+pub mod seed;
+pub mod seq;
+pub mod sketch;
+pub mod sort;
+pub mod types;
 
 /// Convenience re-exports for common usage.
 pub mod prelude {
     pub use crate::flags::{IdxFlags, MapFlags};
     pub use crate::index::MmIdx;
     pub use crate::map::{map_query, MapResult};
-    pub use crate::options::{IdxOpt, MapOpt, mapopt_update};
+    pub use crate::options::{mapopt_update, IdxOpt, MapOpt};
     pub use crate::types::AlignReg;
 
     /// Set up options with a preset. Returns (IdxOpt, MapOpt).

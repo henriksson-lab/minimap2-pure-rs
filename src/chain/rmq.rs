@@ -1,7 +1,7 @@
-use std::collections::BTreeMap;
-use crate::types::Mm128;
 use super::backtrack::{chain_backtrack, compact_a};
 use super::{comput_sc_simple, ChainResult};
+use crate::types::Mm128;
+use std::collections::BTreeMap;
 
 /// A simplified RMQ structure using BTreeMap keyed by (y, i) with augmented min-priority.
 ///
@@ -18,7 +18,9 @@ struct RmqTree {
 
 impl RmqTree {
     fn new() -> Self {
-        Self { tree: BTreeMap::new() }
+        Self {
+            tree: BTreeMap::new(),
+        }
     }
 
     fn insert(&mut self, y: i32, i: i64, pri: f64) {
@@ -53,7 +55,10 @@ impl RmqTree {
     /// in decreasing y order.
     fn iter_rev_from(&self, y: i32) -> impl Iterator<Item = (i32, i64, f64)> + '_ {
         let key = (y, i64::MAX);
-        self.tree.range(..=key).rev().map(|(&(y, i), &pri)| (y, i, pri))
+        self.tree
+            .range(..=key)
+            .rev()
+            .map(|(&(y, i), &pri)| (y, i, pri))
     }
 }
 
@@ -95,7 +100,11 @@ pub fn lchain_rmq(
     let mut v = vec![0i32; n as usize];
 
     let mut root = RmqTree::new();
-    let mut root_inner = if max_dist_inner > 0 { Some(RmqTree::new()) } else { None };
+    let mut root_inner = if max_dist_inner > 0 {
+        Some(RmqTree::new())
+    } else {
+        None
+    };
 
     let mut st: i64 = 0;
     let mut st_inner: i64 = 0;
@@ -111,7 +120,8 @@ pub fn lchain_rmq(
         if i0 < i && a[i0 as usize].x != a[iu].x {
             for j in i0..i {
                 let ju = j as usize;
-                let pri = -(f[ju] as f64 + 0.5 * chn_pen_gap as f64 * (a[ju].x as i32 as f64 + a[ju].y as i32 as f64));
+                let pri = -(f[ju] as f64
+                    + 0.5 * chn_pen_gap as f64 * (a[ju].x as i32 as f64 + a[ju].y as i32 as f64));
                 root.insert(a[ju].y as i32, j, pri);
                 if let Some(ref mut ri) = root_inner {
                     ri.insert(a[ju].y as i32, j, pri);
@@ -146,7 +156,8 @@ pub fn lchain_rmq(
         let lo_y = a[iu].y as i32 - max_dist;
         let hi_y = a[iu].y as i32;
         if let Some((_qy, qj)) = root.rmq(lo_y, hi_y) {
-            let (sc, exact, width) = comput_sc_simple(&a[iu], &a[qj as usize], chn_pen_gap, chn_pen_skip);
+            let (sc, exact, width) =
+                comput_sc_simple(&a[iu], &a[qj as usize], chn_pen_gap, chn_pen_skip);
             let sc = f[qj as usize] + sc;
             if width <= bw && sc > max_f {
                 max_f = sc;
@@ -162,16 +173,25 @@ pub fn lchain_rmq(
                             if qy < a[iu].y as i32 - max_dist_inner {
                                 break;
                             }
-                            let (sc2, _, width2) = comput_sc_simple(&a[iu], &a[qj2 as usize], chn_pen_gap, chn_pen_skip);
+                            let (sc2, _, width2) = comput_sc_simple(
+                                &a[iu],
+                                &a[qj2 as usize],
+                                chn_pen_gap,
+                                chn_pen_skip,
+                            );
                             let sc2 = f[qj2 as usize] + sc2;
                             if width2 <= bw {
                                 if sc2 > max_f {
                                     max_f = sc2;
                                     max_j = qj2;
-                                    if n_skip > 0 { n_skip -= 1; }
+                                    if n_skip > 0 {
+                                        n_skip -= 1;
+                                    }
                                 } else if t[qj2 as usize] == i as i32 {
                                     n_skip += 1;
-                                    if n_skip > max_chn_skip { break; }
+                                    if n_skip > max_chn_skip {
+                                        break;
+                                    }
                                 }
                                 if p[qj2 as usize] >= 0 {
                                     t[p[qj2 as usize] as usize] = i as i32;
@@ -200,10 +220,7 @@ pub fn lchain_rmq(
     }
 
     let anchors = compact_a(&mut u, &v_indices, a);
-    Some(ChainResult {
-        anchors,
-        chains: u,
-    })
+    Some(ChainResult { anchors, chains: u })
 }
 
 #[cfg(test)]
@@ -216,10 +233,7 @@ mod tests {
             let ref_pos = (i * 100 + 50) as u64;
             let q_pos = (i * 100 + 50) as u64;
             let q_span = 15u64;
-            a.push(Mm128::new(
-                0u64 << 32 | ref_pos,
-                q_span << 32 | q_pos,
-            ));
+            a.push(Mm128::new(0u64 << 32 | ref_pos, q_span << 32 | q_pos));
         }
         a
     }
@@ -228,15 +242,15 @@ mod tests {
     fn test_lchain_rmq_basic() {
         let a = make_linear_anchors();
         let result = lchain_rmq(
-            5000,  // max_dist
-            1000,  // max_dist_inner
-            500,   // bw
-            25,    // max_chn_skip
-            100000,// cap_rmq_size
-            3,     // min_cnt
-            40,    // min_sc
-            0.8,   // chn_pen_gap
-            0.0,   // chn_pen_skip
+            5000,   // max_dist
+            1000,   // max_dist_inner
+            500,    // bw
+            25,     // max_chn_skip
+            100000, // cap_rmq_size
+            3,      // min_cnt
+            40,     // min_sc
+            0.8,    // chn_pen_gap
+            0.0,    // chn_pen_skip
             &a,
         );
         assert!(result.is_some(), "Should find at least one chain");

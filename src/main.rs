@@ -415,6 +415,8 @@ fn main() {
     if let Some(ref sec) = cli.secondary {
         if sec == "no" {
             mo.flag |= MapFlags::NO_PRINT_2ND;
+        } else if sec == "yes" {
+            mo.flag.remove(MapFlags::NO_PRINT_2ND);
         }
     }
     if cli.max_intron > 0 {
@@ -707,7 +709,14 @@ fn main() {
                             &args,
                         )
                     } else {
-                        pipeline::map_file_sam(&mi, &mo, qpath, cli.threads, cli.rg.as_deref(), &args)
+                        pipeline::map_file_sam(
+                            &mi,
+                            &mo,
+                            qpath,
+                            cli.threads,
+                            cli.rg.as_deref(),
+                            &args,
+                        )
                     }
                 }
             } else {

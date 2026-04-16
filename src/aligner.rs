@@ -117,7 +117,9 @@ impl AlignerBuilder {
 
     /// Build the aligner (loads/builds the index).
     pub fn build(mut self) -> Result<Aligner, String> {
-        let path = self.index_path.as_deref()
+        let path = self
+            .index_path
+            .as_deref()
             .ok_or_else(|| "No index path provided".to_string())?;
 
         if self.cigar {
@@ -128,8 +130,8 @@ impl AlignerBuilder {
             .map_err(|e| format!("Failed to check index: {}", e))?;
 
         let idx = if is_idx {
-            let mut f = std::fs::File::open(path)
-                .map_err(|e| format!("Failed to open index: {}", e))?;
+            let mut f =
+                std::fs::File::open(path).map_err(|e| format!("Failed to open index: {}", e))?;
             crate::index::io::idx_load(&mut f)
                 .map_err(|e| format!("Failed to load index: {}", e))?
                 .ok_or_else(|| "Empty index file".to_string())?
@@ -165,7 +167,11 @@ mod tests {
     fn test_aligner_basic() {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         writeln!(f, ">ref1").unwrap();
-        writeln!(f, "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT").unwrap();
+        writeln!(
+            f,
+            "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+        )
+        .unwrap();
         f.flush().unwrap();
 
         let aligner = Aligner::builder()
@@ -184,7 +190,11 @@ mod tests {
     fn test_aligner_with_preset() {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         writeln!(f, ">ref1").unwrap();
-        writeln!(f, "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT").unwrap();
+        writeln!(
+            f,
+            "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+        )
+        .unwrap();
         f.flush().unwrap();
 
         let aligner = Aligner::builder()
@@ -201,7 +211,11 @@ mod tests {
     fn test_aligner_with_cigar() {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         writeln!(f, ">ref1").unwrap();
-        writeln!(f, "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT").unwrap();
+        writeln!(
+            f,
+            "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+        )
+        .unwrap();
         f.flush().unwrap();
 
         let aligner = Aligner::builder()
@@ -219,7 +233,11 @@ mod tests {
     fn test_aligner_no_hit() {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         writeln!(f, ">ref1").unwrap();
-        writeln!(f, "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT").unwrap();
+        writeln!(
+            f,
+            "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+        )
+        .unwrap();
         f.flush().unwrap();
 
         let aligner = Aligner::builder()

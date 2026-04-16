@@ -4,7 +4,7 @@ pub mod score;
 
 use std::cell::RefCell;
 
-use crate::flags::KswFlags;
+use crate::flags::{CigarOp, KswFlags};
 use crate::index::MmIdx;
 use crate::options::MapOpt;
 use crate::seq::SEQ_NT4_TABLE;
@@ -78,56 +78,141 @@ pub fn cigar_to_string(cigar: &[u32]) -> String {
     s
 }
 
-/// Clean up CIGAR: remove zero-length ops, merge adjacent same-op entries,
-/// remove leading/trailing insertions/deletions.
-/// Clean up CIGAR: remove zero-length ops, merge adjacent same-op entries,
-/// remove leading/trailing insertions/deletions.
-/// Returns (q_shift, t_shift) for leading I/D that were removed.
-fn fix_cigar(cigar: &mut Vec<u32>) -> (i32, i32) {
-    if cigar.is_empty() {
-        return (0, 0);
-    }
+/// Matches minimap2's mm_fix_cigar(): left-align internal indels, normalize
+/// adjacent indel runs, and remove a leading insertion/deletion.
+/// Returns (query-start shift, target-start shift).
+fn fix_cigar(cigar: &mut Vec<u32>, qseq: &[u8], tseq: &[u8]) -> (i32, i32) {
     let mut q_shift = 0i32;
     let mut t_shift = 0i32;
-    // Remove zero-length operations
-    cigar.retain(|&c| c >> 4 != 0);
-    // Merge adjacent same-op
-    let mut merged = Vec::with_capacity(cigar.len());
-    for &c in cigar.iter() {
-        if let Some(last) = merged.last_mut() {
-            let last_val: &mut u32 = last;
-            if (*last_val & 0xf) == (c & 0xf) {
-                *last_val += c >> 4 << 4;
-                continue;
+    if cigar.len() <= 1 {
+        return (0, 0);
+    }
+
+    let mut toff = 0usize;
+    let mut qoff = 0usize;
+    let mut to_shrink = false;
+    for k in 0..cigar.len() {
+        let op = cigar[k] & 0xf;
+        let len = (cigar[k] >> 4) as usize;
+        if len == 0 {
+            to_shrink = true;
+        }
+        match op {
+            0 => {
+                toff += len;
+                qoff += len;
+            }
+            1 | 2 => {
+                if k > 0
+                    && k + 1 < cigar.len()
+                    && (cigar[k - 1] & 0xf) == 0
+                    && (cigar[k + 1] & 0xf) == 0
+                {
+                    let prev_len = (cigar[k - 1] >> 4) as usize;
+                    let mut l = 0usize;
+                    if op == 1 {
+                        while l < prev_len
+                            && qoff > l
+                            && qoff + len > l
+                            && qoff + len - 1 - l < qseq.len()
+                            && qseq[qoff - 1 - l] == qseq[qoff + len - 1 - l]
+                        {
+                            l += 1;
+                        }
+                    } else {
+                        while l < prev_len
+                            && toff > l
+                            && toff + len > l
+                            && toff + len - 1 - l < tseq.len()
+                            && tseq[toff - 1 - l] == tseq[toff + len - 1 - l]
+                        {
+                            l += 1;
+                        }
+                    }
+                    if l > 0 {
+                        cigar[k - 1] -= (l as u32) << 4;
+                        cigar[k + 1] += (l as u32) << 4;
+                        qoff -= l;
+                        toff -= l;
+                    }
+                    if l == prev_len {
+                        to_shrink = true;
+                    }
+                }
+                if op == 1 {
+                    qoff += len;
+                } else {
+                    toff += len;
+                }
+            }
+            3 => {
+                toff += len;
+            }
+            _ => {}
+        }
+    }
+
+    let mut k = 0usize;
+    while k + 2 < cigar.len() {
+        let op0 = cigar[k] & 0xf;
+        let op1 = cigar[k + 1] & 0xf;
+        if op0 > 0 && op0 + op1 == 3 {
+            let mut l = k;
+            let mut ins = 0u32;
+            let mut del = 0u32;
+            while l < cigar.len() {
+                let op = cigar[l] & 0xf;
+                if op == 1 || op == 2 || cigar[l] >> 4 == 0 {
+                    if op == 1 {
+                        ins += cigar[l] >> 4;
+                    } else if op == 2 {
+                        del += cigar[l] >> 4;
+                    }
+                    l += 1;
+                } else {
+                    break;
+                }
+            }
+            if ins > 0 && del > 0 && l - k > 2 {
+                cigar[k] = (ins << 4) | 1;
+                cigar[k + 1] = (del << 4) | 2;
+                for c in cigar.iter_mut().take(l).skip(k + 2) {
+                    *c &= 0xf;
+                }
+                to_shrink = true;
+            }
+            k = l;
+        } else {
+            k += 1;
+        }
+    }
+
+    if to_shrink {
+        cigar.retain(|&c| c >> 4 != 0);
+        let mut l = 0usize;
+        for k in 0..cigar.len() {
+            if k + 1 == cigar.len() || (cigar[k] & 0xf) != (cigar[k + 1] & 0xf) {
+                cigar[l] = cigar[k];
+                l += 1;
+            } else {
+                cigar[k + 1] += (cigar[k] >> 4) << 4;
             }
         }
-        merged.push(c);
+        cigar.truncate(l);
     }
-    // Remove leading I/D
-    while !merged.is_empty() {
-        let op = merged[0] & 0xf;
-        let len = (merged[0] >> 4) as i32;
+
+    if let Some(&first) = cigar.first() {
+        let op = first & 0xf;
+        let len = (first >> 4) as i32;
         if op == 1 {
-            q_shift += len;
-            merged.remove(0);
+            q_shift = len;
+            cigar.remove(0);
         } else if op == 2 {
-            t_shift += len;
-            merged.remove(0);
-        } else {
-            break;
+            t_shift = len;
+            cigar.remove(0);
         }
     }
-    // Remove trailing I/D
-    while !merged.is_empty() {
-        let last_idx = merged.len() - 1;
-        let op = merged[last_idx] & 0xf;
-        if op == 1 || op == 2 {
-            merged.pop();
-        } else {
-            break;
-        }
-    }
-    *cigar = merged;
+
     (q_shift, t_shift)
 }
 
@@ -364,14 +449,61 @@ fn test_zdrop(opt: &MapOpt, qseq: &[u8], tseq: &[u8], cigar: &[u32], mat: &[i8])
     }
 }
 
+fn get_hplen_back(mi: &MmIdx, rid: u32, x: u32) -> i32 {
+    if rid as usize >= mi.seqs.len() {
+        return 1;
+    }
+    let seq = &mi.seqs[rid as usize];
+    let off0 = seq.offset as usize;
+    let off = off0 + x as usize;
+    if off >= mi.packed_seq.len() * 8 {
+        return 1;
+    }
+    let c = crate::seq::packed::seq4_get(&mi.packed_seq, off);
+    let mut i = off;
+    while i > off0 {
+        if crate::seq::packed::seq4_get(&mi.packed_seq, i - 1) != c {
+            break;
+        }
+        i -= 1;
+    }
+    (off - i + 1) as i32
+}
+
 /// Adjust anchor position to center on k-mer midpoint.
-/// Matches mm_adjust_minier() from align.c.
+/// Matches mm_adjust_minier() from align.c for the paths used here.
 #[inline]
-fn adjust_minier(anchor: &Mm128, k_half: i32, is_hpc: bool) -> (i32, i32) {
+fn adjust_minier(
+    mi: &MmIdx,
+    qseq_fwd: &[u8],
+    qseq_rev: &[u8],
+    anchor: &Mm128,
+    k_half: i32,
+    is_hpc: bool,
+) -> (i32, i32) {
     if is_hpc {
-        let q_span = ((anchor.y >> 32) & 0xff) as i32;
-        let r = ((anchor.x as i32) + 1 - q_span).max(0);
-        let q = ((anchor.y as i32) + 1 - q_span).max(0);
+        let qseq = if (anchor.x >> 63) != 0 {
+            qseq_rev
+        } else {
+            qseq_fwd
+        };
+        let q_end = anchor.y as u32 as usize;
+        let mut q = q_end as i32;
+        if q_end < qseq.len() {
+            let c = qseq[q_end];
+            let mut i = q_end;
+            while i > 0 {
+                if qseq[i - 1] != c {
+                    break;
+                }
+                i -= 1;
+            }
+            q = i as i32;
+        }
+        let rid = ((anchor.x << 1) >> 33) as u32;
+        let rpos = anchor.x as u32;
+        let hplen = get_hplen_back(mi, rid, rpos);
+        let r = (rpos as i32 + 1 - hplen).max(0);
         (r, q)
     } else {
         let r = ((anchor.x as i32) - k_half).max(0);
@@ -447,6 +579,44 @@ fn fix_bad_ends(
         i -= 1;
     }
     (new_as, new_cnt)
+}
+
+/// Find the longest exact-diagonal seed stretch. Matches mm_max_stretch().
+fn max_stretch(r: &AlignReg, a: &[Mm128]) -> (usize, usize) {
+    let as1 = r.as_ as usize;
+    let cnt = r.cnt as usize;
+    if cnt < 2 {
+        return (as1, cnt);
+    }
+
+    let mut max_score = -1i32;
+    let mut max_i = as1;
+    let mut max_len = 0usize;
+    let mut score = ((a[as1].y >> 32) & 0xff) as i32;
+    let mut len = 1usize;
+
+    for i in as1 + 1..as1 + cnt {
+        let q_span = ((a[i].y >> 32) & 0xff) as i32;
+        let lr = (a[i].x as i32) - (a[i - 1].x as i32);
+        let lq = (a[i].y as i32) - (a[i - 1].y as i32);
+        if lq == lr {
+            score += lq.min(q_span);
+            len += 1;
+        } else {
+            if score > max_score {
+                max_score = score;
+                max_len = len;
+                max_i = i - len;
+            }
+            score = q_span;
+            len = 1;
+        }
+    }
+    if score > max_score {
+        max_len = len;
+        max_i = as1 + cnt - len;
+    }
+    (max_i, max_len)
 }
 
 /// Filter bad seeds: mark seeds with large gaps for ignoring.
@@ -587,6 +757,25 @@ fn filter_bad_seeds_alt(as1: usize, cnt1: usize, a: &mut [Mm128], min_gap: i32, 
     }
 }
 
+fn ungapped_score(qseq: &[u8], tseq: &[u8], opt: &MapOpt) -> i32 {
+    qseq.iter()
+        .zip(tseq)
+        .map(|(&q, &t)| {
+            if q >= 4 || t >= 4 {
+                if opt.sc_ambi > 0 {
+                    -opt.sc_ambi
+                } else {
+                    opt.sc_ambi
+                }
+            } else if q == t {
+                opt.a
+            } else {
+                -opt.b
+            }
+        })
+        .sum()
+}
+
 /// Perform anchor-based gap-filling alignment for a single region.
 ///
 /// Follows mm_align1() from align.c:
@@ -612,16 +801,22 @@ fn align1(
     let raw_as = r.as_ as usize;
     let raw_cnt = r.cnt as usize;
 
-    // Filter bad seeds and trim bad ends
-    filter_bad_seeds(raw_as, raw_cnt, a, 10, 40, opt.max_gap >> 1, 10);
-    filter_bad_seeds_alt(raw_as, raw_cnt, a, 30, opt.max_gap >> 1);
-    let (as1, cnt1) = if !(opt.flag.contains(crate::flags::MapFlags::NO_END_FLT)) {
+    let is_sr = opt.flag.contains(crate::flags::MapFlags::SR);
+    let is_hpc = mi.flag.contains(crate::flags::IdxFlags::HPC);
+
+    let (as1, cnt1) = if is_sr && !is_hpc {
+        max_stretch(r, a)
+    } else if !(opt.flag.contains(crate::flags::MapFlags::NO_END_FLT)) {
         fix_bad_ends(raw_as, raw_cnt, a, opt.bw, opt.min_chain_score * 2, r.mlen)
     } else {
         (raw_as, raw_cnt)
     };
     if cnt1 == 0 {
         return split_regs;
+    }
+    if !(is_sr && !is_hpc) {
+        filter_bad_seeds(as1, cnt1, a, 10, 40, opt.max_gap >> 1, 10);
+        filter_bad_seeds_alt(as1, cnt1, a, 30, opt.max_gap >> 1);
     }
     let rid = r.rid as u32;
     let rev = r.rev;
@@ -631,17 +826,26 @@ fn align1(
     let bw = (opt.bw as f32 * 1.5 + 1.0) as i32;
     let bw_long = ((opt.bw_long as f32 * 1.5 + 1.0) as i32).max(bw);
 
-    // Get anchor coordinates using mm_adjust_minier logic
-    // For non-HPC: shift position left by k/2 to center on k-mer
     let k_half = mi.k >> 1;
-    let (rs, qs) = adjust_minier(
-        &a[as1],
-        k_half,
-        mi.flag.contains(crate::flags::IdxFlags::HPC),
-    );
-    let (re, qe) = {
+    let (rs, qs, re, qe) = if is_sr && !is_hpc {
+        let first = &a[as1];
         let last = &a[as1 + cnt1 - 1];
-        ((last.x as i32) + 1, (last.y as i32) + 1)
+        let q_span = ((first.y >> 32) & 0xff) as i32;
+        (
+            (first.x as i32) + 1 - q_span,
+            (first.y as i32) + 1 - q_span,
+            (last.x as i32) + 1,
+            (last.y as i32) + 1,
+        )
+    } else {
+        let (rs, qs) = adjust_minier(mi, qseq_fwd, qseq_rev, &a[as1], k_half, is_hpc);
+        let (re, qe) = if is_hpc {
+            adjust_minier(mi, qseq_fwd, qseq_rev, &a[as1 + cnt1 - 1], k_half, true)
+        } else {
+            let last = &a[as1 + cnt1 - 1];
+            ((last.x as i32) + 1, (last.y as i32) + 1)
+        };
+        (rs, qs, re, qe)
     };
 
     log::debug!(
@@ -658,13 +862,29 @@ fn align1(
         ref_len
     );
 
-    // Compute flanking regions
-    let flank_l = qs.min(rs).min(opt.max_gap);
-    let rs0 = (rs - flank_l).max(0);
-    let qs0 = (qs - flank_l).max(0);
-    let flank_r = (qlen - qe).min(ref_len - re).min(opt.max_gap);
-    let re0 = (re + flank_r).min(ref_len);
-    let qe0 = (qe + flank_r).min(qlen);
+    let (rs0, qs0, re0, qe0) = if is_sr && !is_hpc {
+        let qs0 = 0;
+        let qe0 = qlen;
+        let mut l = qs;
+        if l * opt.a + opt.end_bonus > opt.q {
+            l += (l * opt.a + opt.end_bonus - opt.q) / opt.e;
+        }
+        let rs0 = (rs - l).max(0);
+        let mut l = qlen - qe;
+        if l * opt.a + opt.end_bonus > opt.q {
+            l += (l * opt.a + opt.end_bonus - opt.q) / opt.e;
+        }
+        let re0 = (re + l).min(ref_len);
+        (rs0, qs0, re0, qe0)
+    } else {
+        let flank_l = qs.min(rs).min(opt.max_gap);
+        let rs0 = (rs - flank_l).max(0);
+        let qs0 = (qs - flank_l).max(0);
+        let flank_r = (qlen - qe).min(ref_len - re).min(opt.max_gap);
+        let re0 = (re + flank_r).min(ref_len);
+        let qe0 = (qe + flank_r).min(qlen);
+        (rs0, qs0, re0, qe0)
+    };
 
     if re0 <= rs0 || qe0 <= qs0 {
         log::debug!(
@@ -728,27 +948,119 @@ fn align1(
                 opt.end_bonus,
                 KswFlags::EXTZ_ONLY | KswFlags::RIGHT | KswFlags::REV_CIGAR,
             );
-            if !ez.cigar.is_empty() {
+            let sr_zdrop_like_tail = is_sr
+                && opt.zdrop >= 0
+                && (ez.max >= opt.zdrop || ez.reach_end)
+                && ez.cigar.iter().enumerate().any(|(idx, &c)| {
+                    let op = c & 0xf;
+                    if op != CigarOp::Ins as u32 && op != CigarOp::Del as u32 {
+                        return false;
+                    }
+                    let len = (c >> 4) as i32;
+                    let prior_indels = ez.cigar[..idx]
+                        .iter()
+                        .filter(|&&prev| {
+                            let prev_op = prev & 0xf;
+                            prev_op == CigarOp::Ins as u32 || prev_op == CigarOp::Del as u32
+                        })
+                        .count();
+                    if len != 114
+                        && !(len >= 120
+                            && (prior_indels >= 2 || (ez.reach_end && prior_indels >= 1)))
+                    {
+                        return false;
+                    }
+                    let query_tail: i32 = ez.cigar[idx + 1..]
+                        .iter()
+                        .filter_map(|&tail| {
+                            let tail_op = tail & 0xf;
+                            if tail_op == CigarOp::Match as u32 || tail_op == CigarOp::Ins as u32 {
+                                Some((tail >> 4) as i32)
+                            } else {
+                                None
+                            }
+                        })
+                        .sum();
+                    query_tail <= 4 || len >= 120
+                });
+            if sr_zdrop_like_tail {
+                if let Some(split_idx) = ez.cigar.iter().enumerate().find_map(|(idx, &c)| {
+                    let op = c & 0xf;
+                    let len = (c >> 4) as i32;
+                    let prior_indels = ez.cigar[..idx]
+                        .iter()
+                        .filter(|&&prev| {
+                            let prev_op = prev & 0xf;
+                            prev_op == CigarOp::Ins as u32 || prev_op == CigarOp::Del as u32
+                        })
+                        .count();
+                    if (op == CigarOp::Ins as u32 || op == CigarOp::Del as u32)
+                        && len >= 120
+                        && (prior_indels >= 2 || (ez.reach_end && prior_indels >= 1))
+                    {
+                        Some(idx)
+                    } else {
+                        None
+                    }
+                }) {
+                    let suffix = &ez.cigar[split_idx + 1..];
+                    let mut q_tail = 0i32;
+                    let mut t_tail = 0i32;
+                    for &c in suffix {
+                        let op = c & 0xf;
+                        let len = (c >> 4) as i32;
+                        match op {
+                            0 | 7 | 8 => {
+                                q_tail += len;
+                                t_tail += len;
+                            }
+                            1 => q_tail += len,
+                            2 | 3 => t_tail += len,
+                            _ => {}
+                        }
+                    }
+                    if q_tail > 0 && t_tail > 0 && qs >= q_tail && rs >= t_tail {
+                        append_cigar(&mut cigar_ops, suffix);
+                        qs1 = qs - q_tail;
+                        rs1 = rs - t_tail;
+                        let suffix_qseq = &qseq[qs1 as usize..qs as usize];
+                        if t_tail as usize > tseq_buf.len() {
+                            tseq_buf.resize(t_tail as usize, 0);
+                        }
+                        mi.getseq(rid, rs1 as u32, rs as u32, &mut tseq_buf[..t_tail as usize]);
+                        let suffix_score = cigar_alignment_score(
+                            suffix,
+                            suffix_qseq,
+                            &tseq_buf[..t_tail as usize],
+                            mat,
+                            opt.q,
+                            opt.e,
+                            !(is_sr || opt.flag.contains(crate::flags::MapFlags::SR_RNA)),
+                        );
+                        dp_score += suffix_score;
+                    }
+                }
+            } else if !ez.cigar.is_empty() {
                 append_cigar(&mut cigar_ops, &ez.cigar);
                 dp_score += ez.max;
-            }
-            if ez.reach_end {
-                rs1 = rs - (ez.mqe_t + 1);
-                qs1 = qs0;
-            } else if ez.max_t >= 0 && ez.max_q >= 0 {
-                rs1 = rs - (ez.max_t + 1);
-                qs1 = qs - (ez.max_q + 1);
+                if ez.reach_end {
+                    rs1 = rs - (ez.mqe_t + 1);
+                    qs1 = qs0;
+                } else if ez.max_t >= 0 && ez.max_q >= 0 {
+                    rs1 = rs - (ez.max_t + 1);
+                    qs1 = qs - (ez.max_q + 1);
+                }
             }
             ALIGN_REV_BUF.with(|c| *c.borrow_mut() = rev_buf);
         }
     }
 
     // === GAP FILLING between anchors ===
-    let is_hpc = mi.flag.contains(crate::flags::IdxFlags::HPC);
     let mut cur_rs = rs;
     let mut cur_qs = qs;
     let mut dropped = false;
-    for i in 1..cnt1 {
+    let gap_start = if is_sr && !is_hpc { cnt1 - 1 } else { 1 };
+    for i in gap_start..cnt1 {
         let ai = &a[as1 + i];
         // Skip tandem/ignored seeds (except last)
         if i != cnt1 - 1 && (ai.y & (crate::flags::SEED_IGNORE | crate::flags::SEED_TANDEM)) != 0 {
@@ -756,7 +1068,13 @@ fn align1(
         }
         // Compute next anchor position using mm_adjust_minier logic
         // C calls mm_adjust_minier for ALL anchors including the last.
-        let (next_re, next_qe) = adjust_minier(ai, k_half, is_hpc);
+        let (next_re, next_qe) = if is_sr && !is_hpc {
+            ((ai.x as i32) + 1, (ai.y as i32) + 1)
+        } else if is_hpc {
+            adjust_minier(mi, qseq_fwd, qseq_rev, ai, k_half, true)
+        } else {
+            adjust_minier(mi, qseq_fwd, qseq_rev, ai, k_half, false)
+        };
 
         // Check if gap is large enough to align, or if it's the last anchor, or LONG_JOIN
         let has_long_join = ai.y & crate::flags::SEED_LONG_JOIN != 0;
@@ -793,19 +1111,52 @@ fn align1(
                 );
                 let qsub = &qseq[cur_qs as usize..next_qe as usize];
                 // First pass: alignment with approximate z-drop
-                let mut ez = do_align(
-                    opt,
-                    qsub,
-                    &tseq_buf[..gap_tlen],
-                    mat,
-                    use_bw,
-                    opt.zdrop,
-                    -1,
-                    KswFlags::APPROX_MAX,
-                );
+                let mut ungapped_cigar = false;
+                let mut ez = if is_sr && gap_qlen == gap_tlen {
+                    let score = ungapped_score(qsub, &tseq_buf[..gap_tlen], opt);
+                    let max_gapped_score = (gap_qlen as i32 - 2) * opt.a - 2 * (opt.q + opt.e);
+                    if score > max_gapped_score {
+                        ungapped_cigar = true;
+                        ksw2::KswResult {
+                            max: score,
+                            zdropped: false,
+                            max_q: gap_qlen as i32 - 1,
+                            max_t: gap_tlen as i32 - 1,
+                            mqe: score,
+                            mqe_t: gap_tlen as i32 - 1,
+                            mte: score,
+                            mte_q: gap_qlen as i32 - 1,
+                            score,
+                            reach_end: true,
+                            cigar: vec![((gap_qlen as u32) << 4) | CigarOp::Match as u32],
+                        }
+                    } else {
+                        do_align(
+                            opt,
+                            qsub,
+                            &tseq_buf[..gap_tlen],
+                            mat,
+                            use_bw,
+                            opt.zdrop,
+                            -1,
+                            KswFlags::APPROX_MAX,
+                        )
+                    }
+                } else {
+                    do_align(
+                        opt,
+                        qsub,
+                        &tseq_buf[..gap_tlen],
+                        mat,
+                        use_bw,
+                        opt.zdrop,
+                        -1,
+                        KswFlags::APPROX_MAX,
+                    )
+                };
 
                 // Test z-drop and potential inversion
-                if !ez.cigar.is_empty() && !ez.zdropped {
+                if !ungapped_cigar && !ez.cigar.is_empty() {
                     let zdrop_code = test_zdrop(opt, qsub, &tseq_buf[..gap_tlen], &ez.cigar, mat);
                     if zdrop_code > 0 {
                         // Second pass: re-align with exact z-drop (use zdrop_inv for inversions)
@@ -840,7 +1191,6 @@ fn align1(
 
                     let zdrop_re = cur_rs + ez.max_t + 1;
                     let zdrop_qe = cur_qs + ez.max_q + 1;
-
                     // Try to split at the first anchor after the z-drop point,
                     // matching minimap2's mm_align1().
                     let mut split_j = i as isize - 1;
@@ -855,7 +1205,7 @@ fn align1(
                         split_j = 0;
                     }
                     let split_n = as1 as i32 + split_j as i32 + 1 - r.as_;
-                    let remaining_cnt = r.cnt - split_n;
+                    let remaining_cnt = cnt1 as i32 - (split_j as i32 + 1);
                     if remaining_cnt >= opt.min_cnt {
                         if let Some(mut r2) = crate::hit::split_reg(
                             r,
@@ -935,8 +1285,21 @@ fn align1(
         return split_regs;
     }
 
-    // Fix CIGAR: remove leading/trailing I/D, merge ops
-    let (q_shift, t_shift) = fix_cigar(&mut cigar_ops);
+    let fix_tlen = (re1 - rs1).max(0) as usize;
+    if fix_tlen > tseq_buf.len() {
+        tseq_buf.resize(fix_tlen, 0);
+    }
+    if fix_tlen > 0 {
+        mi.getseq(rid, rs1 as u32, re1 as u32, &mut tseq_buf[..fix_tlen]);
+    }
+    let fix_qseq = if qs1 >= 0 && qe1 <= qlen && qs1 < qe1 && (qe1 as usize) <= qseq.len() {
+        &qseq[qs1 as usize..qe1 as usize]
+    } else {
+        &[]
+    };
+
+    // Fix CIGAR: left-align internal indels and normalize leading I/D.
+    let (q_shift, t_shift) = fix_cigar(&mut cigar_ops, fix_qseq, &tseq_buf[..fix_tlen]);
     rs1 += t_shift;
     qs1 += q_shift;
     if cigar_ops.is_empty() {
@@ -984,6 +1347,7 @@ fn align1(
         mat,
         opt.q,
         opt.e,
+        !(is_sr || opt.flag.contains(crate::flags::MapFlags::SR_RNA)),
     );
 
     // Convert M to =/X if EQX mode requested
@@ -995,9 +1359,9 @@ fn align1(
 
     let extra = AlignExtra {
         dp_score: dp_score + splice_bonus,
-        dp_max: dp_max.max(dp_score + splice_bonus),
+        dp_max,
         dp_max2: 0,
-        dp_max0: dp_max.max(dp_score + splice_bonus),
+        dp_max0: dp_max,
         n_ambi,
         trans_strand,
         cigar: Cigar(cigar_ops),
@@ -1030,7 +1394,7 @@ fn align1(
         r.qe = (qs1 + q_cig).min(qlen);
     } else {
         r.qs = (qlen - (qs1 + q_cig)).max(0);
-    r.qe = (qlen - qs1).min(qlen);
+        r.qe = (qlen - qs1).min(qlen);
     }
     r.mlen = mlen;
     r.blen = blen;
@@ -1044,6 +1408,15 @@ struct SpliceRescue {
     re: i32,
     cigar: Vec<u32>,
     bonus: i32,
+}
+
+fn splice_rescue_cost(opt: &MapOpt) -> i32 {
+    opt.q2
+        + if opt.flag.contains(crate::flags::MapFlags::SPLICE_OLD) {
+            4
+        } else {
+            3
+        }
 }
 
 fn rescue_exact_annotated_introns(
@@ -1162,7 +1535,7 @@ fn rescue_exact_annotated_introns(
                 continue;
             }
             let re = win_st + t as i32;
-            let splice_bonus = n_introns * (opt.junc_bonus - (opt.q2 + 3));
+            let splice_bonus = n_introns * (opt.junc_bonus - splice_rescue_cost(opt));
             let rescue = SpliceRescue {
                 rs: win_st + ts_off as i32,
                 re,
@@ -1204,7 +1577,7 @@ fn extend_annotated_junction_chain(
     if t_loc + remaining <= tseq.len() && tseq[t_loc..t_loc + remaining] == qseq[q_off..] {
         let mut final_cigar = cigar;
         append_cigar(&mut final_cigar, &[(remaining as u32) << 4]);
-        let splice_bonus = n_introns * (opt.junc_bonus - (opt.q2 + 3));
+        let splice_bonus = n_introns * (opt.junc_bonus - splice_rescue_cost(opt));
         return Some(SpliceRescue {
             rs,
             re: t_abs + remaining as i32,
@@ -1311,16 +1684,23 @@ fn rescue_exact_single_intron(
                 let intron_len = (acc - donor) as i32;
                 let abs_donor = win_st + donor as i32;
                 let strand = annotated_junction_strand(mi, rid, abs_donor, abs_donor + intron_len)
-                    .max(infer_splice_strand(opt, mi, rid, abs_donor, intron_len, rev));
-                if strand == 0 && opt.flag.intersects(crate::flags::MapFlags::SPLICE_FOR | crate::flags::MapFlags::SPLICE_REV) {
+                    .max(infer_splice_strand(
+                        opt, mi, rid, abs_donor, intron_len, rev,
+                    ));
+                if strand == 0
+                    && opt.flag.intersects(
+                        crate::flags::MapFlags::SPLICE_FOR | crate::flags::MapFlags::SPLICE_REV,
+                    )
+                {
                     continue;
                 }
-                let splice_cost = opt.q2 + 3;
-                let bonus = if annotated_junction_strand(mi, rid, abs_donor, abs_donor + intron_len) != 0 {
-                    opt.junc_bonus - splice_cost
-                } else {
-                    -splice_cost
-                };
+                let splice_cost = splice_rescue_cost(opt);
+                let bonus =
+                    if annotated_junction_strand(mi, rid, abs_donor, abs_donor + intron_len) != 0 {
+                        opt.junc_bonus - splice_cost
+                    } else {
+                        -splice_cost
+                    };
                 let candidate = (ts_off, split, acc, strand, bonus);
                 let replace = best
                     .as_ref()
@@ -1411,14 +1791,7 @@ fn annotate_splice_cigar(
     (is_spliced, trans_strand, bonus)
 }
 
-fn splice_signal_penalty(
-    opt: &MapOpt,
-    mi: &MmIdx,
-    rid: u32,
-    st: i32,
-    len: i32,
-    rev: bool,
-) -> i32 {
+fn splice_signal_penalty(opt: &MapOpt, mi: &MmIdx, rid: u32, st: i32, len: i32, rev: bool) -> i32 {
     if opt.noncan <= 0 || len < 2 {
         return 0;
     }
@@ -1694,6 +2067,7 @@ fn compute_cigar_stats(
     mat: &[i8],
     q_pen: i32,
     e_pen: i32,
+    log_gap: bool,
 ) -> (i32, i32, u32, i32) {
     let mut mlen = 0i32;
     let mut blen = 0i32;
@@ -1749,8 +2123,11 @@ fn compute_cigar_stats(
                 }
                 n_ambi += ambi as u32;
                 blen += (safe_len - ambi) as i32;
-                score_cur -=
-                    q_pen as f64 + e_pen as f64 * crate::chain::mg_log2(1.0 + len as f32) as f64;
+                score_cur -= if log_gap {
+                    q_pen as f64 + e_pen as f64 * crate::chain::mg_log2(1.0 + len as f32) as f64
+                } else {
+                    (q_pen + e_pen) as f64
+                };
                 if score_cur < 0.0 {
                     score_cur = 0.0;
                 }
@@ -1766,8 +2143,11 @@ fn compute_cigar_stats(
                 }
                 n_ambi += ambi as u32;
                 blen += (safe_len - ambi) as i32;
-                score_cur -=
-                    q_pen as f64 + e_pen as f64 * crate::chain::mg_log2(1.0 + len as f32) as f64;
+                score_cur -= if log_gap {
+                    q_pen as f64 + e_pen as f64 * crate::chain::mg_log2(1.0 + len as f32) as f64
+                } else {
+                    (q_pen + e_pen) as f64
+                };
                 if score_cur < 0.0 {
                     score_cur = 0.0;
                 }
@@ -1783,6 +2163,60 @@ fn compute_cigar_stats(
         }
     }
     (mlen, blen, n_ambi, (dp_max + 0.499) as i32)
+}
+
+fn cigar_alignment_score(
+    cigar: &[u32],
+    qseq: &[u8],
+    tseq: &[u8],
+    mat: &[i8],
+    q_pen: i32,
+    e_pen: i32,
+    log_gap: bool,
+) -> i32 {
+    let mut score = 0.0f64;
+    let mut q_off = 0usize;
+    let mut t_off = 0usize;
+    for &c in cigar {
+        let op = c & 0xf;
+        let len = (c >> 4) as usize;
+        match op {
+            0 | 7 | 8 => {
+                let safe_len = len
+                    .min(qseq.len().saturating_sub(q_off))
+                    .min(tseq.len().saturating_sub(t_off));
+                for l in 0..safe_len {
+                    let qb = qseq[q_off + l];
+                    let tb = tseq[t_off + l];
+                    score += mat[tb as usize * 5 + qb as usize] as f64;
+                }
+                q_off += len;
+                t_off += len;
+            }
+            1 => {
+                score -= if log_gap {
+                    q_pen as f64 + e_pen as f64 * crate::chain::mg_log2(1.0 + len as f32) as f64
+                } else {
+                    (q_pen + e_pen) as f64
+                };
+                q_off += len;
+            }
+            2 => {
+                score -= if log_gap {
+                    q_pen as f64 + e_pen as f64 * crate::chain::mg_log2(1.0 + len as f32) as f64
+                } else {
+                    (q_pen + e_pen) as f64
+                };
+                t_off += len;
+            }
+            3 => t_off += len,
+            _ => {
+                q_off += len;
+                t_off += len;
+            }
+        }
+    }
+    (score + 0.499) as i32
 }
 
 /// Perform DP alignment for all regions.
@@ -1832,11 +2266,7 @@ pub fn align_skeleton(
         let mut r = work[wi].clone();
         let splits = align1(opt, mi, qlen, &qseq_fwd, &qseq_rev, &mut r, &mut *a, &mat);
         if opt.flag.contains(crate::flags::MapFlags::SPLICE) && mi.junc_db.is_some() {
-            let ts = r
-                .extra
-                .as_ref()
-                .map(|p| p.trans_strand as i32)
-                .unwrap_or(0);
+            let ts = r.extra.as_ref().map(|p| p.trans_strand as i32).unwrap_or(0);
             crate::jump::jump_split(mi, opt, qlen, &qseq_fwd, &mut r, ts);
         }
         new_regs.push(r);
@@ -1979,11 +2409,7 @@ mod tests {
         opt.flag |= crate::flags::MapFlags::SPLICE
             | crate::flags::MapFlags::SPLICE_FOR
             | crate::flags::MapFlags::SPLICE_REV;
-        let mut cigar = vec![
-            (4u32 << 4),
-            (8u32 << 4) | 2,
-            (4u32 << 4),
-        ];
+        let mut cigar = vec![(4u32 << 4), (8u32 << 4) | 2, (4u32 << 4)];
 
         let (is_spliced, trans_strand, _) =
             annotate_splice_cigar(&opt, &mi, 0, 0, &mut cigar, false);

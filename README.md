@@ -6,7 +6,8 @@ The current implementation has strong parity with the C version on the bundled
 DNA mapping fixtures. On the larger local `chr11 x200` HiFi fixture it is
 currently within about 3-9% of C minimap2, depending on output mode and thread
 count.
-It is not yet a full minimap2 replacement; see [Known gaps](#known-gaps).
+It is not yet a drop-in replacement for every minimap2 workflow; see
+[Known gaps](#known-gaps).
 
 This is a translation of the original code and not the authoritative
 implementation. For supported workflows, the goal is to generate the same output
@@ -15,14 +16,16 @@ as C minimap2. Please report deviations with test data.
 The aim of this project is to increase performance, especially by providing this code through a type-safe library interface.
 The code can also be compiled to be used for webassembly.
 
-**Do not use this for production yet. Some minimap2 features are incomplete or
-not wired through the CLI.**
+**Do not use this for production yet. Some minimap2 workflows are not
+exhaustively validated against the C implementation.**
 
 ## Features
 
 - **Pure Rust** -- no C dependencies or FFI
 - **Cross-compatible single-part index I/O** -- reads and writes standard `.mmi`
   index files
+- **ALT contig metadata** -- `--alt`/`--alt-drop` support plus ALT flag
+  round-tripping in Rust-written `.mmi` files
 - **PAF/SAM parity on tested fixtures** -- checked against the vendored C
   minimap2 for representative long-read, HiFi, assembly, and split-alignment
   cases
@@ -86,7 +89,7 @@ minimap2-pure-rs -x map-pb   ref.fa pb_reads.fq      # PacBio CLR
 minimap2-pure-rs -x map-hifi ref.fa hifi_reads.fq    # PacBio HiFi
 minimap2-pure-rs -x sr       ref.fa reads.fq         # Short reads
 minimap2-pure-rs -x asm5     ref.fa assembly.fa       # Assembly-to-reference
-minimap2-pure-rs -x splice   ref.fa rna_reads.fq     # Incomplete; see Known gaps
+minimap2-pure-rs -x splice   ref.fa rna_reads.fq     # RNA/splice-aware mapping
 ```
 
 ### Index management
@@ -98,6 +101,9 @@ minimap2-pure-rs -d ref.mmi ref.fa
 # Map using prebuilt index
 minimap2-pure-rs ref.mmi query.fq
 ```
+
+When `--alt` is provided while dumping an index, Rust-written `.mmi` files
+persist ALT contig flags and restore them when loaded by this crate.
 
 ## Options
 
@@ -144,7 +150,7 @@ Options:
       --qstrand             Preserve query-strand coordinates for reverse-strand PAF output
       --copy-comment        Copy FASTA/FASTQ comments to output
       --idx-no-seq          Build an index without target sequences
-      --junc-bed <FILE>     Parsed, but junction annotations are not consumed by DP
+      --junc-bed <FILE>     BED12 splice junction annotations
       --write-junc          Emit junction lines from spliced alignments
       --junc-bonus <INT>    Splice junction score bonus
       --junc-pen <INT>      Splice junction penalty
@@ -152,7 +158,7 @@ Options:
   -u <CHAR>                 Splice strand mode (f, r, b, n)
       --alt <FILE>          ALT contig name list
       --alt-drop <FLOAT>    ALT contig score drop fraction
-      --split-prefix <PFX>  Split-index merge for single-end mapping
+      --split-prefix <PFX>  Split-index mapping and merge
   -G <MAX_INTRON>           Max intron length (splice mode)
   -T, --sdust-thres <INT>   SDUST threshold (0 to disable)
   -K <NUM>                  Mini-batch size for mapping
@@ -275,32 +281,42 @@ src/
 
 ## Known gaps
 
-These are known differences or validation limits relative to full C minimap2
+These are the remaining gaps and validation limits relative to full C minimap2
 behavior:
 
-- **Splice and junction-aware alignment is implemented for the tracked Rust
-  translation gaps.** `--splice` applies splice preset parameters and
-  splice-aware chaining, converts splice-sized reference skips to `N`, emits
-  transcript-strand tags, handles BED12 junction annotations, supports exact
-  clipped-junction extension including ambiguous annotated candidates, and uses
-  splice-specific DP scoring. Coverage is still fixture-based rather than a
-  full upstream minimap2 conformance suite.
-- **Multi-part index mapping is implemented for the tested CLI paths.**
-  `--split-prefix` maps single-end, grouped fragment, and two-file paired-end
-  reads through split index parts and merges per-query hits. Strict interleaved
-  split helpers are also present.
-- **Short-read high-occurrence re-chaining is implemented for the tested
-  single-segment and paired-end paths.** Broader short-read datasets may still
-  expose differences in secondary ordering or pairing heuristics.
-- **ALT contig metadata follows C minimap2's mapping-time model.** `--alt` and
-  `--alt-drop` are supported, and ALT lists are applied when mapping. `.mmi`
-  files do not carry ALT state; provide `--alt` again when loading an index.
-- **Some advanced CLI/output modes are partial.** `--qstrand` is currently
-  supported only for PAF without CIGAR/SAM. `--ds`, `--write-junc`,
-  `--copy-comment`, `--sam-hit-only`, `--secondary-seq`, `--idx-no-seq`, `-L`,
-  `-f`, `-F`, `-I`, `-J`, `-u`, `-Q`, `--alt`, `--alt-drop`, `--junc-bonus`,
-  and `--junc-pen` are wired, with fixture coverage for the most important
-  output paths.
+- **Conformance is fixture-driven, not exhaustive.** The regression suite checks
+  PAF/SAM parity against vendored C minimap2 for representative ONT, HiFi,
+  assembly, short-read, split-index, paired/grouped fragment, ALT, and
+  splice/junction cases. It is not a full upstream minimap2 conformance suite,
+  and untested datasets or option combinations may still differ.
+- **Splice support is implemented but not broadly benchmarked on RNA data.**
+  `splice`, `splice:hq`, `splice:sr`, BED12 junction annotations, `N` CIGAR
+  skips, transcript-strand tags, annotated junction rescue, and splice-specific
+  DP scoring are wired and covered by fixtures. Complex noisy transcriptome
+  cases still need real-data validation.
+- **Split-index mapping is implemented for tested CLI paths.** `--split-prefix`
+  maps single-end, grouped fragment, and two-file paired-end reads through split
+  index parts and merges per-query hits. Compatibility has been validated on
+  local fixtures and the E. coli SRR13321180 paired short-read sample in both
+  PAF and SAM with forced `-I 500k --split-prefix`, but not at the scale of
+  upstream production split-index runs.
+- **Short-read paired-end real-data conformance is covered for one full E. coli
+  sample.** High-occurrence re-chaining, paired-end heap-sort ordering, radix
+  tie behavior, MAPQ, `cm`, `s1`/`s2`, short-read `ms:i` scoring,
+  sequence-aware CIGAR normalization, z-drop split counting, and
+  secondary/supplementary SAM clipping now match C minimap2 for the full
+  SRR13321180 E. coli conformance sample in both PAF and SAM. Broader
+  short-read datasets are still needed to make that coverage representative.
+- **All-vs-all overlap presets have synthetic fixture coverage.** `ava-ont`
+  and `ava-pb` are wired as presets and covered by same-file overlap
+  C-vs-Rust regression cases. Broader overlap validation on real read sets is
+  still needed.
+- **Some CLI/output combinations are intentionally constrained.** `--qstrand`
+  is supported only for PAF without CIGAR/SAM. Advanced options such as `-d`,
+  `-o`, `-R`, `-K`, `--ds`, `--write-junc`, `--copy-comment`,
+  `--paf-no-hit`, `--sam-hit-only`, `--secondary-seq`, `--idx-no-seq`, `-L`,
+  `-f`, `-F`, `-I`, `-J`, `-u`, `-Q`, `--junc-bonus`, and `--junc-pen` are
+  wired, but many combinations only have fixture coverage.
 
 ## Testing
 
@@ -311,9 +327,26 @@ cargo test
 # Integration tests against C minimap2
 cargo test --test integration
 
+# Fixture parity matrix against C minimap2
+scripts/parity_matrix.py
+
+# Real-data conformance manifest
+cp scripts/conformance_manifest.example.tsv scripts/conformance_manifest.local.tsv
+$EDITOR scripts/conformance_manifest.local.tsv
+scripts/conformance_matrix.py scripts/conformance_manifest.local.tsv
+
+# Minimal public paired-end dataset setup
+N_PAIRS=50000 scripts/prepare_minimal_conformance_data.sh
+scripts/conformance_matrix.py data/conformance/ecoli_srr13321180/conformance_manifest.tsv
+
 # All tests
 cargo test --all
 ```
+
+The conformance manifest runner is intended for datasets too large or
+site-specific to commit to this repository. Each row selects a comparison mode
+such as exact PAF, normalized PAF core fields, normalized SAM core fields, or
+SAM headers plus core fields.
 
 ## Performance
 

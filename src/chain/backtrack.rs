@@ -1,19 +1,12 @@
-use crate::types::Mm128;
 use crate::sort::radix_sort_mm128;
+use crate::types::Mm128;
 
 /// Find the end of a chain by backtracking with z-drop.
 /// Matches mg_chain_bk_end() from lchain.c.
-fn chain_bk_end(
-    max_drop: i32,
-    z: &[Mm128],
-    f: &[i32],
-    p: &[i64],
-    t: &mut [i32],
-    k: usize,
-) -> i64 {
+fn chain_bk_end(max_drop: i32, z: &[Mm128], f: &[i32], p: &[i64], t: &mut [i32], k: usize) -> i64 {
     let mut i = z[k].y as i64;
     let mut end_i: i64;
-    let _max_i = i;
+    let mut max_i = i;
     let mut max_s: i32 = 0;
 
     if i < 0 || t[i as usize] != 0 {
@@ -22,8 +15,8 @@ fn chain_bk_end(
 
     loop {
         t[i as usize] = 2;
-        end_i = p[i as usize];
-        i = end_i;
+        i = p[i as usize];
+        end_i = i;
         let s = if i < 0 {
             z[k].x as i32
         } else {
@@ -31,29 +24,13 @@ fn chain_bk_end(
         };
         if s > max_s {
             max_s = s;
+            max_i = i;
         } else if max_s - s > max_drop {
             break;
         }
         if i < 0 || t[i as usize] != 0 {
             break;
         }
-    }
-
-    // Find the actual max_i by re-walking
-    let mut max_s2: i32 = 0;
-    let mut max_i2 = z[k].y as i64;
-    let mut j = z[k].y as i64;
-    while j >= 0 && j != end_i {
-        let s = if p[j as usize] < 0 {
-            z[k].x as i32
-        } else {
-            z[k].x as i32 - f[p[j as usize] as usize]
-        };
-        if s > max_s2 {
-            max_s2 = s;
-            max_i2 = p[j as usize];
-        }
-        j = p[j as usize];
     }
 
     // Reset modified t[]
@@ -63,7 +40,7 @@ fn chain_bk_end(
         i = p[i as usize];
     }
 
-    max_i2
+    max_i
 }
 
 /// Backtrack chains from DP arrays. Matches mg_chain_backtrack() from lchain.c.
@@ -163,11 +140,7 @@ pub fn chain_backtrack(
 
 /// Compact the anchor array so chains are stored contiguously, sorted by target position.
 /// Matches compact_a() from lchain.c.
-pub fn compact_a(
-    u: &mut Vec<u64>,
-    v: &[i32],
-    a: &[Mm128],
-) -> Vec<Mm128> {
+pub fn compact_a(u: &mut Vec<u64>, v: &[i32], a: &[Mm128]) -> Vec<Mm128> {
     let n_u = u.len();
     // Write chains to b[] (reversing within each chain since backtrack gives reverse order)
     let n_v: usize = v.len();
@@ -241,6 +214,9 @@ mod tests {
         let result = compact_a(&mut u, &v, &a);
         assert_eq!(result.len(), 4);
         // Should be sorted by target position of first anchor in each chain
-        assert!(result[0].x <= result[2].x, "Chains should be sorted by target position");
+        assert!(
+            result[0].x <= result[2].x,
+            "Chains should be sorted by target position"
+        );
     }
 }

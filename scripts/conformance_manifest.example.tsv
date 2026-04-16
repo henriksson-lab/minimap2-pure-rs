@@ -1,0 +1,24 @@
+# category	name	mode	args
+# Copy this file to scripts/conformance_manifest.local.tsv and replace the paths
+# with local real datasets. The args column is the minimap2 command line after
+# the binary name. Modes:
+#   paf          exact non-header PAF comparison
+#   paf-core     PAF fields 1-12 plus tp/cm/s1/s2/rl tags
+#   sam-core     SAM fields 1-6 plus RG/NM/AS/ms/nn/ts tags
+#   sam-header   SAM @SQ/@RG header lines plus sam-core records
+#   exact        exact non-header line comparison
+#
+# Keep read sets large enough to exercise production behavior. Prefer fixed
+# subsets checked into local storage or generated with a documented seed.
+HiFi	HiFi reads PAF+cg	paf	-x map-hifi -c data/ref.fa data/hifi.fq
+HiFi	HiFi reads SAM	sam-core	-x map-hifi -a data/ref.fa data/hifi.fq
+ONT	ONT reads PAF+cg	paf	-x map-ont -c data/ref.fa data/ont.fq
+ONT	ONT reads SAM	sam-core	-x map-ont -a data/ref.fa data/ont.fq
+Assembly	asm5 contigs PAF+cg	paf	-x asm5 -c data/ref.fa data/contigs.fa
+Assembly	asm10 contigs SAM	sam-core	-x asm10 -a data/ref.fa data/contigs.fa
+ShortRead	paired reads PAF+cg	paf	-x sr -c data/ref.fa data/reads_R1.fq data/reads_R2.fq
+ShortRead	paired reads SAM	sam-core	-x sr -a data/ref.fa data/reads_R1.fq data/reads_R2.fq
+SplitIndex	split-index HiFi PAF+cg	paf	-x map-hifi -c -I 500M --split-prefix /tmp/mm2rs-conf-split data/ref.fa data/hifi.fq
+ALT	ALT-aware PAF+cg	paf	-x map-hifi -c --alt data/alt.txt data/ref.fa data/hifi.fq
+RNA	annotated splice PAF+cg	paf	-x splice -c --junc-bed data/junctions.bed data/ref.fa data/rna.fq
+RNA	annotated splice SAM	sam-core	-x splice -a --junc-bed data/junctions.bed data/ref.fa data/rna.fq

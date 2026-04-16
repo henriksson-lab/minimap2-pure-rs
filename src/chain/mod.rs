@@ -2,8 +2,8 @@ pub mod backtrack;
 pub mod dp;
 pub mod rmq;
 
-use crate::types::Mm128;
 use crate::flags::{SEED_SEG_MASK, SEED_SEG_SHIFT};
+use crate::types::Mm128;
 
 /// Chain result: compacted anchors and chain scores.
 pub struct ChainResult {
@@ -68,7 +68,11 @@ pub fn comput_sc(
     let mut sc = q_span.min(dg);
     if dd != 0 || dg > q_span {
         let lin_pen = chn_pen_gap * dd as f32 + chn_pen_skip * dg as f32;
-        let log_pen = if dd >= 1 { mg_log2(dd as f32 + 1.0) } else { 0.0 };
+        let log_pen = if dd >= 1 {
+            mg_log2(dd as f32 + 1.0)
+        } else {
+            0.0
+        };
         if is_cdna || sidi != sidj {
             if sidi != sidj && dr == 0 {
                 sc += 1;
@@ -102,7 +106,11 @@ pub fn comput_sc_simple(
     let exact = dd == 0 && dg <= q_span;
     if dd != 0 || dq > q_span {
         let lin_pen = chn_pen_gap * dd as f32 + chn_pen_skip * dg as f32;
-        let log_pen = if dd >= 1 { mg_log2(dd as f32 + 1.0) } else { 0.0 };
+        let log_pen = if dd >= 1 {
+            mg_log2(dd as f32 + 1.0)
+        } else {
+            0.0
+        };
         sc -= (lin_pen + 0.5 * log_pen) as i32;
     }
     (sc, exact, dd)
@@ -130,14 +138,18 @@ mod tests {
         // Two anchors on same strand, same ref, close together
         let aj = Mm128::new(
             0u64 << 63 | 0u64 << 32 | 100, // rev=0, rid=0, pos=100
-            (15u64 << 32) | 50,              // qspan=15, qpos=50
+            (15u64 << 32) | 50,            // qspan=15, qpos=50
         );
         let ai = Mm128::new(
             0u64 << 63 | 0u64 << 32 | 120, // pos=120
-            (15u64 << 32) | 70,              // qspan=15, qpos=70
+            (15u64 << 32) | 70,            // qspan=15, qpos=70
         );
         let sc = comput_sc(&ai, &aj, 5000, 5000, 500, 0.8, 0.0, false, 1);
-        assert!(sc > 0, "Score should be positive for close colinear anchors: {}", sc);
+        assert!(
+            sc > 0,
+            "Score should be positive for close colinear anchors: {}",
+            sc
+        );
     }
 
     #[test]

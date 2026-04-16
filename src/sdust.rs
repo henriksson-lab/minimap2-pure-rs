@@ -194,14 +194,7 @@ fn sdust_core(seq: &[u8], threshold: i32, window: i32, buf: &mut SdustBuf) {
                 let start = if l - window > 0 { l - window } else { 0 } + (i + 1 - l);
                 save_masked_regions(&mut buf.res, &mut buf.p, start);
                 shift_window(
-                    t as i32,
-                    &mut buf.w,
-                    threshold,
-                    window,
-                    &mut big_l,
-                    &mut rw,
-                    &mut rv,
-                    &mut cw,
+                    t as i32, &mut buf.w, threshold, window, &mut big_l, &mut rw, &mut rv, &mut cw,
                     &mut cv,
                 );
                 if rw * 10 > big_l * threshold {
@@ -209,7 +202,11 @@ fn sdust_core(seq: &[u8], threshold: i32, window: i32, buf: &mut SdustBuf) {
                 }
             }
         } else {
-            let start = if l - window + 1 > 0 { l - window + 1 } else { 0 } + (i + 1 - l);
+            let start = if l - window + 1 > 0 {
+                l - window + 1
+            } else {
+                0
+            } + (i + 1 - l);
             let mut s = start;
             while !buf.p.is_empty() {
                 save_masked_regions(&mut buf.res, &mut buf.p, s);

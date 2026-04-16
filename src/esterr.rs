@@ -33,13 +33,7 @@ fn get_mini_idx(qlen: i32, a: &Mm128, mini_pos: &[u64]) -> i32 {
 
 /// Estimate sequence divergence for alignment regions.
 /// Matches mm_est_err() from esterr.c.
-pub fn est_err(
-    mi: &MmIdx,
-    qlen: i32,
-    regs: &mut [AlignReg],
-    a: &[Mm128],
-    mini_pos: &[u64],
-) {
+pub fn est_err(mi: &MmIdx, qlen: i32, regs: &mut [AlignReg], a: &[Mm128], mini_pos: &[u64]) {
     let n = mini_pos.len();
     if n == 0 {
         return;

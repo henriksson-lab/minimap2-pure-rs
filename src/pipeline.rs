@@ -1,14 +1,32 @@
 use crate::bseq::{BseqFile, BseqRecord};
 use crate::flags::MapFlags;
 use crate::format::sam;
-use crate::index::MmIdx;
 use crate::index::split::{self, SplitQueryRecord};
+use crate::index::MmIdx;
 use crate::map;
 use crate::options::{self, MapOpt};
 use crate::pe;
 use crate::seq;
 use rayon::prelude::*;
 use std::io::{self, BufWriter, Write};
+
+fn add_rg_tag(line: &mut String, rg_id: Option<&str>) {
+    let Some(rg_id) = rg_id else {
+        return;
+    };
+    let tag = format!("\tRG:Z:{}", rg_id);
+    let mut tabs_seen = 0usize;
+    for (pos, ch) in line.char_indices() {
+        if ch == '\t' {
+            tabs_seen += 1;
+            if tabs_seen == 11 {
+                line.insert_str(pos, &tag);
+                return;
+            }
+        }
+    }
+    line.push_str(&tag);
+}
 
 /// Map a FASTA/FASTQ file against the index and write PAF output to stdout.
 pub fn map_file_paf(mi: &MmIdx, opt: &MapOpt, path: &str, n_threads: usize) -> io::Result<()> {
@@ -84,7 +102,8 @@ pub fn map_file_paf_split(
             batch
                 .par_iter()
                 .map(|rec| {
-                    let result = map_split_query(parts, &part_opts, &rid_shifts, opt, &rec.name, &rec.seq);
+                    let result =
+                        map_split_query(parts, &part_opts, &rid_shifts, opt, &rec.name, &rec.seq);
                     map::format_paf_with_comment(
                         mi,
                         opt,
@@ -121,6 +140,7 @@ pub fn map_file_sam(
     // Write SAM header
     let hdr = sam::write_sam_hdr(mi, rg, args);
     writeln!(out, "{}", hdr)?;
+    let rg_id = rg.and_then(sam::read_group_id);
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(n_threads)
@@ -142,7 +162,7 @@ pub fn map_file_sam(
                     let mut lines = Vec::new();
                     if result.regs.is_empty() {
                         if !opt.flag.contains(MapFlags::SAM_HIT_ONLY) {
-                            lines.push(sam::write_sam_record_with_comment(
+                            let mut line = sam::write_sam_record_with_comment(
                                 mi,
                                 &rec.name,
                                 &rec.seq,
@@ -153,14 +173,16 @@ pub fn map_file_sam(
                                 opt.flag,
                                 result.rep_len,
                                 Some(&rec.comment),
-                            ));
+                            );
+                            add_rg_tag(&mut line, rg_id.as_deref());
+                            lines.push(line);
                         }
                     } else {
-                        for (i, r) in result.regs.iter().enumerate() {
-                            if i > 0 && opt.flag.contains(MapFlags::NO_PRINT_2ND) {
-                                break;
+                        for r in result.regs.iter() {
+                            if opt.flag.contains(MapFlags::NO_PRINT_2ND) && r.id != r.parent {
+                                continue;
                             }
-                            lines.push(sam::write_sam_record_with_comment(
+                            let mut line = sam::write_sam_record_with_comment(
                                 mi,
                                 &rec.name,
                                 &rec.seq,
@@ -171,7 +193,9 @@ pub fn map_file_sam(
                                 opt.flag,
                                 result.rep_len,
                                 Some(&rec.comment),
-                            ));
+                            );
+                            add_rg_tag(&mut line, rg_id.as_deref());
+                            lines.push(line);
                         }
                     }
                     lines
@@ -203,6 +227,7 @@ pub fn map_file_sam_split(
     let mut out = BufWriter::new(stdout.lock());
     let hdr = sam::write_sam_hdr(mi, rg, args);
     writeln!(out, "{}", hdr)?;
+    let rg_id = rg.and_then(sam::read_group_id);
 
     let part_opts = prepare_part_opts(parts, opt);
     let rid_shifts = rid_shifts(parts);
@@ -221,11 +246,12 @@ pub fn map_file_sam_split(
             batch
                 .par_iter()
                 .map(|rec| {
-                    let result = map_split_query(parts, &part_opts, &rid_shifts, opt, &rec.name, &rec.seq);
+                    let result =
+                        map_split_query(parts, &part_opts, &rid_shifts, opt, &rec.name, &rec.seq);
                     let mut lines = Vec::new();
                     if result.regs.is_empty() {
                         if !opt.flag.contains(MapFlags::SAM_HIT_ONLY) {
-                            lines.push(sam::write_sam_record_with_comment(
+                            let mut line = sam::write_sam_record_with_comment(
                                 mi,
                                 &rec.name,
                                 &rec.seq,
@@ -236,14 +262,16 @@ pub fn map_file_sam_split(
                                 opt.flag,
                                 result.rep_len,
                                 Some(&rec.comment),
-                            ));
+                            );
+                            add_rg_tag(&mut line, rg_id.as_deref());
+                            lines.push(line);
                         }
                     } else {
-                        for (i, r) in result.regs.iter().enumerate() {
-                            if i > 0 && opt.flag.contains(MapFlags::NO_PRINT_2ND) {
-                                break;
+                        for r in result.regs.iter() {
+                            if opt.flag.contains(MapFlags::NO_PRINT_2ND) && r.id != r.parent {
+                                continue;
                             }
-                            lines.push(sam::write_sam_record_with_comment(
+                            let mut line = sam::write_sam_record_with_comment(
                                 mi,
                                 &rec.name,
                                 &rec.seq,
@@ -254,7 +282,9 @@ pub fn map_file_sam_split(
                                 opt.flag,
                                 result.rep_len,
                                 Some(&rec.comment),
-                            ));
+                            );
+                            add_rg_tag(&mut line, rg_id.as_deref());
+                            lines.push(line);
                         }
                     }
                     lines
@@ -402,6 +432,7 @@ pub fn map_file_frag_sam(
 
     let hdr = sam::write_sam_hdr(mi, rg, args);
     writeln!(out, "{}", hdr)?;
+    let rg_id = rg.and_then(sam::read_group_id);
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(n_threads)
@@ -417,7 +448,7 @@ pub fn map_file_frag_sam(
         let results: Vec<_> = pool.install(|| {
             batch
                 .par_iter()
-                .map(|frag| format_fragment_sam(mi, opt, None, frag))
+                .map(|frag| format_fragment_sam(mi, opt, None, frag, rg_id.as_deref()))
                 .collect()
         });
         for lines in &results {
@@ -445,6 +476,7 @@ pub fn map_file_frag_sam_split(
 
     let hdr = sam::write_sam_hdr(mi, rg, args);
     writeln!(out, "{}", hdr)?;
+    let rg_id = rg.and_then(sam::read_group_id);
 
     let part_opts = prepare_part_opts(parts, opt);
     let shifts = rid_shifts(parts);
@@ -462,7 +494,15 @@ pub fn map_file_frag_sam_split(
         let results: Vec<_> = pool.install(|| {
             batch
                 .par_iter()
-                .map(|frag| format_fragment_sam(mi, opt, Some((parts, &part_opts, &shifts)), frag))
+                .map(|frag| {
+                    format_fragment_sam(
+                        mi,
+                        opt,
+                        Some((parts, &part_opts, &shifts)),
+                        frag,
+                        rg_id.as_deref(),
+                    )
+                })
                 .collect()
         });
         for lines in &results {
@@ -511,6 +551,7 @@ fn map_fragment_results(
     }
     let qseqs: Vec<&[u8]> = oriented.iter().map(Vec::as_slice).collect();
     let qname = strip_pe_suffix(&frag.records[0].name);
+    let used_split_refs = split_refs.is_some();
     let mut results = match split_refs {
         Some((parts, part_opts, shifts)) => {
             map_split_fragment_queries(parts, part_opts, shifts, opt, qname, &qseqs)
@@ -519,13 +560,23 @@ fn map_fragment_results(
     };
     if results.len() == 2 {
         let (left, right) = results.split_at_mut(1);
-        pair_results(
-            opt,
-            frag.records[0].l_seq as i32,
-            frag.records[1].l_seq as i32,
-            &mut left[0],
-            &mut right[0],
-        );
+        if used_split_refs {
+            pair_results_preserve_parents(
+                opt,
+                frag.records[0].l_seq as i32,
+                frag.records[1].l_seq as i32,
+                &mut left[0],
+                &mut right[0],
+            );
+        } else {
+            pair_results(
+                opt,
+                frag.records[0].l_seq as i32,
+                frag.records[1].l_seq as i32,
+                &mut left[0],
+                &mut right[0],
+            );
+        }
     }
     for (result, (rec, rev)) in results.iter_mut().zip(frag.records.iter().zip(revcomped)) {
         restore_pair_orientation(result, rec.l_seq as i32, rev);
@@ -562,15 +613,34 @@ fn format_fragment_sam(
     opt: &MapOpt,
     split_refs: Option<SplitRefs<'_>>,
     frag: &Fragment,
+    rg_id: Option<&str>,
 ) -> Vec<String> {
     let results = map_fragment_results(mi, opt, split_refs, frag);
     let mut lines = Vec::new();
     if frag.records.len() == 2 {
-        format_pe_sam_records(mi, opt, &frag.records[0], &results[0], &results[1], true, &mut lines);
-        format_pe_sam_records(mi, opt, &frag.records[1], &results[1], &results[0], false, &mut lines);
+        format_pe_sam_records(
+            mi,
+            opt,
+            &frag.records[0],
+            &results[0],
+            &results[1],
+            true,
+            rg_id,
+            &mut lines,
+        );
+        format_pe_sam_records(
+            mi,
+            opt,
+            &frag.records[1],
+            &results[1],
+            &results[0],
+            false,
+            rg_id,
+            &mut lines,
+        );
     } else {
         for (rec, result) in frag.records.iter().zip(&results) {
-            format_single_sam_records(mi, opt, rec, result, &mut lines);
+            format_single_sam_records(mi, opt, rec, result, rg_id, &mut lines);
         }
     }
     lines
@@ -581,11 +651,12 @@ fn format_single_sam_records(
     opt: &MapOpt,
     rec: &BseqRecord,
     result: &map::MapResult,
+    rg_id: Option<&str>,
     lines: &mut Vec<String>,
 ) {
     if result.regs.is_empty() {
         if !opt.flag.contains(MapFlags::SAM_HIT_ONLY) {
-            lines.push(sam::write_sam_record_with_comment(
+            let mut line = sam::write_sam_record_with_comment(
                 mi,
                 &rec.name,
                 &rec.seq,
@@ -596,14 +667,16 @@ fn format_single_sam_records(
                 opt.flag,
                 result.rep_len,
                 Some(&rec.comment),
-            ));
+            );
+            add_rg_tag(&mut line, rg_id);
+            lines.push(line);
         }
     } else {
-        for (i, r) in result.regs.iter().enumerate() {
-            if i > 0 && opt.flag.contains(MapFlags::NO_PRINT_2ND) {
-                break;
+        for r in result.regs.iter() {
+            if opt.flag.contains(MapFlags::NO_PRINT_2ND) && r.id != r.parent {
+                continue;
             }
-            lines.push(sam::write_sam_record_with_comment(
+            let mut line = sam::write_sam_record_with_comment(
                 mi,
                 &rec.name,
                 &rec.seq,
@@ -614,7 +687,9 @@ fn format_single_sam_records(
                 opt.flag,
                 result.rep_len,
                 Some(&rec.comment),
-            ));
+            );
+            add_rg_tag(&mut line, rg_id);
+            lines.push(line);
         }
     }
 }
@@ -624,7 +699,6 @@ fn prepare_part_opts(parts: &[MmIdx], opt: &MapOpt) -> Vec<MapOpt> {
         .iter()
         .map(|part| {
             let mut part_opt = opt.clone();
-            part_opt.mid_occ = 0;
             options::mapopt_update(&mut part_opt, part);
             part_opt
         })
@@ -667,10 +741,13 @@ fn map_split_query(
                 .expect("in-memory split record read cannot fail")
         })
         .collect();
-    let merged = split::merge_split_query_records(&records, rid_shifts, opt, qseq.len() as i32);
+    let idx_k = parts.first().map(|part| part.k).unwrap_or(0);
+    let merged =
+        split::merge_split_query_records(&records, rid_shifts, opt, idx_k, qseq.len() as i32);
     map::MapResult {
         regs: merged.regs,
         rep_len: merged.rep_len,
+        frag_gap: merged.frag_gap,
     }
 }
 
@@ -687,7 +764,20 @@ fn map_split_fragment_queries(
         .map(|_| Vec::with_capacity(parts.len()))
         .collect();
     for (part, part_opt) in parts.iter().zip(part_opts) {
-        let frag_results = map::map_frag_queries(part, part_opt, qname, qseqs);
+        let mut frag_results = map::map_frag_queries(part, part_opt, qname, qseqs);
+        if frag_results.len() == 2
+            && part_opt.pe_ori >= 0
+            && part_opt.flag.contains(MapFlags::CIGAR)
+        {
+            let (left, right) = frag_results.split_at_mut(1);
+            pair_results(
+                part_opt,
+                qseqs[0].len() as i32,
+                qseqs[1].len() as i32,
+                &mut left[0],
+                &mut right[0],
+            );
+        }
         for (seg, result) in frag_results.into_iter().enumerate() {
             let record = SplitQueryRecord {
                 n_reg: result.regs.len() as i32,
@@ -708,10 +798,18 @@ fn map_split_fragment_queries(
         .into_iter()
         .zip(qseqs)
         .map(|(records, qseq)| {
-            let merged = split::merge_split_query_records(&records, rid_shifts, opt, qseq.len() as i32);
+            let idx_k = parts.first().map(|part| part.k).unwrap_or(0);
+            let merged = split::merge_split_query_records(
+                &records,
+                rid_shifts,
+                opt,
+                idx_k,
+                qseq.len() as i32,
+            );
             map::MapResult {
                 regs: merged.regs,
                 rep_len: merged.rep_len,
+                frag_gap: merged.frag_gap,
             }
         })
         .collect()
@@ -734,6 +832,7 @@ pub fn map_file_interleaved_pe_sam(
 
     let hdr = sam::write_sam_hdr(mi, rg, args);
     writeln!(out, "{}", hdr)?;
+    let rg_id = rg.and_then(sam::read_group_id);
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(n_threads)
@@ -767,11 +866,19 @@ pub fn map_file_interleaved_pe_sam(
                 .par_iter()
                 .map(|(rec1, rec2)| {
                     let base_name = strip_pe_suffix(&rec1.name);
-                    let (seq1, seq2, rev1, rev2) = oriented_pair_sequences(opt, &rec1.seq, &rec2.seq);
-                    let mut frag_results = map::map_frag_queries(mi, opt, base_name, &[&seq1, &seq2]);
+                    let (seq1, seq2, rev1, rev2) =
+                        oriented_pair_sequences(opt, &rec1.seq, &rec2.seq);
+                    let mut frag_results =
+                        map::map_frag_queries(mi, opt, base_name, &[&seq1, &seq2]);
                     let mut res1 = frag_results.remove(0);
                     let mut res2 = frag_results.remove(0);
-                    pair_results(opt, rec1.l_seq as i32, rec2.l_seq as i32, &mut res1, &mut res2);
+                    pair_results(
+                        opt,
+                        rec1.l_seq as i32,
+                        rec2.l_seq as i32,
+                        &mut res1,
+                        &mut res2,
+                    );
                     restore_pair_orientation(&mut res1, rec1.l_seq as i32, rev1);
                     restore_pair_orientation(&mut res2, rec2.l_seq as i32, rev2);
 
@@ -787,6 +894,7 @@ pub fn map_file_interleaved_pe_sam(
                         &res1,
                         &res2,
                         true,
+                        rg_id.as_deref(),
                         &mut lines,
                     );
                     format_pe_sam_records(
@@ -799,6 +907,7 @@ pub fn map_file_interleaved_pe_sam(
                         &res2,
                         &res1,
                         false,
+                        rg_id.as_deref(),
                         &mut lines,
                     );
                     lines
@@ -831,6 +940,7 @@ pub fn map_file_interleaved_pe_sam_split(
 
     let hdr = sam::write_sam_hdr(mi, rg, args);
     writeln!(out, "{}", hdr)?;
+    let rg_id = rg.and_then(sam::read_group_id);
 
     let part_opts = prepare_part_opts(parts, opt);
     let rid_shifts = rid_shifts(parts);
@@ -865,7 +975,8 @@ pub fn map_file_interleaved_pe_sam_split(
                 .par_iter()
                 .map(|(rec1, rec2)| {
                     let base_name = strip_pe_suffix(&rec1.name);
-                    let (seq1, seq2, rev1, rev2) = oriented_pair_sequences(opt, &rec1.seq, &rec2.seq);
+                    let (seq1, seq2, rev1, rev2) =
+                        oriented_pair_sequences(opt, &rec1.seq, &rec2.seq);
                     let mut frag_results = map_split_fragment_queries(
                         parts,
                         &part_opts,
@@ -876,9 +987,15 @@ pub fn map_file_interleaved_pe_sam_split(
                     );
                     let mut res1 = frag_results.remove(0);
                     let mut res2 = frag_results.remove(0);
-                    pair_results(opt, rec1.l_seq as i32, rec2.l_seq as i32, &mut res1, &mut res2);
                     restore_pair_orientation(&mut res1, rec1.l_seq as i32, rev1);
                     restore_pair_orientation(&mut res2, rec2.l_seq as i32, rev2);
+                    pair_results(
+                        opt,
+                        rec1.l_seq as i32,
+                        rec2.l_seq as i32,
+                        &mut res1,
+                        &mut res2,
+                    );
 
                     let mut lines = Vec::new();
                     format_pe_sam_records(
@@ -891,6 +1008,7 @@ pub fn map_file_interleaved_pe_sam_split(
                         &res1,
                         &res2,
                         true,
+                        rg_id.as_deref(),
                         &mut lines,
                     );
                     format_pe_sam_records(
@@ -903,6 +1021,7 @@ pub fn map_file_interleaved_pe_sam_split(
                         &res2,
                         &res1,
                         false,
+                        rg_id.as_deref(),
                         &mut lines,
                     );
                     lines
@@ -952,6 +1071,7 @@ pub fn map_file_pe_sam(
 
     let hdr = sam::write_sam_hdr(mi, rg, args);
     writeln!(out, "{}", hdr)?;
+    let rg_id = rg.and_then(sam::read_group_id);
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(n_threads)
@@ -985,20 +1105,46 @@ pub fn map_file_pe_sam(
             pairs
                 .par_iter()
                 .map(|(rec1, rec2)| {
-                    let (seq1, seq2, rev1, rev2) = oriented_pair_sequences(opt, &rec1.seq, &rec2.seq);
-                    let mut frag_results = map::map_frag_queries(mi, opt, &rec1.name, &[&seq1, &seq2]);
+                    let (seq1, seq2, rev1, rev2) =
+                        oriented_pair_sequences(opt, &rec1.seq, &rec2.seq);
+                    let mut frag_results =
+                        map::map_frag_queries(mi, opt, &rec1.name, &[&seq1, &seq2]);
                     let mut res1 = frag_results.remove(0);
                     let mut res2 = frag_results.remove(0);
-                    pair_results(opt, rec1.l_seq as i32, rec2.l_seq as i32, &mut res1, &mut res2);
+                    pair_results(
+                        opt,
+                        rec1.l_seq as i32,
+                        rec2.l_seq as i32,
+                        &mut res1,
+                        &mut res2,
+                    );
                     restore_pair_orientation(&mut res1, rec1.l_seq as i32, rev1);
                     restore_pair_orientation(&mut res2, rec2.l_seq as i32, rev2);
 
                     // Format SAM records
                     let mut lines = Vec::new();
                     // Read 1
-                    format_pe_sam_records(mi, opt, rec1, &res1, &res2, true, &mut lines);
+                    format_pe_sam_records(
+                        mi,
+                        opt,
+                        rec1,
+                        &res1,
+                        &res2,
+                        true,
+                        rg_id.as_deref(),
+                        &mut lines,
+                    );
                     // Read 2
-                    format_pe_sam_records(mi, opt, rec2, &res2, &res1, false, &mut lines);
+                    format_pe_sam_records(
+                        mi,
+                        opt,
+                        rec2,
+                        &res2,
+                        &res1,
+                        false,
+                        rg_id.as_deref(),
+                        &mut lines,
+                    );
                     lines
                 })
                 .collect()
@@ -1031,6 +1177,7 @@ pub fn map_file_pe_sam_split(
 
     let hdr = sam::write_sam_hdr(mi, rg, args);
     writeln!(out, "{}", hdr)?;
+    let rg_id = rg.and_then(sam::read_group_id);
 
     let part_opts = prepare_part_opts(parts, opt);
     let rid_shifts = rid_shifts(parts);
@@ -1064,7 +1211,8 @@ pub fn map_file_pe_sam_split(
             pairs
                 .par_iter()
                 .map(|(rec1, rec2)| {
-                    let (seq1, seq2, rev1, rev2) = oriented_pair_sequences(opt, &rec1.seq, &rec2.seq);
+                    let (seq1, seq2, rev1, rev2) =
+                        oriented_pair_sequences(opt, &rec1.seq, &rec2.seq);
                     let mut frag_results = map_split_fragment_queries(
                         parts,
                         &part_opts,
@@ -1075,13 +1223,37 @@ pub fn map_file_pe_sam_split(
                     );
                     let mut res1 = frag_results.remove(0);
                     let mut res2 = frag_results.remove(0);
-                    pair_results(opt, rec1.l_seq as i32, rec2.l_seq as i32, &mut res1, &mut res2);
                     restore_pair_orientation(&mut res1, rec1.l_seq as i32, rev1);
                     restore_pair_orientation(&mut res2, rec2.l_seq as i32, rev2);
+                    pair_results(
+                        opt,
+                        rec1.l_seq as i32,
+                        rec2.l_seq as i32,
+                        &mut res1,
+                        &mut res2,
+                    );
 
                     let mut lines = Vec::new();
-                    format_pe_sam_records(mi, opt, rec1, &res1, &res2, true, &mut lines);
-                    format_pe_sam_records(mi, opt, rec2, &res2, &res1, false, &mut lines);
+                    format_pe_sam_records(
+                        mi,
+                        opt,
+                        rec1,
+                        &res1,
+                        &res2,
+                        true,
+                        rg_id.as_deref(),
+                        &mut lines,
+                    );
+                    format_pe_sam_records(
+                        mi,
+                        opt,
+                        rec2,
+                        &res2,
+                        &res1,
+                        false,
+                        rg_id.as_deref(),
+                        &mut lines,
+                    );
                     lines
                 })
                 .collect()
@@ -1115,7 +1287,7 @@ fn pair_results(
             std::mem::take(&mut res2.regs),
         ];
         pe::pair(
-            opt.max_frag_len.max(opt.max_gap),
+            res1.frag_gap.max(res2.frag_gap),
             opt.pe_bonus,
             opt.a * 2 + opt.b,
             opt.a,
@@ -1128,6 +1300,24 @@ fn pair_results(
     }
 }
 
+fn pair_results_preserve_parents(
+    opt: &MapOpt,
+    qlen1: i32,
+    qlen2: i32,
+    res1: &mut map::MapResult,
+    res2: &mut map::MapResult,
+) {
+    let parents1: Vec<i32> = res1.regs.iter().map(|r| r.parent).collect();
+    let parents2: Vec<i32> = res2.regs.iter().map(|r| r.parent).collect();
+    pair_results(opt, qlen1, qlen2, res1, res2);
+    for (r, parent) in res1.regs.iter_mut().zip(parents1) {
+        r.parent = parent;
+    }
+    for (r, parent) in res2.regs.iter_mut().zip(parents2) {
+        r.parent = parent;
+    }
+}
+
 /// Format SAM records for one read of a pair.
 fn format_pe_sam_records(
     mi: &MmIdx,
@@ -1136,6 +1326,7 @@ fn format_pe_sam_records(
     result: &map::MapResult,
     mate_result: &map::MapResult,
     is_read1: bool,
+    rg_id: Option<&str>,
     lines: &mut Vec<String>,
 ) {
     if result.regs.is_empty() {
@@ -1155,13 +1346,14 @@ fn format_pe_sam_records(
             Some(&rec.comment),
         );
         // Add PE flags
-        add_pe_flags(&mut line, is_read1, true, mate_result);
+        add_pe_flags(&mut line, is_read1, true, mate_result, None);
         set_unmapped_record_mate_position(mi, &mut line, mate_result);
+        add_rg_tag(&mut line, rg_id);
         lines.push(line);
     } else {
-        for (i, r) in result.regs.iter().enumerate() {
-            if i > 0 && opt.flag.contains(MapFlags::NO_PRINT_2ND) {
-                break;
+        for r in result.regs.iter() {
+            if opt.flag.contains(MapFlags::NO_PRINT_2ND) && r.id != r.parent {
+                continue;
             }
             let mut line = sam::write_sam_record_with_comment(
                 mi,
@@ -1175,14 +1367,22 @@ fn format_pe_sam_records(
                 result.rep_len,
                 Some(&rec.comment),
             );
-            add_pe_flags(&mut line, is_read1, false, mate_result);
+            add_pe_flags(&mut line, is_read1, false, mate_result, Some(r));
+            set_mapped_record_mate_fields(mi, &mut line, r, mate_result, is_read1);
+            add_rg_tag(&mut line, rg_id);
             lines.push(line);
         }
     }
 }
 
 /// Modify SAM flag field to include PE flags.
-fn add_pe_flags(line: &mut String, is_read1: bool, unmapped: bool, mate_result: &map::MapResult) {
+fn add_pe_flags(
+    line: &mut String,
+    is_read1: bool,
+    unmapped: bool,
+    mate_result: &map::MapResult,
+    current: Option<&crate::types::AlignReg>,
+) {
     // Parse existing flag from SAM line and modify it
     let fields: Vec<&str> = line.split('\t').collect();
     if fields.len() < 2 {
@@ -1200,13 +1400,13 @@ fn add_pe_flags(line: &mut String, is_read1: bool, unmapped: bool, mate_result: 
     // Mate unmapped
     if mate_result.regs.is_empty() {
         flag |= 0x8;
-    } else {
+    } else if let Some(mate) = primary_reg(mate_result) {
         // Mate reverse strand
-        if mate_result.regs[0].rev {
+        if mate.rev {
             flag |= 0x20;
         }
         // Proper pair
-        if !unmapped && mate_result.regs[0].proper_frag {
+        if !unmapped && current.is_some_and(|r| r.proper_frag) {
             flag |= 0x2;
         }
     }
@@ -1223,8 +1423,17 @@ fn add_pe_flags(line: &mut String, is_read1: bool, unmapped: bool, mate_result: 
     *line = new_line;
 }
 
+fn primary_reg(result: &map::MapResult) -> Option<&crate::types::AlignReg> {
+    result
+        .regs
+        .iter()
+        .find(|r| r.sam_pri)
+        .or_else(|| result.regs.iter().find(|r| r.id == r.parent))
+        .or_else(|| result.regs.first())
+}
+
 fn set_unmapped_record_mate_position(mi: &MmIdx, line: &mut String, mate_result: &map::MapResult) {
-    let Some(mate) = mate_result.regs.first() else {
+    let Some(mate) = primary_reg(mate_result) else {
         return;
     };
     let fields: Vec<&str> = line.split('\t').collect();
@@ -1245,10 +1454,81 @@ fn set_unmapped_record_mate_position(mi: &MmIdx, line: &mut String, mate_result:
         match i {
             2 => new_line.push_str(rname),
             3 => new_line.push_str(&(mate.rs + 1).to_string()),
+            6 => new_line.push('='),
+            7 => new_line.push_str(&(mate.rs + 1).to_string()),
             _ => new_line.push_str(field),
         }
     }
     *line = new_line;
+}
+
+fn set_mapped_record_mate_fields(
+    mi: &MmIdx,
+    line: &mut String,
+    current: &crate::types::AlignReg,
+    mate_result: &map::MapResult,
+    is_read1: bool,
+) {
+    let fields: Vec<&str> = line.split('\t').collect();
+    if fields.len() < 9 {
+        return;
+    }
+
+    let (rnext, pnext, tlen) = if let Some(mate) = primary_reg(mate_result) {
+        let rnext = if current.rid == mate.rid {
+            "=".to_string()
+        } else {
+            mi.seqs
+                .get(mate.rid as usize)
+                .map(|seq| seq.name.clone())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "*".to_string())
+        };
+        let pnext = (mate.rs + 1).to_string();
+        let tlen = if current.rid == mate.rid {
+            inferred_template_len(current, mate, is_read1)
+        } else {
+            0
+        };
+        (rnext, pnext, tlen)
+    } else {
+        ("=".to_string(), (current.rs + 1).to_string(), 0)
+    };
+    let tlen = tlen.to_string();
+
+    let mut new_line = String::with_capacity(line.len() + rnext.len() + pnext.len() + tlen.len());
+    for (i, field) in fields.iter().enumerate() {
+        if i > 0 {
+            new_line.push('\t');
+        }
+        match i {
+            6 => new_line.push_str(&rnext),
+            7 => new_line.push_str(&pnext),
+            8 => new_line.push_str(&tlen),
+            _ => new_line.push_str(field),
+        }
+    }
+    *line = new_line;
+}
+
+fn inferred_template_len(
+    current: &crate::types::AlignReg,
+    mate: &crate::types::AlignReg,
+    _is_read1: bool,
+) -> i32 {
+    let this_pos5 = if current.rev {
+        current.re - 1
+    } else {
+        current.rs
+    };
+    let next_pos5 = if mate.rev { mate.re - 1 } else { mate.rs };
+    let mut tlen = next_pos5 - this_pos5;
+    if tlen > 0 {
+        tlen += 1;
+    } else if tlen < 0 {
+        tlen -= 1;
+    }
+    tlen
 }
 
 /// Map paired-end files, writing PAF output.
@@ -1292,11 +1572,19 @@ pub fn map_file_pe_paf(
             pairs
                 .par_iter()
                 .map(|(rec1, rec2)| {
-                    let (seq1, seq2, rev1, rev2) = oriented_pair_sequences(opt, &rec1.seq, &rec2.seq);
-                    let mut frag_results = map::map_frag_queries(mi, opt, &rec1.name, &[&seq1, &seq2]);
+                    let (seq1, seq2, rev1, rev2) =
+                        oriented_pair_sequences(opt, &rec1.seq, &rec2.seq);
+                    let mut frag_results =
+                        map::map_frag_queries(mi, opt, &rec1.name, &[&seq1, &seq2]);
                     let mut res1 = frag_results.remove(0);
                     let mut res2 = frag_results.remove(0);
-                    pair_results(opt, rec1.l_seq as i32, rec2.l_seq as i32, &mut res1, &mut res2);
+                    pair_results(
+                        opt,
+                        rec1.l_seq as i32,
+                        rec2.l_seq as i32,
+                        &mut res1,
+                        &mut res2,
+                    );
                     restore_pair_orientation(&mut res1, rec1.l_seq as i32, rev1);
                     restore_pair_orientation(&mut res2, rec2.l_seq as i32, rev2);
                     let name1 = format!("{}/1", rec1.name);
@@ -1375,7 +1663,8 @@ pub fn map_file_pe_paf_split(
             pairs
                 .par_iter()
                 .map(|(rec1, rec2)| {
-                    let (seq1, seq2, rev1, rev2) = oriented_pair_sequences(opt, &rec1.seq, &rec2.seq);
+                    let (seq1, seq2, rev1, rev2) =
+                        oriented_pair_sequences(opt, &rec1.seq, &rec2.seq);
                     let mut frag_results = map_split_fragment_queries(
                         parts,
                         &part_opts,
@@ -1386,9 +1675,15 @@ pub fn map_file_pe_paf_split(
                     );
                     let mut res1 = frag_results.remove(0);
                     let mut res2 = frag_results.remove(0);
-                    pair_results(opt, rec1.l_seq as i32, rec2.l_seq as i32, &mut res1, &mut res2);
                     restore_pair_orientation(&mut res1, rec1.l_seq as i32, rev1);
                     restore_pair_orientation(&mut res2, rec2.l_seq as i32, rev2);
+                    pair_results_preserve_parents(
+                        opt,
+                        rec1.l_seq as i32,
+                        rec2.l_seq as i32,
+                        &mut res1,
+                        &mut res2,
+                    );
                     let name1 = format!("{}/1", rec1.name);
                     let name2 = format!("{}/2", rec2.name);
                     let mut lines = map::format_paf_with_comment(
@@ -1465,7 +1760,8 @@ pub fn map_file_interleaved_pe_paf_split(
                 .par_iter()
                 .map(|(rec1, rec2)| {
                     let base_name = strip_pe_suffix(&rec1.name);
-                    let (seq1, seq2, rev1, rev2) = oriented_pair_sequences(opt, &rec1.seq, &rec2.seq);
+                    let (seq1, seq2, rev1, rev2) =
+                        oriented_pair_sequences(opt, &rec1.seq, &rec2.seq);
                     let mut frag_results = map_split_fragment_queries(
                         parts,
                         &part_opts,
@@ -1476,9 +1772,15 @@ pub fn map_file_interleaved_pe_paf_split(
                     );
                     let mut res1 = frag_results.remove(0);
                     let mut res2 = frag_results.remove(0);
-                    pair_results(opt, rec1.l_seq as i32, rec2.l_seq as i32, &mut res1, &mut res2);
                     restore_pair_orientation(&mut res1, rec1.l_seq as i32, rev1);
                     restore_pair_orientation(&mut res2, rec2.l_seq as i32, rev2);
+                    pair_results_preserve_parents(
+                        opt,
+                        rec1.l_seq as i32,
+                        rec2.l_seq as i32,
+                        &mut res1,
+                        &mut res2,
+                    );
                     let name1 = format!("{}/1", base_name);
                     let name2 = format!("{}/2", base_name);
                     let mut lines = map::format_paf_with_comment(
@@ -1511,7 +1813,11 @@ pub fn map_file_interleaved_pe_paf_split(
     out.flush()
 }
 
-fn oriented_pair_sequences(opt: &MapOpt, seq1: &[u8], seq2: &[u8]) -> (Vec<u8>, Vec<u8>, bool, bool) {
+fn oriented_pair_sequences(
+    opt: &MapOpt,
+    seq1: &[u8],
+    seq2: &[u8],
+) -> (Vec<u8>, Vec<u8>, bool, bool) {
     let rev1 = (opt.pe_ori >> 1) & 1 != 0;
     let rev2 = opt.pe_ori & 1 != 0;
     let mut s1 = seq1.to_vec();
@@ -1635,7 +1941,8 @@ mod tests {
         let r1 = b"GGACATCCCGATGGTGCAGGTGCTATTAAAGGTTCGTTTG";
         let r2 = b"TCAACGATTAAAGTCCTACCTGTACGAAAGGAC";
 
-        let split = map_split_fragment_queries(&parts, &part_opts, &shifts, &opt, "pair", &[r1, r2]);
+        let split =
+            map_split_fragment_queries(&parts, &part_opts, &shifts, &opt, "pair", &[r1, r2]);
         let full_res = map::map_frag_queries(&full, &opt, "pair", &[r1, r2]);
 
         assert_eq!(split.len(), 2);

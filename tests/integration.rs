@@ -1,18 +1,21 @@
-use std::path::Path;
 use minimap2::flags::{IdxFlags, MapFlags};
 use minimap2::index::MmIdx;
 use minimap2::map;
 use minimap2::options::{self, IdxOpt, MapOpt};
+use std::path::Path;
 
 fn build_index(seqs: &[(&str, &[u8])], io: &IdxOpt) -> MmIdx {
     let seq_data: Vec<&[u8]> = seqs.iter().map(|s| s.1).collect();
     let names: Vec<&str> = seqs.iter().map(|s| s.0).collect();
     MmIdx::build_from_str(
-        io.w as i32, io.k as i32,
+        io.w as i32,
+        io.k as i32,
         io.flag.contains(IdxFlags::HPC),
         io.bucket_bits as i32,
-        &seq_data, Some(&names),
-    ).unwrap()
+        &seq_data,
+        Some(&names),
+    )
+    .unwrap()
 }
 
 fn setup_opts(preset: Option<&str>) -> (IdxOpt, MapOpt) {
@@ -42,7 +45,13 @@ fn test_self_mapping() {
 #[test]
 fn test_no_hit() {
     let (io, mut mo) = setup_opts(None);
-    let mi = build_index(&[("ref1", b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT")], &io);
+    let mi = build_index(
+        &[(
+            "ref1",
+            b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT",
+        )],
+        &io,
+    );
     let result = map_one(&mi, &mut mo, "query1", b"NNNNNNNNNNNNNNNNNNNN");
     assert!(result.regs.is_empty());
 }
@@ -85,7 +94,7 @@ fn test_paf_format() {
     let fields: Vec<&str> = lines[0].split('\t').collect();
     assert!(fields.len() >= 12);
     assert_eq!(fields[0], "read1"); // qname
-    assert_eq!(fields[5], "chr1");  // rname
+    assert_eq!(fields[5], "chr1"); // rname
 }
 
 #[test]
@@ -141,24 +150,45 @@ fn test_divergence_estimation() {
     assert!(!result.regs.is_empty());
     // Self-mapping should have very low divergence
     assert!(result.regs[0].div >= 0.0);
-    assert!(result.regs[0].div < 0.01, "Self-mapping div should be near 0, got {}", result.regs[0].div);
+    assert!(
+        result.regs[0].div < 0.01,
+        "Self-mapping div should be near 0, got {}",
+        result.regs[0].div
+    );
 }
 
 #[test]
 fn test_multiple_references() {
     let (io, mut mo) = setup_opts(None);
-    let mi = build_index(&[
-        ("chr1", b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"),
-        ("chr2", b"TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA"),
-    ], &io);
+    let mi = build_index(
+        &[
+            (
+                "chr1",
+                b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT",
+            ),
+            (
+                "chr2",
+                b"TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA",
+            ),
+        ],
+        &io,
+    );
 
-    let result1 = map_one(&mi, &mut mo, "read1",
-        b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT");
+    let result1 = map_one(
+        &mi,
+        &mut mo,
+        "read1",
+        b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT",
+    );
     assert!(!result1.regs.is_empty());
     assert_eq!(result1.regs[0].rid, 0); // maps to chr1
 
-    let result2 = map_one(&mi, &mut mo, "read2",
-        b"TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA");
+    let result2 = map_one(
+        &mi,
+        &mut mo,
+        "read2",
+        b"TGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCATGCA",
+    );
     assert!(!result2.regs.is_empty());
     assert_eq!(result2.regs[0].rid, 1); // maps to chr2
 }
@@ -175,21 +205,36 @@ fn test_eqx_cigar() {
     // All CIGAR ops should be = (op 7) or X (op 8), not M (op 0)
     for &c in &extra.cigar.0 {
         let op = c & 0xf;
-        assert!(op != 0, "EQX mode should not have M operations, got op={}", op);
+        assert!(
+            op != 0,
+            "EQX mode should not have M operations, got op={}",
+            op
+        );
     }
 }
 
 // === File-based integration tests using minimap2 test data ===
 
-fn map_file_pair(ref_path: &str, qry_path: &str, preset: Option<&str>) -> Vec<(String, map::MapResult)> {
+fn map_file_pair(
+    ref_path: &str,
+    qry_path: &str,
+    preset: Option<&str>,
+) -> Vec<(String, map::MapResult)> {
     if !Path::new(ref_path).exists() || !Path::new(qry_path).exists() {
         return Vec::new(); // skip if test data not available
     }
     let (io, mut mo) = setup_opts(preset);
     let mi = MmIdx::build_from_file(
-        ref_path, io.w as i32, io.k as i32, io.bucket_bits,
-        io.flag, io.mini_batch_size, io.batch_size,
-    ).unwrap().unwrap();
+        ref_path,
+        io.w as i32,
+        io.k as i32,
+        io.bucket_bits,
+        io.flag,
+        io.mini_batch_size,
+        io.batch_size,
+    )
+    .unwrap()
+    .unwrap();
     options::mapopt_update(&mut mo, &mi);
 
     let mut fp = minimap2::bseq::BseqFile::open(qry_path).unwrap();
@@ -207,8 +252,13 @@ fn command_stdout(program: &str, args: &[&str]) -> String {
         .stderr(std::process::Stdio::null())
         .output()
         .unwrap_or_else(|e| panic!("failed to run {} {:?}: {}", program, args, e));
-    assert!(output.status.success(),
-        "{} {:?} failed with status {}", program, args, output.status);
+    assert!(
+        output.status.success(),
+        "{} {:?} failed with status {}",
+        program,
+        args,
+        output.status
+    );
     String::from_utf8(output.stdout)
         .unwrap_or_else(|e| panic!("{} {:?} produced non-UTF8 stdout: {}", program, args, e))
 }
@@ -242,10 +292,19 @@ fn sam_core_fields(output: &str) -> Vec<String> {
 
 #[test]
 fn test_mt_genome_mapping() {
-    let results = map_file_pair("minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa", None);
-    if results.is_empty() { return; } // skip if files not found
+    let results = map_file_pair(
+        "minimap2/test/MT-human.fa",
+        "minimap2/test/MT-orang.fa",
+        None,
+    );
+    if results.is_empty() {
+        return;
+    } // skip if files not found
     assert_eq!(results.len(), 1);
-    assert!(!results[0].1.regs.is_empty(), "Should map MT_orang to MT_human");
+    assert!(
+        !results[0].1.regs.is_empty(),
+        "Should map MT_orang to MT_human"
+    );
     let r = &results[0].1.regs[0];
     assert_eq!(r.rid, 0);
     // Check coordinates match C minimap2: qs=61, qe=16018, rs=637, re=16562
@@ -259,7 +318,9 @@ fn test_mt_genome_mapping() {
 #[test]
 fn test_inversion_mapping() {
     let results = map_file_pair("minimap2/test/t-inv.fa", "minimap2/test/q-inv.fa", None);
-    if results.is_empty() { return; }
+    if results.is_empty() {
+        return;
+    }
     assert_eq!(results.len(), 2);
     // Both reads should map
     assert!(!results[0].1.regs.is_empty(), "read1 should map");
@@ -269,7 +330,9 @@ fn test_inversion_mapping() {
 #[test]
 fn test_x3s_mapping() {
     let results = map_file_pair("minimap2/test/x3s-ref.fa", "minimap2/test/x3s-qry.fa", None);
-    if results.is_empty() { return; }
+    if results.is_empty() {
+        return;
+    }
     assert_eq!(results.len(), 1);
     assert!(!results[0].1.regs.is_empty(), "x3s query should map");
     let r = &results[0].1.regs[0];
@@ -279,13 +342,22 @@ fn test_x3s_mapping() {
 
 #[test]
 fn test_mt_with_cigar() {
-    if !Path::new("minimap2/test/MT-human.fa").exists() { return; }
+    if !Path::new("minimap2/test/MT-human.fa").exists() {
+        return;
+    }
     let (io, mut mo) = setup_opts(None);
     mo.flag |= MapFlags::CIGAR | MapFlags::OUT_CG;
     let mi = MmIdx::build_from_file(
-        "minimap2/test/MT-human.fa", io.w as i32, io.k as i32, io.bucket_bits,
-        io.flag, io.mini_batch_size, io.batch_size,
-    ).unwrap().unwrap();
+        "minimap2/test/MT-human.fa",
+        io.w as i32,
+        io.k as i32,
+        io.bucket_bits,
+        io.flag,
+        io.mini_batch_size,
+        io.batch_size,
+    )
+    .unwrap()
+    .unwrap();
     options::mapopt_update(&mut mo, &mi);
 
     let mut fp = minimap2::bseq::BseqFile::open("minimap2/test/MT-orang.fa").unwrap();
@@ -303,29 +375,53 @@ fn test_mt_with_cigar() {
         let op = c & 0xf;
         let len = (c >> 4) as i32;
         match op {
-            0 | 7 | 8 => { q_consumed += len; t_consumed += len; }
-            1 => { q_consumed += len; }
-            2 | 3 => { t_consumed += len; }
+            0 | 7 | 8 => {
+                q_consumed += len;
+                t_consumed += len;
+            }
+            1 => {
+                q_consumed += len;
+            }
+            2 | 3 => {
+                t_consumed += len;
+            }
             _ => {}
         }
     }
     // CIGAR consumption should match or slightly exceed coordinate range
     // (coordinates may be clipped to reference boundaries)
-    assert!(q_consumed >= r.qe - r.qs,
-        "CIGAR query consumption {} should be >= qe-qs={}", q_consumed, r.qe - r.qs);
-    assert!(t_consumed >= r.re - r.rs,
-        "CIGAR target consumption {} should be >= re-rs={}", t_consumed, r.re - r.rs);
+    assert!(
+        q_consumed >= r.qe - r.qs,
+        "CIGAR query consumption {} should be >= qe-qs={}",
+        q_consumed,
+        r.qe - r.qs
+    );
+    assert!(
+        t_consumed >= r.re - r.rs,
+        "CIGAR target consumption {} should be >= re-rs={}",
+        t_consumed,
+        r.re - r.rs
+    );
 }
 
 #[test]
 fn test_x3s_cigar_matches_c() {
-    if !Path::new("minimap2/test/x3s-ref.fa").exists() { return; }
+    if !Path::new("minimap2/test/x3s-ref.fa").exists() {
+        return;
+    }
     let (io, mut mo) = setup_opts(None);
     mo.flag |= MapFlags::CIGAR | MapFlags::OUT_CG;
     let mi = MmIdx::build_from_file(
-        "minimap2/test/x3s-ref.fa", io.w as i32, io.k as i32, io.bucket_bits,
-        io.flag, io.mini_batch_size, io.batch_size,
-    ).unwrap().unwrap();
+        "minimap2/test/x3s-ref.fa",
+        io.w as i32,
+        io.k as i32,
+        io.bucket_bits,
+        io.flag,
+        io.mini_batch_size,
+        io.batch_size,
+    )
+    .unwrap()
+    .unwrap();
     options::mapopt_update(&mut mo, &mi);
 
     let mut fp = minimap2::bseq::BseqFile::open("minimap2/test/x3s-qry.fa").unwrap();
@@ -346,13 +442,22 @@ fn test_x3s_cigar_matches_c() {
 #[test]
 fn test_sam_cigar_seq_consistency() {
     // Verify CIGAR query consumption equals SEQ length (critical for samtools)
-    if !Path::new("minimap2/test/MT-human.fa").exists() { return; }
+    if !Path::new("minimap2/test/MT-human.fa").exists() {
+        return;
+    }
     let (io, mut mo) = setup_opts(None);
     mo.flag |= MapFlags::CIGAR | MapFlags::OUT_SAM;
     let mi = MmIdx::build_from_file(
-        "minimap2/test/MT-human.fa", io.w as i32, io.k as i32, io.bucket_bits,
-        io.flag, io.mini_batch_size, io.batch_size,
-    ).unwrap().unwrap();
+        "minimap2/test/MT-human.fa",
+        io.w as i32,
+        io.k as i32,
+        io.bucket_bits,
+        io.flag,
+        io.mini_batch_size,
+        io.batch_size,
+    )
+    .unwrap()
+    .unwrap();
     options::mapopt_update(&mut mo, &mi);
 
     let mut fp = minimap2::bseq::BseqFile::open("minimap2/test/MT-orang.fa").unwrap();
@@ -379,8 +484,12 @@ fn test_sam_cigar_seq_consistency() {
     let aligned_qlen = r.qe - r.qs;
     assert!(q_consumed > 0, "CIGAR should consume query bases");
     // Allow small discrepancy from coordinate clamping
-    assert!((q_consumed - aligned_qlen).abs() <= 100,
-        "CIGAR query consumption {} should be close to aligned qlen {}", q_consumed, aligned_qlen);
+    assert!(
+        (q_consumed - aligned_qlen).abs() <= 100,
+        "CIGAR query consumption {} should be close to aligned qlen {}",
+        q_consumed,
+        aligned_qlen
+    );
 }
 
 #[test]
@@ -390,7 +499,11 @@ fn test_aligner_api() {
 
     let mut f = tempfile::NamedTempFile::new().unwrap();
     writeln!(f, ">ref1").unwrap();
-    writeln!(f, "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT").unwrap();
+    writeln!(
+        f,
+        "ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT"
+    )
+    .unwrap();
     f.flush().unwrap();
 
     let aligner = Aligner::builder()
@@ -457,13 +570,22 @@ fn cigar_ref_consumed(cigar: &[u32]) -> i32 {
 /// ~60-100bp unaccounted for between CIGAR and coordinates.
 #[test]
 fn test_cigar_qlen_equals_qe_minus_qs() {
-    if !Path::new("minimap2/test/MT-human.fa").exists() { return; }
+    if !Path::new("minimap2/test/MT-human.fa").exists() {
+        return;
+    }
     let (io, mut mo) = setup_opts(None);
     mo.flag |= MapFlags::CIGAR | MapFlags::OUT_CG;
     let mi = MmIdx::build_from_file(
-        "minimap2/test/MT-human.fa", io.w as i32, io.k as i32, io.bucket_bits,
-        io.flag, io.mini_batch_size, io.batch_size,
-    ).unwrap().unwrap();
+        "minimap2/test/MT-human.fa",
+        io.w as i32,
+        io.k as i32,
+        io.bucket_bits,
+        io.flag,
+        io.mini_batch_size,
+        io.batch_size,
+    )
+    .unwrap()
+    .unwrap();
     options::mapopt_update(&mut mo, &mi);
 
     let mut fp = minimap2::bseq::BseqFile::open("minimap2/test/MT-orang.fa").unwrap();
@@ -473,19 +595,35 @@ fn test_cigar_qlen_equals_qe_minus_qs() {
             if let Some(ref extra) = r.extra {
                 let aligned_q = cigar_aligned_query(&extra.cigar.0);
                 let expected_q = r.qe - r.qs;
-                assert_eq!(aligned_q, expected_q,
+                assert_eq!(
+                    aligned_q,
+                    expected_q,
                     "Read {} reg {}: CIGAR aligned query bases ({}) != qe-qs ({}) [qe={}, qs={}]. \
                      CIGAR: {}",
-                    rec.name, i, aligned_q, expected_q, r.qe, r.qs,
-                    minimap2::align::cigar_to_string(&extra.cigar.0));
+                    rec.name,
+                    i,
+                    aligned_q,
+                    expected_q,
+                    r.qe,
+                    r.qs,
+                    minimap2::align::cigar_to_string(&extra.cigar.0)
+                );
 
                 let ref_consumed = cigar_ref_consumed(&extra.cigar.0);
                 let expected_r = r.re - r.rs;
-                assert_eq!(ref_consumed, expected_r,
+                assert_eq!(
+                    ref_consumed,
+                    expected_r,
                     "Read {} reg {}: CIGAR ref bases ({}) != re-rs ({}) [re={}, rs={}]. \
                      CIGAR: {}",
-                    rec.name, i, ref_consumed, expected_r, r.re, r.rs,
-                    minimap2::align::cigar_to_string(&extra.cigar.0));
+                    rec.name,
+                    i,
+                    ref_consumed,
+                    expected_r,
+                    r.re,
+                    r.rs,
+                    minimap2::align::cigar_to_string(&extra.cigar.0)
+                );
             }
         }
     }
@@ -495,13 +633,22 @@ fn test_cigar_qlen_equals_qe_minus_qs() {
 /// Uses the HiFi preset which is where the 462/649 differences were observed.
 #[test]
 fn test_hifi_cigar_qlen_consistency() {
-    if !Path::new("minimap2/test/MT-human.fa").exists() { return; }
+    if !Path::new("minimap2/test/MT-human.fa").exists() {
+        return;
+    }
     let (io, mut mo) = setup_opts(Some("map-hifi"));
     mo.flag |= MapFlags::CIGAR | MapFlags::OUT_CG;
     let mi = MmIdx::build_from_file(
-        "minimap2/test/MT-human.fa", io.w as i32, io.k as i32, io.bucket_bits,
-        io.flag, io.mini_batch_size, io.batch_size,
-    ).unwrap().unwrap();
+        "minimap2/test/MT-human.fa",
+        io.w as i32,
+        io.k as i32,
+        io.bucket_bits,
+        io.flag,
+        io.mini_batch_size,
+        io.batch_size,
+    )
+    .unwrap()
+    .unwrap();
     options::mapopt_update(&mut mo, &mi);
 
     let mut fp = minimap2::bseq::BseqFile::open("minimap2/test/MT-orang.fa").unwrap();
@@ -511,12 +658,21 @@ fn test_hifi_cigar_qlen_consistency() {
             if let Some(ref extra) = r.extra {
                 let aligned_q = cigar_aligned_query(&extra.cigar.0);
                 let expected_q = r.qe - r.qs;
-                assert_eq!(aligned_q, expected_q,
+                assert_eq!(
+                    aligned_q,
+                    expected_q,
                     "HiFi: Read {} reg {}: CIGAR aligned query bases ({}) != qe-qs ({}) \
                      [qs={}, qe={}, rs={}, re={}]. CIGAR: {}",
-                    rec.name, i, aligned_q, expected_q,
-                    r.qs, r.qe, r.rs, r.re,
-                    minimap2::align::cigar_to_string(&extra.cigar.0));
+                    rec.name,
+                    i,
+                    aligned_q,
+                    expected_q,
+                    r.qs,
+                    r.qe,
+                    r.rs,
+                    r.re,
+                    minimap2::align::cigar_to_string(&extra.cigar.0)
+                );
             }
         }
     }
@@ -526,13 +682,22 @@ fn test_hifi_cigar_qlen_consistency() {
 /// For SAM, the CIGAR includes soft clips, so M+I+S+=/X must equal full query length.
 #[test]
 fn test_sam_cigar_equals_query_length() {
-    if !Path::new("minimap2/test/MT-human.fa").exists() { return; }
+    if !Path::new("minimap2/test/MT-human.fa").exists() {
+        return;
+    }
     let (io, mut mo) = setup_opts(None);
     mo.flag |= MapFlags::CIGAR | MapFlags::OUT_SAM;
     let mi = MmIdx::build_from_file(
-        "minimap2/test/MT-human.fa", io.w as i32, io.k as i32, io.bucket_bits,
-        io.flag, io.mini_batch_size, io.batch_size,
-    ).unwrap().unwrap();
+        "minimap2/test/MT-human.fa",
+        io.w as i32,
+        io.k as i32,
+        io.bucket_bits,
+        io.flag,
+        io.mini_batch_size,
+        io.batch_size,
+    )
+    .unwrap()
+    .unwrap();
     options::mapopt_update(&mut mo, &mi);
 
     let mut fp = minimap2::bseq::BseqFile::open("minimap2/test/MT-orang.fa").unwrap();
@@ -561,12 +726,22 @@ fn test_sam_cigar_equals_query_length() {
                 }
 
                 let total_q = cigar_query_consumed(&full_cigar);
-                assert_eq!(total_q, qlen,
+                assert_eq!(
+                    total_q,
+                    qlen,
                     "SAM: Read {} reg {}: total query-consuming CIGAR ops ({}) != qlen ({}). \
                      qs={}, qe={}, rev={}, leading_S={}, trailing_S={}, core_CIGAR={}",
-                    rec.name, i, total_q, qlen,
-                    r.qs, r.qe, r.rev, qs_internal, trailing,
-                    minimap2::align::cigar_to_string(&extra.cigar.0));
+                    rec.name,
+                    i,
+                    total_q,
+                    qlen,
+                    r.qs,
+                    r.qe,
+                    r.rev,
+                    qs_internal,
+                    trailing,
+                    minimap2::align::cigar_to_string(&extra.cigar.0)
+                );
             }
         }
     }
@@ -578,16 +753,25 @@ fn test_sam_cigar_equals_query_length() {
 /// from the CIGAR should exactly equal qe - qs (no gap).
 #[test]
 fn test_right_extension_endpoint() {
-    if !Path::new("minimap2/test/MT-human.fa").exists() { return; }
+    if !Path::new("minimap2/test/MT-human.fa").exists() {
+        return;
+    }
 
     // Test with multiple presets to catch preset-specific issues
     for preset in &[None, Some("map-hifi"), Some("map-ont")] {
         let (io, mut mo) = setup_opts(*preset);
         mo.flag |= MapFlags::CIGAR | MapFlags::OUT_CG;
         let mi = MmIdx::build_from_file(
-            "minimap2/test/MT-human.fa", io.w as i32, io.k as i32, io.bucket_bits,
-            io.flag, io.mini_batch_size, io.batch_size,
-        ).unwrap().unwrap();
+            "minimap2/test/MT-human.fa",
+            io.w as i32,
+            io.k as i32,
+            io.bucket_bits,
+            io.flag,
+            io.mini_batch_size,
+            io.batch_size,
+        )
+        .unwrap()
+        .unwrap();
         options::mapopt_update(&mut mo, &mi);
 
         let mut fp = minimap2::bseq::BseqFile::open("minimap2/test/MT-orang.fa").unwrap();
@@ -604,19 +788,36 @@ fn test_right_extension_endpoint() {
                     let preset_name = preset.unwrap_or("default");
 
                     // Strict: CIGAR must exactly match coordinates
-                    assert_eq!(aligned_q, expected_q,
+                    assert_eq!(
+                        aligned_q,
+                        expected_q,
                         "[{}] Read {} reg {}: CIGAR query bases ({}) != qe-qs ({}). \
                          qs={}, qe={}, qlen={}, CIGAR={}",
-                        preset_name, rec.name, i, aligned_q, expected_q,
-                        r.qs, r.qe, qlen,
-                        minimap2::align::cigar_to_string(cigar));
+                        preset_name,
+                        rec.name,
+                        i,
+                        aligned_q,
+                        expected_q,
+                        r.qs,
+                        r.qe,
+                        qlen,
+                        minimap2::align::cigar_to_string(cigar)
+                    );
 
-                    assert_eq!(aligned_r, expected_r,
+                    assert_eq!(
+                        aligned_r,
+                        expected_r,
                         "[{}] Read {} reg {}: CIGAR ref bases ({}) != re-rs ({}). \
                          rs={}, re={}, CIGAR={}",
-                        preset_name, rec.name, i, aligned_r, expected_r,
-                        r.rs, r.re,
-                        minimap2::align::cigar_to_string(cigar));
+                        preset_name,
+                        rec.name,
+                        i,
+                        aligned_r,
+                        expected_r,
+                        r.rs,
+                        r.re,
+                        minimap2::align::cigar_to_string(cigar)
+                    );
 
                     // Additional check: soft-clip + aligned query should not exceed query length
                     let soft_clip_left = if r.rev { qlen - r.qe } else { r.qs };
@@ -636,13 +837,22 @@ fn test_right_extension_endpoint() {
 /// the "last M before S is too short" pattern.
 #[test]
 fn test_right_extension_diagnostic() {
-    if !Path::new("minimap2/test/MT-human.fa").exists() { return; }
+    if !Path::new("minimap2/test/MT-human.fa").exists() {
+        return;
+    }
     let (io, mut mo) = setup_opts(None);
     mo.flag |= MapFlags::CIGAR | MapFlags::OUT_CG;
     let mi = MmIdx::build_from_file(
-        "minimap2/test/MT-human.fa", io.w as i32, io.k as i32, io.bucket_bits,
-        io.flag, io.mini_batch_size, io.batch_size,
-    ).unwrap().unwrap();
+        "minimap2/test/MT-human.fa",
+        io.w as i32,
+        io.k as i32,
+        io.bucket_bits,
+        io.flag,
+        io.mini_batch_size,
+        io.batch_size,
+    )
+    .unwrap()
+    .unwrap();
     options::mapopt_update(&mut mo, &mi);
 
     let mut fp = minimap2::bseq::BseqFile::open("minimap2/test/MT-orang.fa").unwrap();
@@ -662,11 +872,22 @@ fn test_right_extension_diagnostic() {
             } else {
                 r.qs + aligned_q + (qlen - r.qe)
             };
-            assert_eq!(total, qlen,
+            assert_eq!(
+                total,
+                qlen,
                 "Reg {}: coordinates + CIGAR don't add up to qlen. \
                  qs={}, qe={}, rs={}, re={}, rev={}, aligned_q={}, total={}, qlen={}, CIGAR={}",
-                i, r.qs, r.qe, r.rs, r.re, r.rev, aligned_q, total, qlen,
-                minimap2::align::cigar_to_string(cigar));
+                i,
+                r.qs,
+                r.qe,
+                r.rs,
+                r.re,
+                r.rev,
+                aligned_q,
+                total,
+                qlen,
+                minimap2::align::cigar_to_string(cigar)
+            );
         }
     }
 }
@@ -674,38 +895,83 @@ fn test_right_extension_diagnostic() {
 /// Test that gap-fill APPROX_MAX CIGAR covers the full gap.
 #[test]
 fn test_gapfill_cigar_covers_full_gap() {
-    use minimap2::align::{align_pair_dual, cigar_to_string};
     use minimap2::align::score::gen_simple_mat;
+    use minimap2::align::{align_pair_dual, cigar_to_string};
     use minimap2::flags::KswFlags;
-    
+
     let mut mat = Vec::new();
     gen_simple_mat(5, &mut mat, 1, 4, 1);
 
     for len in [100, 200, 500, 1000] {
         let query: Vec<u8> = (0..len).map(|i| (i % 4) as u8).collect();
         let mut target = query.clone();
-        if len > 50 { target[50] = (target[50] + 1) % 4; }
-        if len > 150 { target[150] = (target[150] + 2) % 4; }
-        if len > 100 { target.insert(100, 3); }
+        if len > 50 {
+            target[50] = (target[50] + 1) % 4;
+        }
+        if len > 150 {
+            target[150] = (target[150] + 2) % 4;
+        }
+        if len > 100 {
+            target.insert(100, 3);
+        }
 
-        let ez = align_pair_dual(&query, &target, 5, &mat, 
-            6, 2, 26, 1, 30000, 400, -1, KswFlags::APPROX_MAX);
-        
-        if ez.cigar.is_empty() { continue; }
-        
+        let ez = align_pair_dual(
+            &query,
+            &target,
+            5,
+            &mat,
+            6,
+            2,
+            26,
+            1,
+            30000,
+            400,
+            -1,
+            KswFlags::APPROX_MAX,
+        );
+
+        if ez.cigar.is_empty() {
+            continue;
+        }
+
         let mut qcons = 0i32;
         let mut tcons = 0i32;
         for &c in &ez.cigar {
-            let op = c & 0xf; let clen = (c >> 4) as i32;
-            match op { 0 | 7 | 8 => { qcons += clen; tcons += clen; } 1 => { qcons += clen; } 2 | 3 => { tcons += clen; } _ => {} }
+            let op = c & 0xf;
+            let clen = (c >> 4) as i32;
+            match op {
+                0 | 7 | 8 => {
+                    qcons += clen;
+                    tcons += clen;
+                }
+                1 => {
+                    qcons += clen;
+                }
+                2 | 3 => {
+                    tcons += clen;
+                }
+                _ => {}
+            }
         }
-        
-        assert_eq!(qcons, query.len() as i32,
+
+        assert_eq!(
+            qcons,
+            query.len() as i32,
             "len={}: gap-fill CIGAR consumes {} query bases but gap has {} (CIGAR={})",
-            len, qcons, query.len(), cigar_to_string(&ez.cigar));
-        assert_eq!(tcons, target.len() as i32,
+            len,
+            qcons,
+            query.len(),
+            cigar_to_string(&ez.cigar)
+        );
+        assert_eq!(
+            tcons,
+            target.len() as i32,
             "len={}: gap-fill CIGAR consumes {} target bases but gap has {} (CIGAR={})",
-            len, tcons, target.len(), cigar_to_string(&ez.cigar));
+            len,
+            tcons,
+            target.len(),
+            cigar_to_string(&ez.cigar)
+        );
     }
 }
 
@@ -713,9 +979,13 @@ fn test_gapfill_cigar_covers_full_gap() {
 /// same PAF records as C minimap2.
 /// This catches the remaining alignment difference that only manifests
 /// with longer right extensions (>100bp).
-#[test] 
+#[test]
 fn test_chr11_cigar_vs_c() {
-    if !Path::new("minimap2/minimap2").exists() || !Path::new("target/release/minimap2-pure-rs").exists() { return; }
+    if !Path::new("minimap2/minimap2").exists()
+        || !Path::new("target/release/minimap2-pure-rs").exists()
+    {
+        return;
+    }
     let reference = "tests/data/chr11_bug_window.fa";
     let query = "tests/data/chr11_bug_query.fq";
 
@@ -723,24 +993,90 @@ fn test_chr11_cigar_vs_c() {
     let c_lines = non_header_lines(&command_stdout("minimap2/minimap2", &args));
     let rust_lines = non_header_lines(&command_stdout("target/release/minimap2-pure-rs", &args));
 
-    assert_eq!(c_lines, rust_lines,
+    assert_eq!(
+        c_lines,
+        rust_lines,
         "chr11 fixture PAF output differs\nC:\n{}\nRust:\n{}",
-        c_lines.join("\n"), rust_lines.join("\n"));
+        c_lines.join("\n"),
+        rust_lines.join("\n")
+    );
 }
 
 #[test]
 fn test_cli_fixture_parity_matrix() {
-    if !Path::new("minimap2/minimap2").exists() || !Path::new("target/release/minimap2-pure-rs").exists() { return; }
+    if !Path::new("minimap2/minimap2").exists()
+        || !Path::new("target/release/minimap2-pure-rs").exists()
+    {
+        return;
+    }
 
     let paf_cases: &[(&str, &[&str])] = &[
-        ("MT default PAF+cg", &["-c", "minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa"]),
-        ("MT map-ont PAF+cg", &["-c", "-x", "map-ont", "minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa"]),
-        ("MT HiFi PAF+cg", &["-c", "-x", "map-hifi", "minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa"]),
-        ("MT asm5 PAF+cg", &["-c", "-x", "asm5", "minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa"]),
-        ("MT asm10 PAF+cg", &["-c", "-x", "asm10", "minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa"]),
-        ("x3s default PAF+cg", &["-c", "minimap2/test/x3s-ref.fa", "minimap2/test/x3s-qry.fa"]),
-        ("t2/q2 default PAF+cg", &["-c", "minimap2/test/t2.fa", "minimap2/test/q2.fa"]),
-        ("chr11 fixture HiFi PAF+cg", &["-c", "-x", "map-hifi", "tests/data/chr11_bug_window.fa", "tests/data/chr11_bug_query.fq"]),
+        (
+            "MT default PAF+cg",
+            &[
+                "-c",
+                "minimap2/test/MT-human.fa",
+                "minimap2/test/MT-orang.fa",
+            ],
+        ),
+        (
+            "MT map-ont PAF+cg",
+            &[
+                "-c",
+                "-x",
+                "map-ont",
+                "minimap2/test/MT-human.fa",
+                "minimap2/test/MT-orang.fa",
+            ],
+        ),
+        (
+            "MT HiFi PAF+cg",
+            &[
+                "-c",
+                "-x",
+                "map-hifi",
+                "minimap2/test/MT-human.fa",
+                "minimap2/test/MT-orang.fa",
+            ],
+        ),
+        (
+            "MT asm5 PAF+cg",
+            &[
+                "-c",
+                "-x",
+                "asm5",
+                "minimap2/test/MT-human.fa",
+                "minimap2/test/MT-orang.fa",
+            ],
+        ),
+        (
+            "MT asm10 PAF+cg",
+            &[
+                "-c",
+                "-x",
+                "asm10",
+                "minimap2/test/MT-human.fa",
+                "minimap2/test/MT-orang.fa",
+            ],
+        ),
+        (
+            "x3s default PAF+cg",
+            &["-c", "minimap2/test/x3s-ref.fa", "minimap2/test/x3s-qry.fa"],
+        ),
+        (
+            "t2/q2 default PAF+cg",
+            &["-c", "minimap2/test/t2.fa", "minimap2/test/q2.fa"],
+        ),
+        (
+            "chr11 fixture HiFi PAF+cg",
+            &[
+                "-c",
+                "-x",
+                "map-hifi",
+                "tests/data/chr11_bug_window.fa",
+                "tests/data/chr11_bug_query.fq",
+            ],
+        ),
     ];
 
     for &(name, args) in paf_cases {
@@ -750,9 +1086,31 @@ fn test_cli_fixture_parity_matrix() {
     }
 
     let sam_cases: &[(&str, &[&str])] = &[
-        ("MT HiFi SAM EQX", &["-a", "-x", "map-hifi", "--eqx", "minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa"]),
-        ("MT map-ont SAM", &["-a", "-x", "map-ont", "minimap2/test/MT-human.fa", "minimap2/test/MT-orang.fa"]),
-        ("x3s default SAM", &["-a", "minimap2/test/x3s-ref.fa", "minimap2/test/x3s-qry.fa"]),
+        (
+            "MT HiFi SAM EQX",
+            &[
+                "-a",
+                "-x",
+                "map-hifi",
+                "--eqx",
+                "minimap2/test/MT-human.fa",
+                "minimap2/test/MT-orang.fa",
+            ],
+        ),
+        (
+            "MT map-ont SAM",
+            &[
+                "-a",
+                "-x",
+                "map-ont",
+                "minimap2/test/MT-human.fa",
+                "minimap2/test/MT-orang.fa",
+            ],
+        ),
+        (
+            "x3s default SAM",
+            &["-a", "minimap2/test/x3s-ref.fa", "minimap2/test/x3s-qry.fa"],
+        ),
     ];
 
     for &(name, args) in sam_cases {
@@ -768,32 +1126,63 @@ mod zdrop_test_data;
 /// These sequences are from a z-dropped gap-fill that causes CIGAR differences.
 #[test]
 fn test_zdrop_real_sequences_simd_vs_scalar() {
-    use minimap2::align::{align_pair_dual, cigar_to_string};
     use minimap2::align::score::gen_simple_mat;
+    use minimap2::align::{align_pair_dual, cigar_to_string};
     use minimap2::flags::KswFlags;
-    
+
     let (query, target) = zdrop_test_data::get_zdrop_seqs();
     let mut mat = Vec::new();
     gen_simple_mat(5, &mut mat, 1, 4, 1); // map-hifi: a=1, b=4
-    
+
     // Z-drop second pass: no flags (empty), zdrop=400
-    let simd = align_pair_dual(&query, &target, 5, &mat,
-        6, 2, 26, 1, // q=6, e=2, q2=26, e2=1
-        30001, 400, -1, KswFlags::empty());
-    
-    let scalar = minimap2::align::ksw2::ksw_extd2(&query, &target, 5, &mat,
-        6, 2, 26, 1,
-        30001, 400, -1, KswFlags::empty());
-    
+    let simd = align_pair_dual(
+        &query,
+        &target,
+        5,
+        &mat,
+        6,
+        2,
+        26,
+        1, // q=6, e=2, q2=26, e2=1
+        30001,
+        400,
+        -1,
+        KswFlags::empty(),
+    );
+
+    let scalar = minimap2::align::ksw2::ksw_extd2(
+        &query,
+        &target,
+        5,
+        &mat,
+        6,
+        2,
+        26,
+        1,
+        30001,
+        400,
+        -1,
+        KswFlags::empty(),
+    );
+
     let simd_cig = cigar_to_string(&simd.cigar);
     let scalar_cig = cigar_to_string(&scalar.cigar);
 
-    assert_eq!(simd.zdropped, scalar.zdropped,
-        "zdropped differs: SIMD={} scalar={}", simd.zdropped, scalar.zdropped);
-    assert_eq!(simd.max_t, scalar.max_t, 
-        "max_t differs: SIMD={} scalar={}", simd.max_t, scalar.max_t);
-    assert_eq!(simd_cig, scalar_cig,
-        "CIGAR differs: SIMD={} scalar={}", simd_cig, scalar_cig);
+    assert_eq!(
+        simd.zdropped, scalar.zdropped,
+        "zdropped differs: SIMD={} scalar={}",
+        simd.zdropped, scalar.zdropped
+    );
+    assert_eq!(
+        simd.max_t, scalar.max_t,
+        "max_t differs: SIMD={} scalar={}",
+        simd.max_t, scalar.max_t
+    );
+    assert_eq!(
+        simd_cig, scalar_cig,
+        "CIGAR differs: SIMD={} scalar={}",
+        simd_cig, scalar_cig
+    );
 }
 
 /// Test z-drop second pass behavior with various bandwidths.
@@ -803,42 +1192,96 @@ fn test_zdrop_second_pass_bandwidth() {
     use minimap2::align::align_pair_dual;
     use minimap2::align::score::gen_simple_mat;
     use minimap2::flags::KswFlags;
-    
+
     let (query, target) = zdrop_test_data::get_zdrop_seqs();
     let mut mat = Vec::new();
     gen_simple_mat(5, &mut mat, 1, 4, 1);
-    
+
     // Test with different bandwidths - the z-drop result should be consistent
     for bw in [500, 751, 1000, 5000, 30001] {
-        let simd = align_pair_dual(&query, &target, 5, &mat,
-            6, 2, 26, 1, bw, 400, -1, KswFlags::empty());
-        let scalar = minimap2::align::ksw2::ksw_extd2(&query, &target, 5, &mat,
-            6, 2, 26, 1, bw, 400, -1, KswFlags::empty());
+        let simd = align_pair_dual(
+            &query,
+            &target,
+            5,
+            &mat,
+            6,
+            2,
+            26,
+            1,
+            bw,
+            400,
+            -1,
+            KswFlags::empty(),
+        );
+        let scalar = minimap2::align::ksw2::ksw_extd2(
+            &query,
+            &target,
+            5,
+            &mat,
+            6,
+            2,
+            26,
+            1,
+            bw,
+            400,
+            -1,
+            KswFlags::empty(),
+        );
 
-        assert_eq!(simd.max_t, scalar.max_t,
-            "bw={}: max_t SIMD={} scalar={}", bw, simd.max_t, scalar.max_t);
+        assert_eq!(
+            simd.max_t, scalar.max_t,
+            "bw={}: max_t SIMD={} scalar={}",
+            bw, simd.max_t, scalar.max_t
+        );
     }
 }
 
 /// Test that APPROX_MAX first pass produces the same CIGAR for SIMD and scalar.
 #[test]
 fn test_zdrop_first_pass_approx_max() {
-    use minimap2::align::{align_pair_dual, cigar_to_string};
     use minimap2::align::score::gen_simple_mat;
+    use minimap2::align::{align_pair_dual, cigar_to_string};
     use minimap2::flags::KswFlags;
-    
+
     let (query, target) = zdrop_test_data::get_zdrop_seqs();
     let mut mat = Vec::new();
     gen_simple_mat(5, &mut mat, 1, 4, 1);
-    
-    let simd = align_pair_dual(&query, &target, 5, &mat,
-        6, 2, 26, 1, 30001, 400, -1, KswFlags::APPROX_MAX);
-    let scalar = minimap2::align::ksw2::ksw_extd2(&query, &target, 5, &mat,
-        6, 2, 26, 1, 30001, 400, -1, KswFlags::APPROX_MAX);
-    
+
+    let simd = align_pair_dual(
+        &query,
+        &target,
+        5,
+        &mat,
+        6,
+        2,
+        26,
+        1,
+        30001,
+        400,
+        -1,
+        KswFlags::APPROX_MAX,
+    );
+    let scalar = minimap2::align::ksw2::ksw_extd2(
+        &query,
+        &target,
+        5,
+        &mat,
+        6,
+        2,
+        26,
+        1,
+        30001,
+        400,
+        -1,
+        KswFlags::APPROX_MAX,
+    );
+
     let simd_cig = cigar_to_string(&simd.cigar);
     let scalar_cig = cigar_to_string(&scalar.cigar);
 
-    assert_eq!(simd_cig, scalar_cig,
-        "First pass CIGAR differs: SIMD={} scalar={}", simd_cig, scalar_cig);
+    assert_eq!(
+        simd_cig, scalar_cig,
+        "First pass CIGAR differs: SIMD={} scalar={}",
+        simd_cig, scalar_cig
+    );
 }

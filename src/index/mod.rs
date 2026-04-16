@@ -171,12 +171,13 @@ impl MmIdx {
         for b in &self.buckets {
             if let Some(h) = &b.h {
                 n_keys += h.len() as i64;
-                for (&key, &val) in h.iter() {
-                    if key & 1 != 0 {
+                for (&_key, &val) in h.iter() {
+                    let count = val as u32;
+                    if count == 1 {
                         sum_occ += 1;
                         n_singletons += 1;
                     } else {
-                        sum_occ += val as u32 as u64;
+                        sum_occ += count as u64;
                     }
                 }
             }

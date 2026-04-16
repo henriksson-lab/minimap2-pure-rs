@@ -451,16 +451,6 @@ pub fn ksw_extz2(
         }
     }
 
-    // Add end bonus
-    if end_bonus > 0 {
-        if ez.mqe != KSW_NEG_INF {
-            ez.mqe += end_bonus;
-        }
-        if ez.mte != KSW_NEG_INF {
-            ez.mte += end_bonus;
-        }
-    }
-
     // Backtrace start — generate CIGAR even for zdropped
     if with_cigar {
         let (end_i, end_j) = if !ez.zdropped && !is_extz {
@@ -697,15 +687,6 @@ pub fn ksw_extd2(
         }
     }
 
-    if end_bonus > 0 {
-        if ez.mqe != KSW_NEG_INF {
-            ez.mqe += end_bonus;
-        }
-        if ez.mte != KSW_NEG_INF {
-            ez.mte += end_bonus;
-        }
-    }
-
     // Backtrace start — generate CIGAR even for zdropped (matching C SIMD behavior)
     if with_cigar {
         let (end_i, end_j) = if !ez.zdropped && !is_extz {
@@ -919,7 +900,14 @@ pub fn ksw_exts2(
             let row_best_j = (j_st..=j_en).max_by_key(|&j| h[idx(i, j)]).unwrap_or(j_st);
             let row_best = h[idx(i, row_best_j)];
             if row_best > KSW_NEG_INF / 2
-                && apply_zdrop(&mut ez, row_best, i as i32 - 1, row_best_j as i32 - 1, zdrop, e)
+                && apply_zdrop(
+                    &mut ez,
+                    row_best,
+                    i as i32 - 1,
+                    row_best_j as i32 - 1,
+                    zdrop,
+                    e,
+                )
             {
                 break;
             }
@@ -928,15 +916,6 @@ pub fn ksw_exts2(
 
     ez.score = h[idx(qlen, tlen)];
     ez.reach_end = ez.score > KSW_NEG_INF / 2;
-    if end_bonus > 0 {
-        if ez.mqe != KSW_NEG_INF {
-            ez.mqe += end_bonus;
-        }
-        if ez.mte != KSW_NEG_INF {
-            ez.mte += end_bonus;
-        }
-    }
-
     if with_cigar {
         let (mut i, mut j) = if !ez.zdropped && !is_extz {
             (qlen, tlen)
@@ -1070,12 +1049,7 @@ fn splice_signal_penalty_at(
     -half.max(noncan)
 }
 
-fn splice_complex_signal_penalty_at(
-    target: &[u8],
-    pos: usize,
-    donor: bool,
-    flag: KswFlags,
-) -> i32 {
+fn splice_complex_signal_penalty_at(target: &[u8], pos: usize, donor: bool, flag: KswFlags) -> i32 {
     let sp = [3, 5, 7, 10];
     let z = if flag.contains(KswFlags::SPLICE_REV) {
         if donor {

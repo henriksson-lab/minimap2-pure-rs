@@ -77,14 +77,14 @@ bitflags! {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum CigarOp {
-    Match     = 0, // M
-    Ins       = 1, // I
-    Del       = 2, // D
-    NSkip     = 3, // N
-    SoftClip  = 4, // S
-    HardClip  = 5, // H
-    Padding   = 6, // P
-    EqMatch   = 7, // =
+    Match = 0,     // M
+    Ins = 1,       // I
+    Del = 2,       // D
+    NSkip = 3,     // N
+    SoftClip = 4,  // S
+    HardClip = 5,  // H
+    Padding = 6,   // P
+    EqMatch = 7,   // =
     XMismatch = 8, // X
 }
 
@@ -126,11 +126,11 @@ bitflags! {
 
 /// Seed flags packed into the y field of Mm128. Mirrors MM_SEED_* from mmpriv.h.
 pub const SEED_LONG_JOIN: u64 = 1 << 40;
-pub const SEED_IGNORE: u64    = 1 << 41;
-pub const SEED_TANDEM: u64    = 1 << 42;
-pub const SEED_SELF: u64      = 1 << 43;
+pub const SEED_IGNORE: u64 = 1 << 41;
+pub const SEED_TANDEM: u64 = 1 << 42;
+pub const SEED_SELF: u64 = 1 << 43;
 pub const SEED_SEG_SHIFT: u32 = 48;
-pub const SEED_SEG_MASK: u64  = 0xff << SEED_SEG_SHIFT;
+pub const SEED_SEG_MASK: u64 = 0xff << SEED_SEG_SHIFT;
 
 #[cfg(test)]
 mod tests {

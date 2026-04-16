@@ -1,5 +1,5 @@
-use std::io::{self, BufRead, Read};
 use flate2::read::GzDecoder;
+use std::io::{self, BufRead, Read};
 
 /// A single sequence record from FASTA/FASTQ.
 #[derive(Clone, Debug)]
@@ -125,7 +125,13 @@ impl BseqFile {
             };
 
             let l_seq = seq.len();
-            Ok(Some(BseqRecord { name, seq, qual, comment, l_seq }))
+            Ok(Some(BseqRecord {
+                name,
+                seq,
+                qual,
+                comment,
+                l_seq,
+            }))
         } else {
             // FASTA: multi-line sequence until next > or EOF
             let mut seq = Vec::new();
@@ -146,7 +152,13 @@ impl BseqFile {
                 seq.extend_from_slice(&line_bytes);
             }
             let l_seq = seq.len();
-            Ok(Some(BseqRecord { name, seq, qual: Vec::new(), comment, l_seq }))
+            Ok(Some(BseqRecord {
+                name,
+                seq,
+                qual: Vec::new(),
+                comment,
+                l_seq,
+            }))
         }
     }
 
