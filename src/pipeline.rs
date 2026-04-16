@@ -561,8 +561,10 @@ fn map_fragment_results(
     if results.len() == 2 {
         let (left, right) = results.split_at_mut(1);
         if used_split_refs {
-            pair_results_preserve_parents(
+            let split_merge_gap = right[0].frag_gap;
+            pair_results_with_gap(
                 opt,
+                split_merge_gap,
                 frag.records[0].l_seq as i32,
                 frag.records[1].l_seq as i32,
                 &mut left[0],
@@ -731,7 +733,7 @@ fn map_split_query(
             let record = SplitQueryRecord {
                 n_reg: result.regs.len() as i32,
                 rep_len: result.rep_len,
-                frag_gap: part_opt.max_frag_len.max(part_opt.max_gap),
+                frag_gap: result.frag_gap,
                 regs: result.regs,
             };
             let mut buf = Vec::new();
@@ -782,7 +784,7 @@ fn map_split_fragment_queries(
             let record = SplitQueryRecord {
                 n_reg: result.regs.len() as i32,
                 rep_len: result.rep_len,
-                frag_gap: part_opt.max_frag_len.max(part_opt.max_gap),
+                frag_gap: result.frag_gap,
                 regs: result.regs,
             };
             let mut buf = Vec::new();
@@ -989,8 +991,10 @@ pub fn map_file_interleaved_pe_sam_split(
                     let mut res2 = frag_results.remove(0);
                     restore_pair_orientation(&mut res1, rec1.l_seq as i32, rev1);
                     restore_pair_orientation(&mut res2, rec2.l_seq as i32, rev2);
-                    pair_results(
+                    let split_merge_gap = res2.frag_gap;
+                    pair_results_with_gap(
                         opt,
+                        split_merge_gap,
                         rec1.l_seq as i32,
                         rec2.l_seq as i32,
                         &mut res1,
@@ -1225,8 +1229,10 @@ pub fn map_file_pe_sam_split(
                     let mut res2 = frag_results.remove(0);
                     restore_pair_orientation(&mut res1, rec1.l_seq as i32, rev1);
                     restore_pair_orientation(&mut res2, rec2.l_seq as i32, rev2);
-                    pair_results(
+                    let split_merge_gap = res2.frag_gap;
+                    pair_results_with_gap(
                         opt,
+                        split_merge_gap,
                         rec1.l_seq as i32,
                         rec2.l_seq as i32,
                         &mut res1,
@@ -1275,6 +1281,24 @@ fn pair_results(
     res1: &mut map::MapResult,
     res2: &mut map::MapResult,
 ) {
+    pair_results_with_gap(
+        opt,
+        res1.frag_gap.max(res2.frag_gap),
+        qlen1,
+        qlen2,
+        res1,
+        res2,
+    );
+}
+
+fn pair_results_with_gap(
+    opt: &MapOpt,
+    max_gap_ref: i32,
+    qlen1: i32,
+    qlen2: i32,
+    res1: &mut map::MapResult,
+    res2: &mut map::MapResult,
+) {
     if !res1.regs.is_empty()
         && !res2.regs.is_empty()
         && res1.regs[0].extra.is_some()
@@ -1287,7 +1311,7 @@ fn pair_results(
             std::mem::take(&mut res2.regs),
         ];
         pe::pair(
-            res1.frag_gap.max(res2.frag_gap),
+            max_gap_ref,
             opt.pe_bonus,
             opt.a * 2 + opt.b,
             opt.a,
@@ -1297,24 +1321,6 @@ fn pair_results(
         );
         res1.regs = regs_pair[0].clone();
         res2.regs = regs_pair[1].clone();
-    }
-}
-
-fn pair_results_preserve_parents(
-    opt: &MapOpt,
-    qlen1: i32,
-    qlen2: i32,
-    res1: &mut map::MapResult,
-    res2: &mut map::MapResult,
-) {
-    let parents1: Vec<i32> = res1.regs.iter().map(|r| r.parent).collect();
-    let parents2: Vec<i32> = res2.regs.iter().map(|r| r.parent).collect();
-    pair_results(opt, qlen1, qlen2, res1, res2);
-    for (r, parent) in res1.regs.iter_mut().zip(parents1) {
-        r.parent = parent;
-    }
-    for (r, parent) in res2.regs.iter_mut().zip(parents2) {
-        r.parent = parent;
     }
 }
 
@@ -1677,8 +1683,10 @@ pub fn map_file_pe_paf_split(
                     let mut res2 = frag_results.remove(0);
                     restore_pair_orientation(&mut res1, rec1.l_seq as i32, rev1);
                     restore_pair_orientation(&mut res2, rec2.l_seq as i32, rev2);
-                    pair_results_preserve_parents(
+                    let split_merge_gap = res2.frag_gap;
+                    pair_results_with_gap(
                         opt,
+                        split_merge_gap,
                         rec1.l_seq as i32,
                         rec2.l_seq as i32,
                         &mut res1,
@@ -1774,8 +1782,10 @@ pub fn map_file_interleaved_pe_paf_split(
                     let mut res2 = frag_results.remove(0);
                     restore_pair_orientation(&mut res1, rec1.l_seq as i32, rev1);
                     restore_pair_orientation(&mut res2, rec2.l_seq as i32, rev2);
-                    pair_results_preserve_parents(
+                    let split_merge_gap = res2.frag_gap;
+                    pair_results_with_gap(
                         opt,
+                        split_merge_gap,
                         rec1.l_seq as i32,
                         rec2.l_seq as i32,
                         &mut res1,

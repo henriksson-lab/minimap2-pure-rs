@@ -297,9 +297,11 @@ behavior:
 - **Split-index mapping is implemented for tested CLI paths.** `--split-prefix`
   maps single-end, grouped fragment, and two-file paired-end reads through split
   index parts and merges per-query hits. Compatibility has been validated on
-  local fixtures and the E. coli SRR13321180 paired short-read sample in both
-  PAF and SAM with forced `-I 500k --split-prefix`, but not at the scale of
-  upstream production split-index runs.
+  local fixtures and the full 587,760-pair E. coli SRR13321180 short-read
+  sample in both PAF and SAM with forced `-I 500k --split-prefix`, including
+  C-style split-record `frag_gap` handling and post-merge paired-end MAPQ/flag
+  behavior. It has not been validated at the scale of upstream production
+  split-index runs.
 - **Short-read paired-end real-data conformance is covered for one full E. coli
   sample.** High-occurrence re-chaining, paired-end heap-sort ordering, radix
   tie behavior, MAPQ, `cm`, `s1`/`s2`, short-read `ms:i` scoring,
@@ -338,6 +340,9 @@ scripts/conformance_matrix.py scripts/conformance_manifest.local.tsv
 # Minimal public paired-end dataset setup
 N_PAIRS=50000 scripts/prepare_minimal_conformance_data.sh
 scripts/conformance_matrix.py data/conformance/ecoli_srr13321180/conformance_manifest.tsv
+
+# Full local E. coli short-read and forced split-index validation, if raw FASTQs are present
+scripts/conformance_matrix.py data/conformance/ecoli_srr13321180/conformance_full_manifest.tsv
 
 # All tests
 cargo test --all

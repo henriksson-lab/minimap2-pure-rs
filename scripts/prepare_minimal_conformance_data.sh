@@ -11,6 +11,7 @@ REF_FA="$OUT_DIR/ref/ecoli_k12_mg1655.fa"
 RAW_DIR="$OUT_DIR/raw"
 SUBSET_DIR="$OUT_DIR/subset"
 MANIFEST="$OUT_DIR/conformance_manifest.tsv"
+FULL_MANIFEST="$OUT_DIR/conformance_full_manifest.tsv"
 
 need() {
     command -v "$1" >/dev/null 2>&1 || {
@@ -19,26 +20,26 @@ need() {
     }
 }
 
-need curl
-need gzip
-need prefetch
-need fasterq-dump
-need seqtk
-
 mkdir -p "$OUT_DIR/ref" "$RAW_DIR" "$SUBSET_DIR"
 
 if [[ ! -s "$REF_FA" ]]; then
+    need curl
+    need gzip
     echo "[prepare] downloading E. coli K-12 MG1655 reference"
     curl -L --fail --retry 3 -o "$REF_GZ" "$REF_URL"
     gzip -cd "$REF_GZ" > "$REF_FA"
 fi
 
 if [[ ! -s "$RAW_DIR/${SRA_RUN}_1.fastq" || ! -s "$RAW_DIR/${SRA_RUN}_2.fastq" ]]; then
+    need prefetch
+    need fasterq-dump
     echo "[prepare] downloading $SRA_RUN with prefetch"
     prefetch "$SRA_RUN" --output-directory "$RAW_DIR"
     echo "[prepare] converting $SRA_RUN to split FASTQ"
     fasterq-dump "$RAW_DIR/$SRA_RUN" --split-files --outdir "$RAW_DIR" --threads "${THREADS:-4}"
 fi
+
+need seqtk
 
 R1="$SUBSET_DIR/${SRA_RUN}.first${N_PAIRS}_1.fq"
 R2="$SUBSET_DIR/${SRA_RUN}.first${N_PAIRS}_2.fq"
@@ -63,5 +64,16 @@ SplitIndex	E coli SRR13321180 ${N_PAIRS} pairs split PAF	paf	-x sr -c -I 500k --
 SplitIndex	E coli SRR13321180 ${N_PAIRS} pairs split SAM	sam-core	-x sr -a -I 500k --split-prefix /tmp/mm2rs-conf-ecoli-split $REF_ARG $R1_ARG $R2_ARG
 EOF
 
+RAW_R1_ARG="$(relpath "$RAW_DIR/${SRA_RUN}_1.fastq")"
+RAW_R2_ARG="$(relpath "$RAW_DIR/${SRA_RUN}_2.fastq")"
+cat > "$FULL_MANIFEST" <<EOF
+ShortReadFull	E coli SRR13321180 full pairs PAF	paf	-x sr -c $REF_ARG $RAW_R1_ARG $RAW_R2_ARG
+ShortReadFull	E coli SRR13321180 full pairs SAM	sam-core	-x sr -a $REF_ARG $RAW_R1_ARG $RAW_R2_ARG
+SplitIndexFull	E coli SRR13321180 full pairs split PAF	paf	-x sr -c -I 500k --split-prefix /tmp/mm2rs-conf-ecoli-full-split $REF_ARG $RAW_R1_ARG $RAW_R2_ARG
+SplitIndexFull	E coli SRR13321180 full pairs split SAM	sam-core	-x sr -a -I 500k --split-prefix /tmp/mm2rs-conf-ecoli-full-split $REF_ARG $RAW_R1_ARG $RAW_R2_ARG
+EOF
+
 echo "[prepare] wrote $MANIFEST"
+echo "[prepare] wrote $FULL_MANIFEST"
 echo "[prepare] run: scripts/conformance_matrix.py $MANIFEST"
+echo "[prepare] full-data run: scripts/conformance_matrix.py $FULL_MANIFEST"
