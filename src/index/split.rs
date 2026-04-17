@@ -129,7 +129,8 @@ pub fn merge_split_query_records(
     qlen: i32,
 ) -> SplitQueryRecord {
     let mut merged = SplitQueryRecord::default();
-    merged.rep_len = records.iter().map(|r| r.rep_len).max().unwrap_or(0);
+    let rep_len_for_mapq = records.iter().map(|r| r.rep_len).max().unwrap_or(0);
+    merged.rep_len = 0;
     merged.frag_gap = records.first().map(|r| r.frag_gap).unwrap_or(0);
     for (part, record) in records.iter().enumerate() {
         let rid_shift = rid_shifts.get(part).copied().unwrap_or(0) as i32;
@@ -170,7 +171,7 @@ pub fn merge_split_query_records(
         &mut merged.regs,
         opt.min_chain_score,
         opt.a,
-        merged.rep_len,
+        rep_len_for_mapq,
         opt.flag.intersects(MapFlags::SR | MapFlags::SR_RNA),
         opt.flag.contains(MapFlags::SPLICE),
     );
@@ -453,7 +454,7 @@ mod tests {
         let merged = merge_split_query_records(&records, &[0, 5], &opt, 15, 100);
 
         assert_eq!(merged.n_reg, 2);
-        assert_eq!(merged.rep_len, 7);
+        assert_eq!(merged.rep_len, 0);
         assert!(merged.regs.iter().any(|r| r.rid == 5));
         assert_eq!(merged.regs[0].id, 0);
         assert!(merged.regs[0].mapq <= 60);

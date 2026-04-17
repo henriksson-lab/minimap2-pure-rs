@@ -208,7 +208,7 @@ pub fn write_sam_record_with_comment(
         write!(
             s,
             "\tNM:i:{}\tms:i:{}\tAS:i:{}\tnn:i:{}",
-            nm, p.dp_max, p.dp_score, p.n_ambi
+            nm, p.dp_max0, p.dp_score, p.n_ambi
         )
         .unwrap();
         if r.is_spliced && (p.trans_strand == 1 || p.trans_strand == 2) {

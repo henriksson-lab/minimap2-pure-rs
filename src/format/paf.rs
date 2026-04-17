@@ -43,7 +43,7 @@ fn write_tags(s: &mut String, r: &AlignReg) {
         write!(
             s,
             "\tNM:i:{}\tms:i:{}\tAS:i:{}\tnn:i:{}",
-            nm, p.dp_max, p.dp_score, p.n_ambi
+            nm, p.dp_max0, p.dp_score, p.n_ambi
         )
         .unwrap();
         if p.trans_strand == 1 || p.trans_strand == 2 {

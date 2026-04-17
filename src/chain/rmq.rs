@@ -38,8 +38,8 @@ impl RmqTree {
     /// Find the element with minimum priority (most negative = best score)
     /// in the range y ∈ [lo_y, hi_y].
     fn rmq(&self, lo_y: i32, hi_y: i32) -> Option<(i32, i64)> {
-        let lo_key = (lo_y, i64::MIN);
-        let hi_key = (hi_y, i64::MAX);
+        let lo_key = (lo_y, i32::MAX as i64);
+        let hi_key = (hi_y, 0);
         let mut best_pri = f64::MAX;
         let mut best: Option<(i32, i64)> = None;
         for (&(y, i), &pri) in self.tree.range(lo_key..=hi_key) {

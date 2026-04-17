@@ -1051,8 +1051,38 @@ fn splice_signal_penalty_at(
 
 fn splice_complex_signal_penalty_at(target: &[u8], pos: usize, donor: bool, flag: KswFlags) -> i32 {
     let sp = [3, 5, 7, 10];
-    let z = if flag.contains(KswFlags::SPLICE_REV) {
-        if donor {
+    let rev_cigar = flag.contains(KswFlags::REV_CIGAR);
+    let splice_rev = flag.contains(KswFlags::SPLICE_REV);
+    let z = match (rev_cigar, splice_rev, donor) {
+        (false, false, true) => {
+            if pos + 2 < target.len() && target[pos] == 2 && target[pos + 1] == 3 {
+                if target[pos + 2] == 0 || target[pos + 2] == 2 {
+                    -1
+                } else {
+                    0
+                }
+            } else if pos + 1 < target.len() && target[pos] == 2 && target[pos + 1] == 1 {
+                1
+            } else if pos + 1 < target.len() && target[pos] == 0 && target[pos + 1] == 3 {
+                2
+            } else {
+                3
+            }
+        }
+        (false, false, false) => {
+            if pos >= 3 && target[pos - 2] == 0 && target[pos - 1] == 2 {
+                if target[pos - 3] == 1 || target[pos - 3] == 3 {
+                    -1
+                } else {
+                    0
+                }
+            } else if pos >= 2 && target[pos - 2] == 0 && target[pos - 1] == 1 {
+                2
+            } else {
+                3
+            }
+        }
+        (false, true, true) => {
             if pos + 2 < target.len() && target[pos] == 1 && target[pos + 1] == 3 {
                 if target[pos + 2] == 0 || target[pos + 2] == 2 {
                     -1
@@ -1064,51 +1094,78 @@ fn splice_complex_signal_penalty_at(target: &[u8], pos: usize, donor: bool, flag
             } else {
                 3
             }
-        } else if pos >= 3 {
-            if target[pos - 2] == 0 && target[pos - 1] == 1 {
+        }
+        (false, true, false) => {
+            if pos >= 3 && target[pos - 2] == 0 && target[pos - 1] == 1 {
                 if target[pos - 3] == 1 || target[pos - 3] == 3 {
                     -1
                 } else {
                     0
                 }
-            } else if target[pos - 2] == 2 && target[pos - 1] == 1 {
+            } else if pos >= 2 && target[pos - 2] == 2 && target[pos - 1] == 1 {
                 1
-            } else if target[pos - 2] == 0 && target[pos - 1] == 3 {
+            } else if pos >= 2 && target[pos - 2] == 0 && target[pos - 1] == 3 {
                 2
             } else {
                 3
             }
-        } else {
-            3
         }
-    } else if donor {
-        if pos + 2 < target.len() && target[pos] == 2 && target[pos + 1] == 3 {
-            if target[pos + 2] == 0 || target[pos + 2] == 2 {
-                -1
+        (true, false, true) => {
+            if pos + 2 < target.len() && target[pos] == 2 && target[pos + 1] == 0 {
+                if target[pos + 2] == 1 || target[pos + 2] == 3 {
+                    -1
+                } else {
+                    0
+                }
+            } else if pos + 1 < target.len() && target[pos] == 1 && target[pos + 1] == 0 {
+                2
             } else {
-                0
+                3
             }
-        } else if pos + 1 < target.len() && target[pos] == 2 && target[pos + 1] == 1 {
-            1
-        } else if pos + 1 < target.len() && target[pos] == 0 && target[pos + 1] == 3 {
-            2
-        } else {
-            3
         }
-    } else if pos >= 3 {
-        if target[pos - 2] == 0 && target[pos - 1] == 2 {
-            if target[pos - 3] == 1 || target[pos - 3] == 3 {
-                -1
+        (true, false, false) => {
+            if pos >= 3 && target[pos - 2] == 3 && target[pos - 1] == 2 {
+                if target[pos - 3] == 0 || target[pos - 3] == 2 {
+                    -1
+                } else {
+                    0
+                }
+            } else if pos >= 2 && target[pos - 2] == 1 && target[pos - 1] == 2 {
+                1
+            } else if pos >= 2 && target[pos - 2] == 3 && target[pos - 1] == 0 {
+                2
             } else {
-                0
+                3
             }
-        } else if target[pos - 2] == 0 && target[pos - 1] == 1 {
-            2
-        } else {
-            3
         }
-    } else {
-        3
+        (true, true, true) => {
+            if pos + 2 < target.len() && target[pos] == 1 && target[pos + 1] == 0 {
+                if target[pos + 2] == 1 || target[pos + 2] == 3 {
+                    -1
+                } else {
+                    0
+                }
+            } else if pos + 1 < target.len() && target[pos] == 1 && target[pos + 1] == 2 {
+                1
+            } else if pos + 1 < target.len() && target[pos] == 3 && target[pos + 1] == 0 {
+                2
+            } else {
+                3
+            }
+        }
+        (true, true, false) => {
+            if pos >= 3 && target[pos - 2] == 3 && target[pos - 1] == 1 {
+                if target[pos - 3] == 0 || target[pos - 3] == 2 {
+                    -1
+                } else {
+                    0
+                }
+            } else if pos >= 2 && target[pos - 2] == 3 && target[pos - 1] == 2 {
+                2
+            } else {
+                3
+            }
+        }
     };
     if z < 0 {
         0

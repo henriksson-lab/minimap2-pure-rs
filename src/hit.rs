@@ -117,7 +117,8 @@ pub fn split_reg(
     r2.extra = None;
     r2.split_inv = false;
     r2.cnt = r.cnt - n;
-    r2.score = (r.score as f32 * (r2.cnt as f32 / r.cnt as f32) + 0.499) as i32;
+    let split_score = r.score as f32 * (r2.cnt as f32 / r.cnt as f32);
+    r2.score = (split_score as f64 + 0.499) as i32;
     r2.as_ = r.as_ + n;
     if r.parent == r.id {
         r2.parent = PARENT_TMP_PRI;
@@ -411,8 +412,26 @@ pub fn update_dp_max(qlen: i32, regs: &mut [AlignReg], frac: f32, a: i32, b: i32
         return;
     }
 
-    let identity = if regs[mi].blen > 0 {
-        regs[mi].mlen as f64 / regs[mi].blen as f64
+    let (mut best_gap_len, mut best_gap_open) = (0i32, 0i32);
+    if let Some(ref p) = regs[mi].extra {
+        for &c in &p.cigar.0 {
+            let op = c & 0xf;
+            if op == 1 || op == 2 {
+                best_gap_open += 1;
+                best_gap_len += (c >> 4) as i32;
+            }
+        }
+    }
+    let identity_den = regs[mi].blen
+        + regs[mi]
+            .extra
+            .as_ref()
+            .map(|p| p.n_ambi as i32)
+            .unwrap_or(0)
+        - best_gap_len
+        + best_gap_open;
+    let identity = if identity_den > 0 {
+        regs[mi].mlen as f64 / identity_den as f64
     } else {
         1.0
     };
@@ -421,7 +440,7 @@ pub fn update_dp_max(qlen: i32, regs: &mut [AlignReg], frac: f32, a: i32, b: i32
         div = 0.02;
     }
     let mut b2 = 0.5 / div;
-    if b2 * a as f64 > b as f64 {
+    if b2 * (a as f64) < b as f64 {
         b2 = a as f64 / b as f64;
     }
 
@@ -448,6 +467,18 @@ pub fn update_dp_max(qlen: i32, regs: &mut [AlignReg], frac: f32, a: i32, b: i32
 
 /// Filter secondary hits. Matches mm_select_sub().
 pub fn select_sub(pri_ratio: f32, min_diff: i32, best_n: i32, regs: &mut Vec<AlignReg>) {
+    select_sub_with_strand(pri_ratio, min_diff, best_n, false, 0, regs);
+}
+
+/// Filter secondary hits, optionally retaining opposite-strand chains before est_err filtering.
+pub fn select_sub_with_strand(
+    pri_ratio: f32,
+    min_diff: i32,
+    best_n: i32,
+    check_strand: bool,
+    min_strand_sc: i32,
+    regs: &mut Vec<AlignReg>,
+) {
     if pri_ratio <= 0.0 || regs.is_empty() {
         return;
     }
@@ -474,6 +505,15 @@ pub fn select_sub(pri_ratio: f32, min_diff: i32, best_n: i32, regs: &mut Vec<Ali
                 to_keep = true;
                 n_2nd += 1;
             }
+        } else if check_strand
+            && p < regs.len()
+            && n_2nd < best_n
+            && regs[i].score > min_strand_sc
+            && regs[i].rev != regs[p].rev
+        {
+            regs[i].strand_retained = true;
+            to_keep = true;
+            n_2nd += 1;
         }
         if to_keep {
             if k != i {
@@ -487,6 +527,26 @@ pub fn select_sub(pri_ratio: f32, min_diff: i32, best_n: i32, regs: &mut Vec<Ali
     if changed {
         sync_regs(regs);
     }
+}
+
+/// Drop retained opposite-strand chains that are too divergent. Matches mm_filter_strand_retained().
+pub fn filter_strand_retained(regs: &mut Vec<AlignReg>) {
+    let n = regs.len();
+    let mut k = 0usize;
+    for i in 0..n {
+        let p = regs[i].parent as usize;
+        let keep = !regs[i].strand_retained
+            || p >= regs.len()
+            || regs[i].div < regs[p].div * 5.0
+            || regs[i].div < 0.01;
+        if keep {
+            if k != i {
+                regs[k] = regs[i].clone();
+            }
+            k += 1;
+        }
+    }
+    regs.truncate(k);
 }
 
 /// Filter regions by quality. Matches mm_filter_regs().
@@ -613,6 +673,33 @@ pub fn set_mapq(
             r.mapq = 0;
         }
     }
+    set_inv_mapq(regs);
+}
+
+fn set_inv_mapq(regs: &mut [AlignReg]) {
+    if regs.len() < 3 || !regs.iter().any(|r| r.inv) {
+        return;
+    }
+    let mut aux: Vec<(i32, i32, usize)> = regs
+        .iter()
+        .enumerate()
+        .filter_map(|(i, r)| {
+            if r.parent == r.id || r.parent < 0 {
+                Some((r.rid, r.rs, i))
+            } else {
+                None
+            }
+        })
+        .collect();
+    aux.sort_unstable_by_key(|&(rid, rs, _)| (rid, rs));
+    for i in 1..aux.len().saturating_sub(1) {
+        let inv_idx = aux[i].2;
+        if regs[inv_idx].inv {
+            let left_idx = aux[i - 1].2;
+            let right_idx = aux[i + 1].2;
+            regs[inv_idx].mapq = regs[left_idx].mapq.min(regs[right_idx].mapq);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -689,6 +776,36 @@ mod tests {
         set_parent(0.5, i32::MAX, &mut regs, 0, false, 0.15);
         set_mapq(&mut regs, 40, 2, 0, false, false);
         assert!(regs[0].mapq > 0);
+    }
+
+    #[test]
+    fn test_set_inv_mapq_copies_neighbor_minimum() {
+        let mut left = AlignReg::default();
+        left.id = 0;
+        left.parent = 0;
+        left.rid = 0;
+        left.rs = 100;
+        left.mapq = 60;
+
+        let mut inv = AlignReg::default();
+        inv.id = 1;
+        inv.parent = PARENT_UNSET;
+        inv.inv = true;
+        inv.rid = 0;
+        inv.rs = 200;
+        inv.mapq = 0;
+
+        let mut right = AlignReg::default();
+        right.id = 2;
+        right.parent = 2;
+        right.rid = 0;
+        right.rs = 300;
+        right.mapq = 42;
+
+        let mut regs = vec![right, inv, left];
+        set_inv_mapq(&mut regs);
+        let inv = regs.iter().find(|r| r.inv).unwrap();
+        assert_eq!(inv.mapq, 42);
     }
 
     #[test]

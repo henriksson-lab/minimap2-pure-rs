@@ -156,7 +156,7 @@ fn fix_cigar(cigar: &mut Vec<u32>, qseq: &[u8], tseq: &[u8]) -> (i32, i32) {
     while k + 2 < cigar.len() {
         let op0 = cigar[k] & 0xf;
         let op1 = cigar[k + 1] & 0xf;
-        if op0 > 0 && op0 + op1 == 3 {
+        if (op0 == 1 || op0 == 2) && op0 + op1 == 3 {
             let mut l = k;
             let mut ins = 0u32;
             let mut del = 0u32;
@@ -242,21 +242,35 @@ fn do_align(
     zdrop: i32,
     end_bonus: i32,
     flag: KswFlags,
+    rev: bool,
+    splice_strand: crate::flags::MapFlags,
 ) -> KswResult {
     if qsub.is_empty() || tsub.is_empty() {
         return KswResult::new();
     }
+    if opt.max_sw_mat > 0 && (qsub.len() as i64).saturating_mul(tsub.len() as i64) > opt.max_sw_mat
+    {
+        let mut ez = KswResult::new();
+        ez.zdropped = true;
+        return ez;
+    }
     if opt.flag.contains(crate::flags::MapFlags::SPLICE) {
         let mut splice_flag = flag;
-        if opt.flag.contains(crate::flags::MapFlags::SPLICE_FOR)
-            && !opt.flag.contains(crate::flags::MapFlags::SPLICE_REV)
-        {
-            splice_flag |= KswFlags::SPLICE_FOR;
-        } else if opt.flag.contains(crate::flags::MapFlags::SPLICE_REV)
-            && !opt.flag.contains(crate::flags::MapFlags::SPLICE_FOR)
-        {
-            splice_flag |= KswFlags::SPLICE_REV;
-        } else {
+        if splice_strand.contains(crate::flags::MapFlags::SPLICE_FOR) {
+            splice_flag |= if rev {
+                KswFlags::SPLICE_REV
+            } else {
+                KswFlags::SPLICE_FOR
+            };
+        }
+        if splice_strand.contains(crate::flags::MapFlags::SPLICE_REV) {
+            splice_flag |= if rev {
+                KswFlags::SPLICE_FOR
+            } else {
+                KswFlags::SPLICE_REV
+            };
+        }
+        if !splice_flag.intersects(KswFlags::SPLICE_FOR | KswFlags::SPLICE_REV) {
             splice_flag |= KswFlags::SPLICE_FOR;
         }
         if opt.flag.contains(crate::flags::MapFlags::SPLICE_FLANK) {
@@ -265,16 +279,26 @@ fn do_align(
         if !opt.flag.contains(crate::flags::MapFlags::SPLICE_OLD) {
             splice_flag |= KswFlags::SPLICE_CMPLX;
         }
-        if flag.contains(KswFlags::REV_CIGAR) {
-            if splice_flag.contains(KswFlags::SPLICE_FOR) {
-                splice_flag.remove(KswFlags::SPLICE_FOR);
-                splice_flag |= KswFlags::SPLICE_REV;
-            } else if splice_flag.contains(KswFlags::SPLICE_REV) {
-                splice_flag.remove(KswFlags::SPLICE_REV);
-                splice_flag |= KswFlags::SPLICE_FOR;
-            }
+        let dual_ez = || {
+            align_pair_dual(
+                qsub,
+                tsub,
+                5,
+                mat,
+                opt.q as i8,
+                opt.e as i8,
+                opt.q2 as i8,
+                opt.e2 as i8,
+                bw,
+                zdrop,
+                end_bonus,
+                flag,
+            )
+        };
+        if flag.contains(KswFlags::EXTZ_ONLY) && rev {
+            return dual_ez();
         }
-        return ksw2::ksw_exts2(
+        let splice_ez = ksw2::ksw_exts2(
             qsub,
             tsub,
             5,
@@ -288,6 +312,15 @@ fn do_align(
             end_bonus,
             splice_flag,
         );
+        return if splice_ez
+            .cigar
+            .iter()
+            .any(|&c| (c & 0xf) == CigarOp::NSkip as u32)
+        {
+            splice_ez
+        } else {
+            dual_ez()
+        };
     }
     if opt.q == opt.q2 && opt.e == opt.e2 {
         align_pair(
@@ -793,6 +826,7 @@ fn align1(
     r: &mut AlignReg,
     a: &mut [Mm128],
     mat: &[i8],
+    splice_strand: crate::flags::MapFlags,
 ) -> Vec<AlignReg> {
     let mut split_regs: Vec<AlignReg> = Vec::new();
     if r.cnt == 0 {
@@ -839,12 +873,7 @@ fn align1(
         )
     } else {
         let (rs, qs) = adjust_minier(mi, qseq_fwd, qseq_rev, &a[as1], k_half, is_hpc);
-        let (re, qe) = if is_hpc {
-            adjust_minier(mi, qseq_fwd, qseq_rev, &a[as1 + cnt1 - 1], k_half, true)
-        } else {
-            let last = &a[as1 + cnt1 - 1];
-            ((last.x as i32) + 1, (last.y as i32) + 1)
-        };
+        let (re, qe) = adjust_minier(mi, qseq_fwd, qseq_rev, &a[as1 + cnt1 - 1], k_half, is_hpc);
         (rs, qs, re, qe)
     };
 
@@ -877,13 +906,104 @@ fn align1(
         let re0 = (re + l).min(ref_len);
         (rs0, qs0, re0, qe0)
     } else {
-        let flank_l = qs.min(rs).min(opt.max_gap);
-        let rs0 = (rs - flank_l).max(0);
-        let qs0 = (qs - flank_l).max(0);
-        let flank_r = (qlen - qe).min(ref_len - re).min(opt.max_gap);
-        let re0 = (re + flank_r).min(ref_len);
-        let qe0 = (qe + flank_r).min(qlen);
-        (rs0, qs0, re0, qe0)
+        let first_raw = &a[raw_as];
+        let q_span_l = ((first_raw.y >> 32) & 0xff) as i32;
+        let mut rs0 = (first_raw.x as i32) + 1 - q_span_l;
+        let mut qs0 = (first_raw.y as i32) + 1 - q_span_l;
+        if rs0 < 0 {
+            rs0 = 0;
+        }
+        let mut rs_bound = 0;
+        let mut qs_bound = 0;
+        let chain_key = first_raw.x >> 32;
+        let mut i = raw_as;
+        let mut n_seen = 0;
+        while i > 0 {
+            i -= 1;
+            if (a[i].x >> 32) != chain_key {
+                break;
+            }
+            let q_span = ((a[i].y >> 32) & 0xff) as i32;
+            let x = (a[i].x as i32) + 1 - q_span;
+            let y = (a[i].y as i32) + 1 - q_span;
+            if x < rs0 && y < qs0 {
+                n_seen += 1;
+                if n_seen > opt.min_cnt {
+                    let l = (rs0 - x).max(qs0 - y);
+                    rs_bound = (rs0 - l).max(0);
+                    qs_bound = qs0 - l;
+                    break;
+                }
+            }
+        }
+        if qs > 0 && rs > 0 {
+            let mut l = qs.min(opt.max_gap);
+            qs_bound = qs_bound.max(qs - l);
+            qs0 = qs0.min(qs_bound);
+            if l * opt.a > opt.q {
+                l += (l * opt.a - opt.q) / opt.e;
+            }
+            l = l.min(opt.max_gap).min(rs);
+            rs_bound = rs_bound.max(rs - l);
+            rs0 = rs0.min(rs_bound).min(rs);
+        } else {
+            rs0 = rs;
+            qs0 = qs;
+        }
+
+        let last_raw = &a[raw_as + raw_cnt - 1];
+        let mut re0 = (last_raw.x as i32) + 1;
+        let mut qe0 = (last_raw.y as i32) + 1;
+        let mut re_bound = ref_len;
+        let mut qe_bound = qlen;
+        let mut n_seen = 0;
+        i = raw_as + raw_cnt;
+        while i < a.len() && (a[i].x >> 32) == chain_key {
+            let x = (a[i].x as i32) + 1;
+            let y = (a[i].y as i32) + 1;
+            if x > re0 && y > qe0 {
+                n_seen += 1;
+                if n_seen > opt.min_cnt {
+                    let l = (x - re0).max(y - qe0);
+                    re_bound = re0 + l;
+                    qe_bound = qe0 + l;
+                    break;
+                }
+            }
+            i += 1;
+        }
+        if qe < qlen && re < ref_len {
+            let mut l = (qlen - qe).min(opt.max_gap);
+            qe_bound = qe_bound.min(qe + l);
+            qe0 = qe0.max(qe_bound);
+            if l * opt.a > opt.q {
+                l += (l * opt.a - opt.q) / opt.e;
+            }
+            l = l.min(opt.max_gap).min(ref_len - re);
+            re_bound = re_bound.min(re + l);
+            re0 = re0.max(re_bound);
+        } else {
+            re0 = re;
+            qe0 = qe;
+        }
+
+        if (first_raw.y & crate::flags::SEED_SELF) != 0 {
+            let max_ext = (r.qs - r.rs).abs();
+            if r.rs - rs0 > max_ext {
+                rs0 = r.rs - max_ext;
+            }
+            if r.qs - qs0 > max_ext {
+                qs0 = r.qs - max_ext;
+            }
+            let max_ext = (r.qe - r.re).abs();
+            if re0 - r.re > max_ext {
+                re0 = r.re + max_ext;
+            }
+            if qe0 - r.qe > max_ext {
+                qe0 = r.qe + max_ext;
+            }
+        }
+        (rs0.max(0), qs0.max(0), re0.min(ref_len), qe0.min(qlen))
     };
 
     if re0 <= rs0 || qe0 <= qs0 {
@@ -947,6 +1067,8 @@ fn align1(
                 opt.zdrop,
                 opt.end_bonus,
                 KswFlags::EXTZ_ONLY | KswFlags::RIGHT | KswFlags::REV_CIGAR,
+                rev,
+                splice_strand,
             );
             let sr_zdrop_like_tail = is_sr
                 && opt.zdrop >= 0
@@ -1140,6 +1262,8 @@ fn align1(
                             opt.zdrop,
                             -1,
                             KswFlags::APPROX_MAX,
+                            rev,
+                            splice_strand,
                         )
                     }
                 } else {
@@ -1152,12 +1276,16 @@ fn align1(
                         opt.zdrop,
                         -1,
                         KswFlags::APPROX_MAX,
+                        rev,
+                        splice_strand,
                     )
                 };
 
-                // Test z-drop and potential inversion
+                // Test z-drop and potential inversion. Keep the first-pass classification
+                // for split metadata, matching C's mm_align1().
+                let mut zdrop_code = 0;
                 if !ungapped_cigar && !ez.cigar.is_empty() {
-                    let zdrop_code = test_zdrop(opt, qsub, &tseq_buf[..gap_tlen], &ez.cigar, mat);
+                    zdrop_code = test_zdrop(opt, qsub, &tseq_buf[..gap_tlen], &ez.cigar, mat);
                     if zdrop_code > 0 {
                         // Second pass: re-align with exact z-drop (use zdrop_inv for inversions)
                         // Note: APPROX_MAX is intentionally NOT set here (matching C's "lift approximate")
@@ -1176,6 +1304,8 @@ fn align1(
                             zdrop2,
                             -1,
                             KswFlags::empty(),
+                            rev,
+                            splice_strand,
                         );
                     }
                 }
@@ -1214,9 +1344,7 @@ fn align1(
                             a,
                             opt.flag.contains(crate::flags::MapFlags::QSTRAND),
                         ) {
-                            // Check if zdrop was due to inversion
-                            let zdrop_code =
-                                test_zdrop(opt, qsub, &tseq_buf[..gap_tlen], &ez.cigar, mat);
+                            // Check if first-pass z-drop was due to an inversion.
                             if zdrop_code == 2 {
                                 r2.split_inv = true;
                             }
@@ -1257,6 +1385,8 @@ fn align1(
                 opt.zdrop,
                 opt.end_bonus,
                 KswFlags::EXTZ_ONLY,
+                rev,
+                splice_strand,
             );
             if !ez.cigar.is_empty() {
                 append_cigar(&mut cigar_ops, &ez.cigar);
@@ -1324,6 +1454,9 @@ fn align1(
         }
     }
 
+    let normalized_annotated_intron =
+        normalize_annotated_long_deletion(opt, mi, rid, qseq, &mut rs1, &mut qs1, &mut cigar_ops);
+
     // Compute stats from final alignment — reuse tseq_buf
     let final_tlen = (re1 - rs1).max(0) as usize;
     if final_tlen > tseq_buf.len() {
@@ -1340,7 +1473,7 @@ fn align1(
 
     let (is_spliced, trans_strand, splice_bonus) =
         annotate_splice_cigar(opt, mi, rid, rs1, &mut cigar_ops, rev);
-    let (mlen, blen, n_ambi, dp_max) = compute_cigar_stats(
+    let (mlen, blen, n_ambi, mut dp_max) = compute_cigar_stats(
         &cigar_ops,
         final_qseq,
         &tseq_buf[..final_tlen],
@@ -1349,6 +1482,14 @@ fn align1(
         opt.e,
         !(is_sr || opt.flag.contains(crate::flags::MapFlags::SR_RNA)),
     );
+
+    if normalized_annotated_intron {
+        dp_score += opt.junc_bonus + opt.q;
+    }
+
+    if opt.flag.contains(crate::flags::MapFlags::SPLICE) {
+        dp_max = dp_max.max(dp_score + splice_bonus);
+    }
 
     // Convert M to =/X if EQX mode requested
     if opt.flag.contains(crate::flags::MapFlags::EQX) && !final_qseq.is_empty() {
@@ -1441,6 +1582,9 @@ fn rescue_exact_annotated_introns(
         return None;
     }
     let win_len = (win_en - win_st) as usize;
+    if win_len > 50_000 {
+        return None;
+    }
     let mut tseq = vec![4u8; win_len];
     mi.getseq(rid, win_st as u32, win_en as u32, &mut tseq);
 
@@ -1642,6 +1786,9 @@ fn rescue_exact_single_intron(
     let win_st = (current_rs - flank).max(0);
     let win_en = (current_re + flank).min(ref_len);
     let win_len = (win_en - win_st) as usize;
+    if win_len > 50_000 {
+        return None;
+    }
     if win_len < qlen + 6 {
         return None;
     }
@@ -1750,21 +1897,19 @@ fn annotate_splice_cigar(
             0 | 7 | 8 => t_off += len,
             2 => {
                 let annotated = annotated_junction_strand(mi, rid, t_off, t_off + len);
-                if len >= 6 || annotated != 0 {
+                let strand = if annotated != 0 {
+                    annotated
+                } else if len >= 6 {
+                    infer_splice_strand(opt, mi, rid, t_off, len, rev)
+                } else {
+                    0
+                };
+                if annotated != 0 || strand == 1 || strand == 2 {
                     *c = (len as u32) << 4 | 3;
                     is_spliced = true;
-                    let strand = if annotated != 0 {
-                        annotated
-                    } else {
-                        infer_splice_strand(opt, mi, rid, t_off, len, rev)
-                    };
-                    if strand == 1 || strand == 2 {
-                        trans_strand = strand;
-                    }
+                    trans_strand = strand;
                     if annotated != 0 {
                         bonus += opt.junc_bonus;
-                    } else if strand == 0 {
-                        bonus -= splice_signal_penalty(opt, mi, rid, t_off, len, rev);
                     }
                 }
                 t_off += len;
@@ -1825,6 +1970,107 @@ fn revcomp_pair(pair: &mut [u8; 2]) {
             *b = 3 - *b;
         }
     }
+}
+
+fn normalize_annotated_long_deletion(
+    opt: &MapOpt,
+    mi: &MmIdx,
+    rid: u32,
+    qseq: &[u8],
+    rs: &mut i32,
+    qs: &mut i32,
+    cigar: &mut Vec<u32>,
+) -> bool {
+    if !opt.flag.contains(crate::flags::MapFlags::SPLICE) {
+        return false;
+    }
+    let Some(db) = mi.junc_db.as_ref() else {
+        return false;
+    };
+    let Some(juncs) = db.juncs.get(rid as usize) else {
+        return false;
+    };
+    if juncs.is_empty() || cigar.is_empty() {
+        return false;
+    }
+
+    let mut t_off = *rs;
+    let mut candidate: Option<(usize, i32, i32, i32)> = None;
+    for (idx, &c) in cigar.iter().enumerate() {
+        let op = c & 0xf;
+        let len = (c >> 4) as i32;
+        match op {
+            0 | 7 | 8 | 2 | 3 => {
+                if op == CigarOp::Del as u32 && len >= 50 {
+                    for j in juncs {
+                        let j_len = j.en - j.st;
+                        let delta = j.st - t_off;
+                        if j_len == len && (-3..=3).contains(&delta) {
+                            candidate = Some((idx, j.st, j.en, delta));
+                            break;
+                        }
+                    }
+                    if candidate.is_some() {
+                        break;
+                    }
+                }
+                t_off += len;
+            }
+            _ => {}
+        }
+    }
+
+    let Some((idx, j_st, j_en, delta)) = candidate else {
+        return false;
+    };
+    if delta != 0 {
+        if idx == 0 || idx + 1 >= cigar.len() {
+            return false;
+        }
+        let prev_op = cigar[idx - 1] & 0xf;
+        let next_op = cigar[idx + 1] & 0xf;
+        if !matches!(prev_op, 0 | 7 | 8) || !matches!(next_op, 0 | 7 | 8) {
+            return false;
+        }
+        let shift = delta.unsigned_abs();
+        if delta > 0 {
+            if (cigar[idx + 1] >> 4) <= shift {
+                return false;
+            }
+            cigar[idx - 1] += shift << 4;
+            cigar[idx + 1] -= shift << 4;
+        } else {
+            if (cigar[idx - 1] >> 4) <= shift {
+                return false;
+            }
+            cigar[idx - 1] -= shift << 4;
+            cigar[idx + 1] += shift << 4;
+        }
+    }
+    cigar[idx] = ((j_en - j_st) as u32) << 4 | CigarOp::NSkip as u32;
+
+    let mut extended = 0;
+    while extended < 5 && *qs > 0 && *rs > 0 {
+        let Some(first) = cigar.first_mut() else {
+            break;
+        };
+        if !matches!(*first & 0xf, 0 | 7 | 8) {
+            break;
+        }
+        let mut rb = [4u8; 1];
+        if mi.getseq(rid, (*rs - 1) as u32, *rs as u32, &mut rb) != 1 {
+            break;
+        }
+        let qb = qseq[(*qs - 1) as usize];
+        if qb != rb[0] {
+            break;
+        }
+        *rs -= 1;
+        *qs -= 1;
+        *first += 1 << 4;
+        extended += 1;
+    }
+    true
 }
 
 fn annotated_junction_strand(mi: &MmIdx, rid: u32, st: i32, en: i32) -> u8 {
@@ -1949,25 +2195,53 @@ pub fn align1_inv(
     // Convert reversed offsets back
     let q_off = ql - (q_off_rev + 1);
     let t_off = tl - (t_off_rev + 1);
-    if q_off < 0 || t_off < 0 {
+    let q_align_start = q_start as i32 + q_off;
+    let q_align_len = ql - q_off;
+    let t_align_start = t_off;
+    let t_align_len = tl - t_off;
+    if q_align_start < 0 || q_align_len <= 0 || t_align_start < 0 || t_align_len <= 0 {
+        return None;
+    }
+    let q_align_start = q_align_start as usize;
+    let q_align_end = q_align_start + q_align_len as usize;
+    let t_align_start = t_align_start as usize;
+    let t_align_end = t_align_start + t_align_len as usize;
+    if q_align_end > qseq_src.len() || t_align_end > tseq.len() {
         return None;
     }
 
-    // Full extension alignment on the remaining portion
+    // Full extension alignment on the remaining portion. C allows q_off to be
+    // negative here, effectively extending before the nominal inversion gap.
+    let q_align = &qseq_src[q_align_start..q_align_end];
+    let t_align = &tseq[t_align_start..t_align_end];
     let bw = (opt.bw as f32 * 1.5) as i32;
     let ez = do_align(
         opt,
-        &qsub[q_off as usize..],
-        &tseq[t_off as usize..],
+        q_align,
+        t_align,
         mat,
         bw,
         opt.zdrop,
         -1,
         KswFlags::EXTZ_ONLY,
+        r1.rev,
+        opt.flag,
     );
     if ez.cigar.is_empty() {
         return None;
     }
+
+    let (mlen, blen, n_ambi, dp_max) = compute_cigar_stats(
+        &ez.cigar,
+        q_align,
+        t_align,
+        mat,
+        opt.q,
+        opt.e,
+        !(opt
+            .flag
+            .intersects(crate::flags::MapFlags::SR | crate::flags::MapFlags::SR_RNA)),
+    );
 
     let mut r_inv = AlignReg::default();
     r_inv.id = -1;
@@ -1985,13 +2259,15 @@ pub fn align1_inv(
     }
     r_inv.rs = r1.re + t_off;
     r_inv.re = r_inv.rs + ez.max_t + 1;
+    r_inv.mlen = mlen;
+    r_inv.blen = blen;
 
     let extra = AlignExtra {
         dp_score: ez.max,
-        dp_max: ez.max,
+        dp_max,
         dp_max2: 0,
-        dp_max0: ez.max,
-        n_ambi: 0,
+        dp_max0: dp_max,
+        n_ambi,
         trans_strand: 0,
         cigar: Cigar(ez.cigar),
     };
@@ -2264,7 +2540,90 @@ pub fn align_skeleton(
     let mut wi = 0;
     while wi < work.len() {
         let mut r = work[wi].clone();
-        let splits = align1(opt, mi, qlen, &qseq_fwd, &qseq_rev, &mut r, &mut *a, &mat);
+        let splits = if opt.flag.contains(crate::flags::MapFlags::SPLICE)
+            && opt.flag.contains(crate::flags::MapFlags::SPLICE_FOR)
+            && opt.flag.contains(crate::flags::MapFlags::SPLICE_REV)
+        {
+            let mut r_for = r.clone();
+            let mut r_rev = r.clone();
+            let splits_for = align1(
+                opt,
+                mi,
+                qlen,
+                &qseq_fwd,
+                &qseq_rev,
+                &mut r_for,
+                &mut *a,
+                &mat,
+                crate::flags::MapFlags::SPLICE_FOR,
+            );
+            let splits_rev = align1(
+                opt,
+                mi,
+                qlen,
+                &qseq_fwd,
+                &qseq_rev,
+                &mut r_rev,
+                &mut *a,
+                &mat,
+                crate::flags::MapFlags::SPLICE_REV,
+            );
+            let dp_for = r_for.extra.as_ref().map(|p| p.dp_score).unwrap_or(i32::MIN);
+            let dp_rev = r_rev.extra.as_ref().map(|p| p.dp_score).unwrap_or(i32::MIN);
+            let (mut chosen, chosen_splits, trans_strand) = if dp_for > dp_rev {
+                (r_for, splits_for, 1u8)
+            } else if dp_for < dp_rev {
+                (r_rev, splits_rev, 2u8)
+            } else if (qlen + dp_for) & 1 == 0 {
+                (r_for, splits_for, 3u8)
+            } else {
+                (r_rev, splits_rev, 3u8)
+            };
+            if let Some(extra) = chosen.extra.as_mut() {
+                let final_trans_strand = if extra.trans_strand == 1 || extra.trans_strand == 2 {
+                    extra.trans_strand
+                } else {
+                    trans_strand
+                };
+                extra.trans_strand = final_trans_strand;
+                if chosen.is_spliced {
+                    if final_trans_strand == 1 || final_trans_strand == 2 {
+                        extra.dp_max += (opt.a + opt.b) + ((opt.a + opt.b) >> 1);
+                    } else {
+                        extra.dp_max -= opt.a + opt.b;
+                    }
+                }
+            }
+            r = chosen;
+            chosen_splits
+        } else {
+            let splice_strand = if opt.flag.contains(crate::flags::MapFlags::SPLICE) {
+                opt.flag & (crate::flags::MapFlags::SPLICE_FOR | crate::flags::MapFlags::SPLICE_REV)
+            } else {
+                crate::flags::MapFlags::empty()
+            };
+            let splits = align1(
+                opt,
+                mi,
+                qlen,
+                &qseq_fwd,
+                &qseq_rev,
+                &mut r,
+                &mut *a,
+                &mat,
+                splice_strand,
+            );
+            if opt.flag.contains(crate::flags::MapFlags::SPLICE) {
+                if let Some(extra) = r.extra.as_mut() {
+                    extra.trans_strand = if opt.flag.contains(crate::flags::MapFlags::SPLICE_FOR) {
+                        1
+                    } else {
+                        2
+                    };
+                }
+            }
+            splits
+        };
         if opt.flag.contains(crate::flags::MapFlags::SPLICE) && mi.junc_db.is_some() {
             let ts = r.extra.as_ref().map(|p| p.trans_strand as i32).unwrap_or(0);
             crate::jump::jump_split(mi, opt, qlen, &qseq_fwd, &mut r, ts);
@@ -2302,10 +2661,11 @@ pub fn align_skeleton(
 
     // Filter and sort
     crate::hit::filter_regs(opt, qlen, regs);
-    // Assembly ranking: recalibrate dp_max based on divergence
+    // Recalibrate dp_max for non-splice long reads based on divergence.
     if !(opt.flag.intersects(
         crate::flags::MapFlags::SR
             | crate::flags::MapFlags::SR_RNA
+            | crate::flags::MapFlags::SPLICE
             | crate::flags::MapFlags::ALL_CHAINS,
     )) && opt.split_prefix.is_none()
         && qlen >= opt.rank_min_len
@@ -2420,7 +2780,7 @@ mod tests {
     }
 
     #[test]
-    fn test_annotate_splice_cigar_penalizes_noncanonical_skip() {
+    fn test_annotate_splice_cigar_keeps_noncanonical_deletion() {
         let mi = MmIdx::build_from_str(
             5,
             3,
@@ -2440,10 +2800,10 @@ mod tests {
         let (is_spliced, trans_strand, bonus) =
             annotate_splice_cigar(&opt, &mi, 0, 0, &mut cigar, false);
 
-        assert!(is_spliced);
+        assert!(!is_spliced);
         assert_eq!(trans_strand, 0);
-        assert_eq!(bonus, -9);
-        assert_eq!(cigar_to_string(&cigar), "4M8N4M");
+        assert_eq!(bonus, 0);
+        assert_eq!(cigar_to_string(&cigar), "4M8D4M");
     }
 
     #[test]

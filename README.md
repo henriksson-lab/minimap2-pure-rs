@@ -9,15 +9,7 @@ count.
 It is not yet a drop-in replacement for every minimap2 workflow; see
 [Known gaps](#known-gaps).
 
-This is a translation of the original code and not the authoritative
-implementation. For supported workflows, the goal is to generate the same output
-as C minimap2. Please report deviations with test data.
-
-The aim of this project is to increase performance, especially by providing this code through a type-safe library interface.
-The code can also be compiled to be used for webassembly.
-
-**Do not use this for production yet. Some minimap2 workflows are not
-exhaustively validated against the C implementation.**
+**Do not use this for production yet. Some minimap2 workflows are not exhaustively validated against the C implementation.**
 
 ## Features
 
@@ -289,19 +281,25 @@ behavior:
   assembly, short-read, split-index, paired/grouped fragment, ALT, and
   splice/junction cases. It is not a full upstream minimap2 conformance suite,
   and untested datasets or option combinations may still differ.
-- **Splice support is implemented but not broadly benchmarked on RNA data.**
-  `splice`, `splice:hq`, `splice:sr`, BED12 junction annotations, `N` CIGAR
-  skips, transcript-strand tags, annotated junction rescue, and splice-specific
-  DP scoring are wired and covered by fixtures. Complex noisy transcriptome
-  cases still need real-data validation.
+- **The small external strict matrix now passes for the tested real-data
+  categories.** The external paired E. coli short-read subset, HiFi 10k subset,
+  ONT subset, UTI89 `asm10` assembly case, ALT metadata case, forced split-index
+  long-read cases, and yeast direct-RNA splice case pass strict PAF/SAM
+  conformance against C minimap2.
+- **Splice support is implemented for the tested RNA workflows.** `splice`,
+  `splice:hq`, `splice:sr`, BED12 junction annotations, `N` CIGAR skips,
+  transcript-strand tags, annotated junction rescue, and splice-specific DP
+  scoring are wired and covered by fixtures. The external yeast direct-RNA
+  200-read PAF/SAM strict matrix now matches C minimap2, including the noisy
+  annotated intron normalization case `SRR30335018.261583`.
 - **Split-index mapping is implemented for tested CLI paths.** `--split-prefix`
   maps single-end, grouped fragment, and two-file paired-end reads through split
   index parts and merges per-query hits. Compatibility has been validated on
   local fixtures and the full 587,760-pair E. coli SRR13321180 short-read
   sample in both PAF and SAM with forced `-I 500k --split-prefix`, including
   C-style split-record `frag_gap` handling and post-merge paired-end MAPQ/flag
-  behavior. It has not been validated at the scale of upstream production
-  split-index runs.
+  behavior. Broader references and multi-part production workloads should still
+  be validated before relying on untested split-index configurations.
 - **Short-read paired-end real-data conformance is covered for one full E. coli
   sample.** High-occurrence re-chaining, paired-end heap-sort ordering, radix
   tie behavior, MAPQ, `cm`, `s1`/`s2`, short-read `ms:i` scoring,
@@ -343,6 +341,12 @@ scripts/conformance_matrix.py data/conformance/ecoli_srr13321180/conformance_man
 
 # Full local E. coli short-read and forced split-index validation, if raw FASTQs are present
 scripts/conformance_matrix.py data/conformance/ecoli_srr13321180/conformance_full_manifest.tsv
+
+# Small external HiFi, ONT, assembly, ALT, paired short-read, split-index, and RNA/splice data
+scripts/prepare_external_small_conformance_data.sh
+
+# Currently passing strict external categories
+scripts/conformance_matrix.py data/conformance/external_small/conformance_manifest.tsv --category HiFi --category ONT --category Assembly --category ShortRead --category SplitIndex --category ALT --category RNA --diff-limit 40
 
 # All tests
 cargo test --all

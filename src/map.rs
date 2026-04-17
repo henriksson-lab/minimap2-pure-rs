@@ -217,7 +217,7 @@ pub fn map_query(mi: &MmIdx, opt: &MapOpt, qname: &str, qseq: &[u8]) -> MapResul
         }
     }
 
-    let (mut chain_anchors, chains) = match chain_result {
+    let (mut chain_anchors, mut chains) = match chain_result {
         Some(r) => (r.anchors, r.chains),
         None => {
             return MapResult {
@@ -228,6 +228,41 @@ pub fn map_query(mi: &MmIdx, opt: &MapOpt, qname: &str, qseq: &[u8]) -> MapResul
         }
     };
 
+    if opt.bw_long > opt.bw
+        && !opt
+            .flag
+            .intersects(MapFlags::SPLICE | MapFlags::SR | MapFlags::NO_LJOIN)
+        && chains.len() > 1
+    {
+        let first_len = chains[0] as u32 as usize;
+        if first_len > 0 && first_len <= chain_anchors.len() {
+            let st = chain_anchors[0].y as i32;
+            let en = chain_anchors[first_len - 1].y as i32;
+            if qlen - (en - st) > opt.rmq_rescue_size
+                || en - st > (qlen as f32 * opt.rmq_rescue_ratio) as i32
+            {
+                let n_a: usize = chains.iter().map(|&u| u as u32 as usize).sum();
+                chain_anchors.truncate(n_a);
+                chain_anchors.sort_unstable();
+                if let Some(r) = chain::rmq::lchain_rmq(
+                    opt.max_gap,
+                    opt.rmq_inner_dist,
+                    opt.bw_long,
+                    opt.max_chain_skip,
+                    opt.rmq_size_cap,
+                    opt.min_cnt,
+                    opt.min_chain_score,
+                    chn_pen_gap,
+                    chn_pen_skip,
+                    &chain_anchors,
+                ) {
+                    chain_anchors = r.anchors;
+                    chains = r.chains;
+                }
+            }
+        }
+    }
+
     // Step 6: Generate alignment regions
     let mut regs = hit::gen_regs(
         hash,
@@ -236,11 +271,6 @@ pub fn map_query(mi: &MmIdx, opt: &MapOpt, qname: &str, qseq: &[u8]) -> MapResul
         &chain_anchors,
         opt.flag.contains(MapFlags::QSTRAND),
     );
-
-    // Step 6b: Estimate divergence
-    if !seed_result.mini_pos.is_empty() {
-        esterr::est_err(mi, qlen, &mut regs, &chain_anchors, &seed_result.mini_pos);
-    }
 
     // Step 7: Mark ALT
     if mi.n_alt > 0 {
@@ -258,13 +288,26 @@ pub fn map_query(mi: &MmIdx, opt: &MapOpt, qname: &str, qseq: &[u8]) -> MapResul
             opt.flag.contains(MapFlags::HARD_MLEVEL),
             opt.alt_drop,
         );
-        hit::select_sub(opt.pri_ratio, mi.k * 2, opt.best_n, &mut regs);
+        hit::select_sub_with_strand(
+            opt.pri_ratio,
+            mi.k * 2,
+            opt.best_n,
+            true,
+            (opt.max_gap as f32 * 0.8) as i32,
+            &mut regs,
+        );
+    }
+
+    if !is_sr && !opt.flag.contains(MapFlags::QSTRAND) && !seed_result.mini_pos.is_empty() {
+        esterr::est_err(mi, qlen, &mut regs, &chain_anchors, &seed_result.mini_pos);
+        hit::filter_strand_retained(&mut regs);
     }
 
     // Step 8: DP alignment for CIGAR (if requested)
     if opt.flag.contains(MapFlags::CIGAR) {
         align::align_skeleton(opt, mi, qlen, qseq, &mut regs, &mut chain_anchors);
-        // Re-do parent/secondary after alignment refinement
+        // Re-do parent/secondary after alignment refinement, matching C after
+        // mm_align_skeleton() has filtered weak aligned regions.
         if !opt.flag.contains(MapFlags::ALL_CHAINS) {
             hit::set_parent(
                 opt.mask_level,
@@ -278,8 +321,11 @@ pub fn map_query(mi: &MmIdx, opt: &MapOpt, qname: &str, qseq: &[u8]) -> MapResul
             hit::set_sam_pri(&mut regs);
         }
     }
-    // Step 9: Filter
-    hit::filter_regs(opt, qlen, &mut regs);
+    // Step 9: Filter for non-CIGAR paths. CIGAR paths are filtered by the
+    // mm_align_skeleton-equivalent block above before parent reassignment.
+    if !opt.flag.contains(MapFlags::CIGAR) {
+        hit::filter_regs(opt, qlen, &mut regs);
+    }
 
     // Step 10: Set MAPQ
     hit::set_mapq(
@@ -291,11 +337,7 @@ pub fn map_query(mi: &MmIdx, opt: &MapOpt, qname: &str, qseq: &[u8]) -> MapResul
         is_splice,
     );
 
-    // Step 11: Sort by score. C minimap2 leaves ALL_CHAINS in mm_gen_regs order
-    // for the single-segment path.
-    if !opt.flag.contains(MapFlags::ALL_CHAINS) {
-        hit::hit_sort(&mut regs, opt.alt_drop);
-    }
+    // C minimap2 leaves the post-alignment order intact after MAPQ assignment.
     hit::sync_regs(&mut regs);
 
     MapResult {
