@@ -2,14 +2,35 @@
 
 A pure Rust reimplementation of [minimap2](https://github.com/lh3/minimap2) v2.30 (commit `de3c6ec`), the versatile sequence alignment program for long and short reads.
 
-The current implementation has strong parity with the C version on the bundled
-DNA mapping fixtures. On the larger local `chr11 x200` HiFi fixture it is
-currently within about 3-9% of C minimap2, depending on output mode and thread
-count.
-It is not yet a drop-in replacement for every minimap2 workflow; see
-[Known gaps](#known-gaps).
+It is not yet validated as a drop-in replacement for every minimap2 workflow; see [Validation scope](#validation-scope).
 
-**Do not use this for production yet. Some minimap2 workflows are not exhaustively validated against the C implementation.**
+As of 2026-04-17, this crate pass validation with Codex on several realistic datasets. The crate might
+be ready for production but be vigilant to possible translation errors.
+
+
+## This is an LLM-mediated faithful (hopefully) translation, not the original code!
+
+Most users should probably first see if the existing original code works for them, unless they have reason otherwise. The original source
+may have newer features and it has had more love in terms of fixing bugs. In fact, we aim to replicate bugs if they are present, for the
+sake of reproducibility! (but then we might have added a few more in the process)
+
+There are however cases when you might prefer this Rust version. We generally agree with [this manifesto](https://rewrites.bio/) but more specifically:
+* We have had many issues with ensuring that our software works using existing containers (Docker, PodMan, Singularity). One size does not fit all and it eats our resources trying to keep up with every way of delivering software
+* Common package managers do not work well. It was great when we had a few Linux distributions with stable procedures, but now there are just too many ecosystems (Homebrew, Conda). Conda has an NP-complete resolver which does not scale. Homebrew is only so-stable. And our dependencies in Python still break. These can no longer be considered professional serious options. Meanwhile, Cargo enables multiple versions of packages to be available, even within the same program(!)
+* The future is the web. We deploy software in the web browser, and until now that has meant Javascript. This is a language where even the == operator is broken. Typescript is one step up, but a game changer is the ability to compile Rust code into webassembly, enabling performance and sharing of code with the backend. Translating code to Rust enables new ways of deployment and running code in the browser has especial benefits for science - researchers do not have deep pockets to run servers, so pushing compute to the user enables deployment that otherwise would be impossible
+* Old CLI-based utilities are bad for the environment(!). A large amount of compute resources are spent creating and communicating via small files, which we can bypass by using code as libraries. Even better, we can avoid frequent reloading of databases by hoisting this stage, with up to 100x speedups in some cases. Less compute means faster compute and less electricity wasted
+* LLM-mediated translations may actually be safer to use than the original code. This article shows that [running the same code on different operating systems can give somewhat different answers](https://doi.org/10.1038/nbt.3820). This is a gap that Rust+Cargo can reduce. Typesafe interfaces also reduce coding mistakes and error handling, as opposed to typical command-line scripting
+
+But:
+
+* **This approach should still be considered experimental**. The LLM technology is immature and has sharp corners. But there are opportunities to reap, and the genie is not going back into the bottle. This translation is as much aimed to learn how to improve the technology and get feedback on the results.
+* Translations are not endorsed by the original authors unless otherwise noted. **Do not send bug reports to the original developers**. Use our Github issues page instead.
+* **Do not trust the benchmarks on this page**. They are used to help evaluate the translation. If you want improved performance, you generally have to use this code as a library, and use the additional tricks it offers. We generally accept performance losses in order to reduce our dependency issues
+* **Check the original Github pages for information about the package**. This README is kept sparse on purpose. It is not meant to be the primary source of information
+* **If you are the author of the original code and wish to move to Rust, you can obtain ownership of this repository and crate**. Until then, our commitment is to offer an as-faithful-as-possible translation of a snapshot of your code. If we find serious bugs, we will report them to you. Otherwise we will just replicate them, to ensure comparability across studies that claim to use package XYZ v.666. Think of this like a fancy Ubuntu .deb-package of your software - that is how we treat it
+
+This blurb might be out of date. Go to [this page](https://github.com/henriksson-lab/rustification) for the latest information and further information about how we approach translation
+
 
 ## Features
 
@@ -18,9 +39,9 @@ It is not yet a drop-in replacement for every minimap2 workflow; see
   index files
 - **ALT contig metadata** -- `--alt`/`--alt-drop` support plus ALT flag
   round-tripping in Rust-written `.mmi` files
-- **PAF/SAM parity on tested fixtures** -- checked against the vendored C
-  minimap2 for representative long-read, HiFi, assembly, and split-alignment
-  cases
+- **PAF/SAM parity on tested fixtures and datasets** -- checked against the
+  vendored C minimap2 for representative ONT, HiFi, assembly, short-read,
+  split-index, ALT, splice/RNA, paired/grouped fragment, and overlap cases
 - **CIGAR generation for supported workflows** via anchor-based gap-filling
   alignment
 - **Major DNA presets**: `map-ont`, `map-pb`, `map-hifi`, `sr`, `asm5`,
@@ -271,21 +292,23 @@ src/
   C minimap2's augmented red-black tree; intended to preserve behavior, but the
   asymptotic performance differs on very large anchor sets
 
-## Known gaps
+## Validation scope
 
-These are the remaining gaps and validation limits relative to full C minimap2
-behavior:
+The completed TODO items cover the known CLI/output parity gaps that were
+tracked for this Rust translation. The remaining caveats are validation scope
+and deliberate project scope, not missing implementations tracked for the
+tested CLI workflows.
 
 - **Conformance is fixture-driven, not exhaustive.** The regression suite checks
   PAF/SAM parity against vendored C minimap2 for representative ONT, HiFi,
-  assembly, short-read, split-index, paired/grouped fragment, ALT, and
-  splice/junction cases. It is not a full upstream minimap2 conformance suite,
+  assembly, short-read, split-index, paired/grouped fragment, ALT, overlap,
+  and splice/junction cases. It is not a full upstream minimap2 conformance suite,
   and untested datasets or option combinations may still differ.
 - **The small external strict matrix now passes for the tested real-data
   categories.** The external paired E. coli short-read subset, HiFi 10k subset,
   ONT subset, UTI89 `asm10` assembly case, ALT metadata case, forced split-index
-  long-read cases, and yeast direct-RNA splice case pass strict PAF/SAM
-  conformance against C minimap2.
+  long-read cases, real ONT all-vs-all overlap case, and yeast direct-RNA
+  splice case pass strict conformance against C minimap2.
 - **Splice support is implemented for the tested RNA workflows.** `splice`,
   `splice:hq`, `splice:sr`, BED12 junction annotations, `N` CIGAR skips,
   transcript-strand tags, annotated junction rescue, and splice-specific DP
@@ -307,16 +330,21 @@ behavior:
   secondary/supplementary SAM clipping now match C minimap2 for the full
   SRR13321180 E. coli conformance sample in both PAF and SAM. Broader
   short-read datasets are still needed to make that coverage representative.
-- **All-vs-all overlap presets have synthetic fixture coverage.** `ava-ont`
-  and `ava-pb` are wired as presets and covered by same-file overlap
-  C-vs-Rust regression cases. Broader overlap validation on real read sets is
-  still needed.
+- **All-vs-all overlap presets are covered by fixtures and one real ONT
+  dataset.** `ava-ont` and `ava-pb` are wired as presets and covered by
+  same-file overlap C-vs-Rust regression cases. The external strict matrix also
+  includes a real 1000-read ONT `ava-ont` all-vs-all PAF-core conformance case.
+  Broader overlap validation on additional real read sets is still needed.
 - **Some CLI/output combinations are intentionally constrained.** `--qstrand`
   is supported only for PAF without CIGAR/SAM. Advanced options such as `-d`,
   `-o`, `-R`, `-K`, `--ds`, `--write-junc`, `--copy-comment`,
   `--paf-no-hit`, `--sam-hit-only`, `--secondary-seq`, `--idx-no-seq`, `-L`,
   `-f`, `-F`, `-I`, `-J`, `-u`, `-Q`, `--junc-bonus`, and `--junc-pen` are
   wired, but many combinations only have fixture coverage.
+- **C minimap2 ecosystem APIs are out of scope.** This crate targets the
+  minimap2 command-line behavior and Rust-native library use. It does not
+  implement C ABI compatibility, `libminimap2` embedding APIs, `mappy`, or
+  downstream ecosystem interfaces that depend on minimap2's C internals.
 
 ## Testing
 
@@ -342,11 +370,11 @@ scripts/conformance_matrix.py data/conformance/ecoli_srr13321180/conformance_man
 # Full local E. coli short-read and forced split-index validation, if raw FASTQs are present
 scripts/conformance_matrix.py data/conformance/ecoli_srr13321180/conformance_full_manifest.tsv
 
-# Small external HiFi, ONT, assembly, ALT, paired short-read, split-index, and RNA/splice data
+# Small external HiFi, ONT, assembly, ALT, paired short-read, split-index, overlap, and RNA/splice data
 scripts/prepare_external_small_conformance_data.sh
 
 # Currently passing strict external categories
-scripts/conformance_matrix.py data/conformance/external_small/conformance_manifest.tsv --category HiFi --category ONT --category Assembly --category ShortRead --category SplitIndex --category ALT --category RNA --diff-limit 40
+scripts/conformance_matrix.py data/conformance/external_small/conformance_manifest.tsv --category HiFi --category ONT --category Assembly --category ShortRead --category SplitIndex --category ALT --category Overlap --category RNA --diff-limit 40
 
 # All tests
 cargo test --all

@@ -16,6 +16,7 @@ HIFI_N="${HIFI_N:-10000}"
 ONT_N="${ONT_N:-20000}"
 SR_N="${SR_N:-50000}"
 RNA_N="${RNA_N:-200}"
+ONT_AVA_N="${ONT_AVA_N:-1000}"
 
 UTI89_URL="${UTI89_URL:-https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/000/013/265/GCA_000013265.1_ASM1326v1/GCA_000013265.1_ASM1326v1_genomic.fna.gz}"
 YEAST_FASTA_URL="${YEAST_FASTA_URL:-https://ftp.ensemblgenomes.ebi.ac.uk/pub/fungi/current/fasta/saccharomyces_cerevisiae/dna/Saccharomyces_cerevisiae.R64-1-1.dna.toplevel.fa.gz}"
@@ -38,6 +39,7 @@ need seqtk
 mkdir -p "$DOWNLOADS" \
     "$OUT_DIR/ecoli_k12/hifi" \
     "$OUT_DIR/ecoli_k12/ont" \
+    "$OUT_DIR/ecoli_k12/overlap" \
     "$OUT_DIR/ecoli_k12/illumina" \
     "$OUT_DIR/ecoli_uti89" \
     "$OUT_DIR/yeast_rna"
@@ -114,10 +116,12 @@ mapfile -t SR_FASTQS < <(find "$OUT_DIR/ecoli_k12/illumina/raw" -maxdepth 1 -typ
 
 HIFI_SUB="$OUT_DIR/ecoli_k12/hifi/hifi.${HIFI_N}.fq"
 ONT_SUB="$OUT_DIR/ecoli_k12/ont/ont.${ONT_N}.fq"
+ONT_AVA_SUB="$OUT_DIR/ecoli_k12/overlap/ont.ava.${ONT_AVA_N}.fq"
 SR_R1_SUB="$OUT_DIR/ecoli_k12/illumina/reads.${SR_N}_1.fq"
 SR_R2_SUB="$OUT_DIR/ecoli_k12/illumina/reads.${SR_N}_2.fq"
 sample_single "$HIFI_RAW" "$HIFI_N" "$HIFI_SUB"
 sample_single "$ONT_RAW" "$ONT_N" "$ONT_SUB"
+sample_single "$ONT_RAW" "$ONT_AVA_N" "$ONT_AVA_SUB"
 sample_pair "${SR_FASTQS[0]}" "${SR_FASTQS[1]}" "$SR_N" "$SR_R1_SUB" "$SR_R2_SUB"
 
 UTI89_GZ="$OUT_DIR/ecoli_uti89/uti89.fa.gz"
@@ -221,6 +225,7 @@ PYJUNC
 REF_ARG="$(relpath "$ECOLI_REF")"
 HIFI_ARG="$(relpath "$HIFI_SUB")"
 ONT_ARG="$(relpath "$ONT_SUB")"
+ONT_AVA_ARG="$(relpath "$ONT_AVA_SUB")"
 SR_R1_ARG="$(relpath "$SR_R1_SUB")"
 SR_R2_ARG="$(relpath "$SR_R2_SUB")"
 UTI89_ARG="$(relpath "$UTI89_FA")"
@@ -240,6 +245,7 @@ ShortRead	E coli paired ${SR_N} reads PAF	paf	-x sr -c $REF_ARG $SR_R1_ARG $SR_R
 ShortRead	E coli paired ${SR_N} reads SAM	sam-core	-x sr -a $REF_ARG $SR_R1_ARG $SR_R2_ARG
 SplitIndex	E coli HiFi forced split PAF	paf	-x map-hifi -c -I 500k --split-prefix /tmp/mm2rs-conf-ext-hifi-split $REF_ARG $HIFI_ARG
 SplitIndex	E coli ONT forced split SAM	sam-core	-x map-ont -a -I 500k --split-prefix /tmp/mm2rs-conf-ext-ont-split $REF_ARG $ONT_ARG
+Overlap	E coli ONT all-vs-all ${ONT_AVA_N} reads PAF core	paf-overlap-core	-x ava-ont $ONT_AVA_ARG $ONT_AVA_ARG
 ALT	E coli UTI89 ALT metadata PAF	paf	-x asm10 -c --alt $ALT_ARG $REF_ARG $UTI89_ARG
 RNA	Yeast direct RNA splice ${RNA_N} reads PAF	paf	-x splice -c --junc-bed $JUNC_ARG $YEAST_REF_ARG $RNA_ARG
 RNA	Yeast direct RNA splice ${RNA_N} reads SAM	sam-core	-x splice -a --junc-bed $JUNC_ARG $YEAST_REF_ARG $RNA_ARG
