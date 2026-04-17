@@ -3,56 +3,117 @@ use super::{comput_sc_simple, ChainResult};
 use crate::types::Mm128;
 use std::collections::BTreeMap;
 
-/// A simplified RMQ structure using BTreeMap keyed by (y, i) with augmented min-priority.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RmqElem {
+    y: i32,
+    i: i64,
+    pri: f64,
+}
+
+/// Dynamic range-minimum structure for mg_lchain_rmq().
 ///
-/// The C code uses krmq.h (an augmented red-black tree) that supports:
-/// 1. Insert/delete by (y, i) key
-/// 2. Range-minimum query on priority over a y-range
-///
-/// We approximate this with a BTreeMap. For the RMQ query, we iterate over the range.
-/// This is O(k) per query where k is the range size, vs O(log n) in the C version,
-/// but is correct and much simpler.
+/// C minimap2 uses an augmented red-black tree keyed by `(y, i)` and stores the
+/// minimum-priority element in each subtree. We know the full set of candidate
+/// `(y, i)` keys up front, so a compressed-key segment tree provides the same
+/// range-min query semantics without scanning all active anchors in the range.
 struct RmqTree {
-    tree: BTreeMap<(i32, i64), f64>, // (y, i) -> priority
+    keys: Vec<(i32, i64)>,
+    seg: Vec<Option<RmqElem>>,
+    tree: BTreeMap<(i32, i64), f64>,
 }
 
 impl RmqTree {
-    fn new() -> Self {
+    fn new(keys: &[(i32, i64)]) -> Self {
+        let mut keys = keys.to_vec();
+        keys.sort_unstable();
+        keys.dedup();
+        let n = keys.len().next_power_of_two().max(1);
         Self {
+            keys,
+            seg: vec![None; n * 2],
             tree: BTreeMap::new(),
         }
     }
 
+    fn better(a: Option<RmqElem>, b: Option<RmqElem>) -> Option<RmqElem> {
+        match (a, b) {
+            (None, x) | (x, None) => x,
+            (Some(x), Some(y)) => {
+                if y.pri < x.pri {
+                    Some(y)
+                } else {
+                    Some(x)
+                }
+            }
+        }
+    }
+
+    fn set_leaf(&mut self, key: (i32, i64), elem: Option<RmqElem>) {
+        let Ok(pos) = self.keys.binary_search(&key) else {
+            return;
+        };
+        let base = self.seg.len() / 2;
+        let mut idx = base + pos;
+        self.seg[idx] = elem;
+        while idx > 1 {
+            idx >>= 1;
+            self.seg[idx] = Self::better(self.seg[idx << 1], self.seg[idx << 1 | 1]);
+        }
+    }
+
     fn insert(&mut self, y: i32, i: i64, pri: f64) {
-        self.tree.insert((y, i), pri);
+        let key = (y, i);
+        self.tree.insert(key, pri);
+        self.set_leaf(key, Some(RmqElem { y, i, pri }));
     }
 
     fn remove(&mut self, y: i32, i: i64) {
-        self.tree.remove(&(y, i));
+        let key = (y, i);
+        self.tree.remove(&key);
+        self.set_leaf(key, None);
     }
 
     fn len(&self) -> usize {
         self.tree.len()
     }
 
-    /// Find the element with minimum priority (most negative = best score)
-    /// in the range y ∈ [lo_y, hi_y].
-    fn rmq(&self, lo_y: i32, hi_y: i32) -> Option<(i32, i64)> {
-        let lo_key = (lo_y, i32::MAX as i64);
-        let hi_key = (hi_y, 0);
-        let mut best_pri = f64::MAX;
-        let mut best: Option<(i32, i64)> = None;
-        for (&(y, i), &pri) in self.tree.range(lo_key..=hi_key) {
-            if pri < best_pri {
-                best_pri = pri;
-                best = Some((y, i));
-            }
-        }
-        best
+    fn lower_bound(&self, key: (i32, i64)) -> usize {
+        self.keys.partition_point(|&x| x < key)
     }
 
-    /// Iterate backwards from a given y position, yielding elements
-    /// in decreasing y order.
+    fn upper_bound(&self, key: (i32, i64)) -> usize {
+        self.keys.partition_point(|&x| x <= key)
+    }
+
+    /// Find the active element with minimum priority in C's closed key interval
+    /// `[(lo_y, INT32_MAX), (hi_y, 0)]`.
+    fn rmq(&self, lo_y: i32, hi_y: i32) -> Option<(i32, i64)> {
+        let lo = self.lower_bound((lo_y, i32::MAX as i64));
+        let hi = self.upper_bound((hi_y, 0));
+        if lo >= hi {
+            return None;
+        }
+        let base = self.seg.len() / 2;
+        let mut l = base + lo;
+        let mut r = base + hi;
+        let mut best = None;
+        while l < r {
+            if l & 1 == 1 {
+                best = Self::better(best, self.seg[l]);
+                l += 1;
+            }
+            if r & 1 == 1 {
+                r -= 1;
+                best = Self::better(self.seg[r], best);
+            }
+            l >>= 1;
+            r >>= 1;
+        }
+        best.map(|e| (e.y, e.i))
+    }
+
+    /// Iterate backwards from a given y position, yielding elements in decreasing
+    /// `(y, i)` order. This mirrors the fallback inner-tree scan in C.
     fn iter_rev_from(&self, y: i32) -> impl Iterator<Item = (i32, i64, f64)> + '_ {
         let key = (y, i64::MAX);
         self.tree
@@ -99,9 +160,14 @@ pub fn lchain_rmq(
     let mut t = vec![0i32; n as usize];
     let mut v = vec![0i32; n as usize];
 
-    let mut root = RmqTree::new();
+    let keys: Vec<(i32, i64)> = a
+        .iter()
+        .enumerate()
+        .map(|(i, x)| (x.y as i32, i as i64))
+        .collect();
+    let mut root = RmqTree::new(&keys);
     let mut root_inner = if max_dist_inner > 0 {
-        Some(RmqTree::new())
+        Some(RmqTree::new(&keys))
     } else {
         None
     };
@@ -266,7 +332,7 @@ mod tests {
 
     #[test]
     fn test_rmq_tree() {
-        let mut tree = RmqTree::new();
+        let mut tree = RmqTree::new(&[(10, 0), (20, 1), (30, 2)]);
         tree.insert(10, 0, -100.0);
         tree.insert(20, 1, -200.0);
         tree.insert(30, 2, -150.0);

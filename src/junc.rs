@@ -1,10 +1,12 @@
-//! BED12 junction file parsing for splice-aware alignment.
+//! BED/BED12 junction file parsing for splice-aware alignment.
 //!
-//! Reads junction annotations from BED12 format files and stores them
+//! Reads junction annotations from BED/BED12 format files and stores them
 //! in the index for use during splice-aware alignment.
 
 use crate::index::MmIdx;
-use std::io::{self, BufRead};
+use flate2::read::GzDecoder;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Cursor, Read};
 
 /// A junction interval on a reference sequence.
 #[derive(Clone, Debug)]
@@ -46,21 +48,49 @@ impl JuncDb {
     }
 }
 
-/// Read splice junctions from a BED12 file and annotate the index.
+fn open_maybe_gzip(path: &str) -> io::Result<Box<dyn BufRead>> {
+    let mut file = File::open(path)?;
+    let mut prefix = [0u8; 2];
+    let n = file.read(&mut prefix)?;
+    let head = Cursor::new(prefix[..n].to_vec());
+    let reader: Box<dyn Read> = if n == 2 && prefix == [0x1f, 0x8b] {
+        Box::new(GzDecoder::new(head.chain(file)))
+    } else {
+        Box::new(head.chain(file))
+    };
+    Ok(Box::new(BufReader::new(reader)))
+}
+
+fn parse_i32(s: Option<&&str>) -> Option<i32> {
+    s?.parse().ok()
+}
+
+fn parse_strand(s: Option<&&str>) -> i8 {
+    match s.copied() {
+        Some("+") => 1,
+        Some("-") => 2,
+        _ => 0,
+    }
+}
+
+fn parse_comma_i32s(s: &str) -> Vec<i32> {
+    s.split(',')
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| s.parse().ok())
+        .collect()
+}
+
+/// Read splice junctions from a BED/BED12 file and annotate the index.
 ///
-/// BED12 format: chrom, start, end, name, score, strand, thickStart, thickEnd,
-/// rgb, blockCount, blockSizes, blockStarts
-///
-/// Junctions are inferred from the gaps between blocks.
+/// BED12 records contribute introns inferred from gaps between blocks. Records
+/// with fewer than 12 fields are accepted as direct intervals, matching C
+/// minimap2's fallback behavior in mm_idx_bed_read_core().
 pub fn read_junc_bed(mi: &mut MmIdx, path: &str) -> io::Result<usize> {
-    let file = std::fs::File::open(path)?;
-    let reader = io::BufReader::new(file);
-    let mut n_junc = 0usize;
+    let reader = open_maybe_gzip(path)?;
     let mut db = JuncDb {
         juncs: vec![Vec::new(); mi.seqs.len()],
     };
 
-    // Build name index if not present
     mi.index_names();
 
     for line in reader.lines() {
@@ -73,74 +103,64 @@ pub fn read_junc_bed(mi: &mut MmIdx, path: &str) -> io::Result<usize> {
         {
             continue;
         }
+
         let fields: Vec<&str> = line.split('\t').collect();
-        if fields.len() < 12 {
+        if fields.len() < 3 {
             continue;
         }
 
         let chrom = fields[0];
-        let chrom_start: i32 = match fields[1].parse() {
-            Ok(v) => v,
-            Err(_) => continue,
+        let Some(chrom_start) = parse_i32(fields.get(1)) else {
+            continue;
         };
-        let _strand = match fields[5] {
-            "+" => 1i8,
-            "-" => 2i8,
-            _ => 0i8,
+        let Some(chrom_end) = parse_i32(fields.get(2)) else {
+            continue;
         };
-        let block_count: usize = match fields[9].parse() {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        if block_count < 2 {
+        if chrom_start < 0 || chrom_end <= chrom_start {
             continue;
         }
 
-        let block_sizes: Vec<i32> = fields[10]
-            .split(',')
-            .filter(|s| !s.is_empty())
-            .filter_map(|s| s.parse().ok())
-            .collect();
-        let block_starts: Vec<i32> = fields[11]
-            .split(',')
-            .filter(|s| !s.is_empty())
-            .filter_map(|s| s.parse().ok())
-            .collect();
-
-        if block_sizes.len() < block_count || block_starts.len() < block_count {
+        let Some(rid) = mi.name2id(chrom) else {
             continue;
-        }
-
-        let rid = match mi.name2id(chrom) {
-            Some(id) => id,
-            None => continue,
         };
+        let strand = parse_strand(fields.get(5));
 
-        let strand_val = match fields[5] {
-            "+" => 1i8,
-            "-" => 2i8,
-            _ => 0i8,
-        };
-
-        // Extract junctions from gaps between blocks
-        for i in 1..block_count {
-            let junc_start = chrom_start + block_starts[i - 1] + block_sizes[i - 1];
-            let junc_end = chrom_start + block_starts[i];
-            if junc_end > junc_start {
-                db.juncs[rid as usize].push(JuncIntv {
-                    st: junc_start,
-                    en: junc_end,
-                    strand: strand_val,
-                });
-                n_junc += 1;
+        if fields.len() >= 12 {
+            if let Some(block_count) = fields.get(9).and_then(|s| s.parse::<usize>().ok()) {
+                let block_sizes = parse_comma_i32s(fields[10]);
+                let block_starts = parse_comma_i32s(fields[11]);
+                if block_count >= 2
+                    && block_sizes.len() >= block_count
+                    && block_starts.len() >= block_count
+                {
+                    for i in 1..block_count {
+                        let junc_start = chrom_start + block_starts[i - 1] + block_sizes[i - 1];
+                        let junc_end = chrom_start + block_starts[i];
+                        if junc_end > junc_start {
+                            db.juncs[rid as usize].push(JuncIntv {
+                                st: junc_start,
+                                en: junc_end,
+                                strand,
+                            });
+                        }
+                    }
+                }
+                continue;
             }
         }
+
+        db.juncs[rid as usize].push(JuncIntv {
+            st: chrom_start,
+            en: chrom_end,
+            strand,
+        });
     }
 
-    // Sort junctions by start position
     for juncs in &mut db.juncs {
-        juncs.sort_by_key(|j| j.st);
+        juncs.sort_by_key(|j| (j.st, j.en));
+        juncs.dedup_by(|a, b| a.st == b.st && a.en == b.en && a.strand == b.strand);
     }
+    let n_junc = db.juncs.iter().map(Vec::len).sum();
 
     if n_junc > 0 {
         log::info!("read {} junctions from {}", n_junc, path);
@@ -152,10 +172,11 @@ pub fn read_junc_bed(mi: &mut MmIdx, path: &str) -> io::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
     use std::io::Write;
 
-    #[test]
-    fn test_read_junc_bed() {
+    fn build_test_idx() -> MmIdx {
         let mut ref_file = tempfile::NamedTempFile::new().unwrap();
         writeln!(ref_file, ">chr1").unwrap();
         writeln!(
@@ -165,7 +186,7 @@ mod tests {
         .unwrap();
         ref_file.flush().unwrap();
 
-        let mut mi = MmIdx::build_from_file(
+        MmIdx::build_from_file(
             ref_file.path().to_str().unwrap(),
             10,
             15,
@@ -175,14 +196,53 @@ mod tests {
             u64::MAX,
         )
         .unwrap()
-        .unwrap();
+        .unwrap()
+    }
 
-        // Create BED12 file
+    #[test]
+    fn test_read_junc_bed12() {
+        let mut mi = build_test_idx();
+
         let mut bed = tempfile::NamedTempFile::new().unwrap();
         writeln!(bed, "chr1\t0\t50\tjunc1\t100\t+\t0\t50\t0\t2\t10,10\t0,30").unwrap();
         bed.flush().unwrap();
 
         let n = read_junc_bed(&mut mi, bed.path().to_str().unwrap()).unwrap();
-        assert_eq!(n, 1); // one junction gap between blocks
+        assert_eq!(n, 1);
+        let j = &mi.junc_db.as_ref().unwrap().juncs[0][0];
+        assert_eq!((j.st, j.en, j.strand), (10, 30, 1));
+    }
+
+    #[test]
+    fn test_read_junc_bed6_interval() {
+        let mut mi = build_test_idx();
+
+        let mut bed = tempfile::NamedTempFile::new().unwrap();
+        writeln!(bed, "chr1\t12\t34\tjunc1\t100\t-").unwrap();
+        bed.flush().unwrap();
+
+        let n = read_junc_bed(&mut mi, bed.path().to_str().unwrap()).unwrap();
+        assert_eq!(n, 1);
+        let j = &mi.junc_db.as_ref().unwrap().juncs[0][0];
+        assert_eq!((j.st, j.en, j.strand), (12, 34, 2));
+    }
+
+    #[test]
+    fn test_read_junc_bed12_gzip() {
+        let mut mi = build_test_idx();
+
+        let gz = tempfile::NamedTempFile::new().unwrap();
+        let mut encoder = GzEncoder::new(gz.reopen().unwrap(), Compression::default());
+        writeln!(
+            encoder,
+            "chr1\t0\t50\tjunc1\t100\t+\t0\t50\t0\t2\t10,10\t0,30"
+        )
+        .unwrap();
+        encoder.finish().unwrap();
+
+        let n = read_junc_bed(&mut mi, gz.path().to_str().unwrap()).unwrap();
+        assert_eq!(n, 1);
+        let j = &mi.junc_db.as_ref().unwrap().juncs[0][0];
+        assert_eq!((j.st, j.en, j.strand), (10, 30, 1));
     }
 }

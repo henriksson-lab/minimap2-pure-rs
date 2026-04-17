@@ -9,8 +9,9 @@ use crate::sketch::mm_sketch;
 use crate::sort::ksmall_u32;
 use crate::types::{IdxSeq, Mm128};
 use bucket::IdxBucket;
+use flate2::read::GzDecoder;
 use hashbrown::HashMap;
-use std::io::{BufRead, Read};
+use std::io::{BufRead, BufReader, Cursor, Read};
 
 /// The minimap2 index. Mirrors mm_idx_t.
 pub struct MmIdx {
@@ -481,9 +482,18 @@ impl MmIdx {
         let input: Box<dyn Read> = if path == "-" {
             Box::new(std::io::stdin())
         } else {
-            Box::new(std::fs::File::open(path)?)
+            let file = std::fs::File::open(path)?;
+            let mut reader = BufReader::new(file);
+            let mut peek = [0u8; 2];
+            let n = reader.read(&mut peek)?;
+            let chain = Cursor::new(peek[..n].to_vec()).chain(reader);
+            if n >= 2 && peek[0] == 0x1f && peek[1] == 0x8b {
+                Box::new(GzDecoder::new(chain))
+            } else {
+                Box::new(chain)
+            }
         };
-        let reader = std::io::BufReader::new(input);
+        let reader = BufReader::new(input);
         self.index_names();
         let mut n_alt = 0usize;
         for line in reader.lines() {
@@ -551,6 +561,27 @@ mod tests {
         assert_eq!(n, 1);
         assert_eq!(mi.n_alt, 1);
         assert!(!mi.seqs[0].is_alt);
+        assert!(mi.seqs[1].is_alt);
+    }
+
+    #[test]
+    fn test_read_alt_file_gzip() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let seqs: Vec<&[u8]> = vec![b"ACGTACGTACGT", b"TGCATGCATGCA"];
+        let names = vec!["chr1", "chr1_alt"];
+        let mut mi = MmIdx::build_from_str(5, 10, false, 10, &seqs, Some(&names)).unwrap();
+
+        let alt = tempfile::NamedTempFile::new().unwrap();
+        let mut gz = GzEncoder::new(alt.reopen().unwrap(), Compression::default());
+        writeln!(gz, "chr1_alt comment").unwrap();
+        gz.finish().unwrap();
+
+        let n = mi.read_alt_file(alt.path().to_str().unwrap()).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(mi.n_alt, 1);
         assert!(mi.seqs[1].is_alt);
     }
 
