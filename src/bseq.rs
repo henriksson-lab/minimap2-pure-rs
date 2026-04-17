@@ -29,7 +29,7 @@ impl BseqFile {
         } else {
             let f = std::fs::File::open(path)?;
             let mut peek = [0u8; 2];
-            let mut f = io::BufReader::new(f);
+            let mut f = io::BufReader::with_capacity(1 << 20, f);
             let n = f.read(&mut peek)?;
             if n >= 2 && peek[0] == 0x1f && peek[1] == 0x8b {
                 let chain = io::Cursor::new(peek[..n].to_vec()).chain(f);
@@ -39,7 +39,7 @@ impl BseqFile {
                 Box::new(chain)
             }
         };
-        let mut reader = io::BufReader::new(file);
+        let mut reader = io::BufReader::with_capacity(1 << 20, file);
 
         // Read first line to detect format
         let mut first_line = String::new();
@@ -123,6 +123,24 @@ impl BseqFile {
             } else {
                 Vec::new()
             };
+
+            // Match C's kseq_read behavior: a FASTQ record with qual shorter
+            // than seq (truncated file / corruption) returns ret<-1 and
+            // kseq_read stops; mm_bseq_read drops the partial record and
+            // emits a warning. Matching that behavior is required for output
+            // parity with C on truncated FASTQs.
+            if qual.len() != seq.len() {
+                eprintln!(
+                    "[WARNING] failed to parse the FASTA/FASTQ record{}. Continue anyway.",
+                    if name.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" next to '{}'", name)
+                    }
+                );
+                self.eof = true;
+                return Ok(None);
+            }
 
             let l_seq = seq.len();
             Ok(Some(BseqRecord {
@@ -274,5 +292,49 @@ mod tests {
         assert_eq!(batch.len(), 2); // 4 + 4 >= 5, stops after 2
         assert_eq!(batch[0].name, "s1");
         assert_eq!(batch[1].name, "s2");
+    }
+
+    #[test]
+    fn test_fastq_truncated_qual_is_rejected() {
+        // Last record has qual shorter than seq (simulating truncated file);
+        // C minimap2 rejects such records via kseq_read returning -2.
+        // Earlier records should still be returned before the bad record.
+        let content = b"@good\nACGT\n+\nIIII\n@truncated\nACGTACGTACGT\n+\nIIII\n";
+        let f = write_temp_file(content);
+        let mut reader = BseqFile::open(f.path().to_str().unwrap()).unwrap();
+
+        let rec1 = reader.read_record().unwrap().unwrap();
+        assert_eq!(rec1.name, "good");
+        assert_eq!(rec1.seq, b"ACGT");
+        assert_eq!(rec1.qual, b"IIII");
+
+        // Second record has qual.len()=4 but seq.len()=12 — must be rejected.
+        assert!(reader.read_record().unwrap().is_none());
+        assert!(reader.is_eof());
+    }
+
+    #[test]
+    fn test_fastq_missing_qual_is_rejected() {
+        // Record with header + seq + `+` but no qual line at all.
+        let content = b"@bad\nACGT\n+\n";
+        let f = write_temp_file(content);
+        let mut reader = BseqFile::open(f.path().to_str().unwrap()).unwrap();
+
+        assert!(reader.read_record().unwrap().is_none());
+    }
+
+    #[test]
+    fn test_fastq_empty_last_record_is_rejected() {
+        // Header + seq + `+`, then EOF mid-qual (empty qual line present but
+        // shorter). Real-world case from truncated long-read FASTQs.
+        let content = b"@first\nACGT\n+\nIIII\n@last\nACGTACGT\n+\nII";
+        let f = write_temp_file(content);
+        let mut reader = BseqFile::open(f.path().to_str().unwrap()).unwrap();
+
+        let r1 = reader.read_record().unwrap().unwrap();
+        assert_eq!(r1.name, "first");
+
+        // qual "II" is shorter than seq "ACGTACGT" (8 bp)
+        assert!(reader.read_record().unwrap().is_none());
     }
 }

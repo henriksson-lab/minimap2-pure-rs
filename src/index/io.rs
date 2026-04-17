@@ -7,10 +7,16 @@ const MM2RS_ALT_MAGIC: &[u8; 4] = b"ALT\0";
 
 /// Write an index to a binary .mmi file. Matches mm_idx_dump().
 pub fn idx_dump<W: Write>(w: &mut W, mi: &MmIdx) -> io::Result<()> {
-    let mut w = BufWriter::new(w);
-    // Magic
+    // Little-endian-only: we cast &[u32]/&[u64] directly to &[u8] to match
+    // C's fwrite(ptr, elem_size, count, fp). Rewrite per-element on BE if needed.
+    const _: () = assert!(cfg!(target_endian = "little"));
+
+    // 64 KiB matches stdio's buffering granularity. Larger buffers batch
+    // kernel writes into giant syscalls, which on NFS backlogs ACKs until
+    // close() — causing multi-second close stalls.
+    let mut w = BufWriter::with_capacity(1 << 16, w);
+
     w.write_all(MM_IDX_MAGIC)?;
-    // Header: w, k, b, n_seq, flag
     let header: [u32; 5] = [
         mi.w as u32,
         mi.k as u32,
@@ -18,10 +24,8 @@ pub fn idx_dump<W: Write>(w: &mut W, mi: &MmIdx) -> io::Result<()> {
         mi.seqs.len() as u32,
         mi.flag.bits() as u32,
     ];
-    for &val in &header {
-        w.write_all(&val.to_le_bytes())?;
-    }
-    // Sequence metadata
+    w.write_all(u32_slice_as_bytes(&header))?;
+
     let mut sum_len: u64 = 0;
     for seq in &mi.seqs {
         let name_bytes = seq.name.as_bytes();
@@ -33,43 +37,91 @@ pub fn idx_dump<W: Write>(w: &mut W, mi: &MmIdx) -> io::Result<()> {
         w.write_all(&seq.len.to_le_bytes())?;
         sum_len += seq.len as u64;
     }
-    // Buckets
+
+    // Bucket output matches C's on-disk layout:
+    //   [n : i32]               # number of u64 positions in p (multi-hit only)
+    //   [p[0..n] : u64]         # multi-hit positions (singletons excluded)
+    //   [size : u32]            # hash entry count
+    //   (key, val) pairs : u64  # key LSB = 1 marks singleton (val = position)
+    //                           # key LSB = 0 marks multi  (val = (offset<<32)|count)
+    //
+    // Our in-memory bucket always stores every position in p with
+    // val = (offset<<32)|count, so we compact singletons into the kv stream
+    // and rebuild a contiguous multi-only p[] at write time. idx_load()
+    // expands both forms back into the unified all-in-p runtime layout.
+    let mut compact_p: Vec<u64> = Vec::new();
+    let mut kv_pairs: Vec<u64> = Vec::new();
     for b in &mi.buckets {
-        let n = b.p.len() as i32;
-        w.write_all(&n.to_le_bytes())?;
-        for &val in &b.p {
-            w.write_all(&val.to_le_bytes())?;
-        }
-        let size: u32 = b.h.as_ref().map_or(0, |h| h.len() as u32);
-        w.write_all(&size.to_le_bytes())?;
+        compact_p.clear();
+        kv_pairs.clear();
         if let Some(h) = &b.h {
+            kv_pairs.reserve(h.len() * 2);
             for (&key, &val) in h.iter() {
-                w.write_all(&key.to_le_bytes())?;
-                w.write_all(&val.to_le_bytes())?;
+                let offset = (val >> 32) as usize;
+                let count = (val as u32) as usize;
+                if count == 1 {
+                    kv_pairs.push(key | 1);
+                    kv_pairs.push(b.p[offset]);
+                } else {
+                    let new_offset = compact_p.len() as u64;
+                    compact_p.extend_from_slice(&b.p[offset..offset + count]);
+                    kv_pairs.push(key);
+                    kv_pairs.push((new_offset << 32) | count as u64);
+                }
             }
         }
+        let n = compact_p.len() as i32;
+        w.write_all(&n.to_le_bytes())?;
+        w.write_all(u64_slice_as_bytes(&compact_p))?;
+        let size: u32 = b.h.as_ref().map_or(0, |h| h.len() as u32);
+        w.write_all(&size.to_le_bytes())?;
+        w.write_all(u64_slice_as_bytes(&kv_pairs))?;
     }
-    // Packed sequence
+
     if !mi.flag.contains(IdxFlags::NO_SEQ) {
         let n_words = (sum_len.div_ceil(8)) as usize;
-        for i in 0..n_words {
-            let val = if i < mi.packed_seq.len() {
-                mi.packed_seq[i]
-            } else {
-                0
-            };
-            w.write_all(&val.to_le_bytes())?;
+        let avail = mi.packed_seq.len().min(n_words);
+        // Chunked write: C's stdio pushes a steady stream of ~4KB writes to
+        // the kernel, letting NFS ACK them in parallel with computation. A
+        // single giant write() syscall backlogs all ACKs to close() time and
+        // stalls for ~10s on NFS. Chunking matches NFS wsize (512KB) and keeps
+        // the pipeline full.
+        let bytes = u32_slice_as_bytes(&mi.packed_seq[..avail]);
+        const WRITE_CHUNK: usize = 1 << 19; // 512 KiB
+        for chunk in bytes.chunks(WRITE_CHUNK) {
+            w.write_all(chunk)?;
+        }
+        if n_words > avail {
+            let pad_bytes = (n_words - avail) * 4;
+            let zeros = [0u8; 4096];
+            let mut remaining = pad_bytes;
+            while remaining > 0 {
+                let chunk = remaining.min(zeros.len());
+                w.write_all(&zeros[..chunk])?;
+                remaining -= chunk;
+            }
         }
     }
     if mi.n_alt > 0 || mi.seqs.iter().any(|seq| seq.is_alt) {
         w.write_all(MM2RS_ALT_MAGIC)?;
         w.write_all(&(mi.seqs.len() as u32).to_le_bytes())?;
-        for seq in &mi.seqs {
-            w.write_all(&[seq.is_alt as u8])?;
-        }
+        let alt_flags: Vec<u8> = mi.seqs.iter().map(|s| s.is_alt as u8).collect();
+        w.write_all(&alt_flags)?;
     }
     w.flush()?;
     Ok(())
+}
+
+#[inline]
+fn u32_slice_as_bytes(s: &[u32]) -> &[u8] {
+    // SAFETY: u32 has no padding; len * 4 bytes always fit into the Vec's
+    // allocation. target_endian assertion in idx_dump guarantees LE layout.
+    unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, std::mem::size_of_val(s)) }
+}
+
+#[inline]
+fn u64_slice_as_bytes(s: &[u64]) -> &[u8] {
+    unsafe { std::slice::from_raw_parts(s.as_ptr() as *const u8, std::mem::size_of_val(s)) }
 }
 
 /// Load an index from a binary .mmi file. Matches mm_idx_load().

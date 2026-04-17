@@ -7,6 +7,12 @@ use std::fmt::Write;
 
 const MAX_BAM_CIGAR_OP: usize = 65_535;
 
+#[inline]
+fn push_ascii_bytes(s: &mut String, bytes: &[u8]) {
+    // FASTA/FASTQ sequence and quality fields are ASCII by construction.
+    unsafe { s.push_str(std::str::from_utf8_unchecked(bytes)) };
+}
+
 /// Write SAM header. Matches mm_write_sam_hdr().
 pub fn write_sam_hdr(mi: &MmIdx, rg: Option<&str>, args: &[String]) -> String {
     let mut s = String::with_capacity(4096);
@@ -68,7 +74,7 @@ pub fn write_sam_record_with_comment(
     rep_len: i32,
     comment: Option<&str>,
 ) -> String {
-    let mut s = String::with_capacity(512);
+    let mut s = String::with_capacity(512 + qseq.len() + qual.len());
     let qlen = qseq.len() as i32;
 
     // Unmapped
@@ -80,18 +86,14 @@ pub fn write_sam_record_with_comment(
             if flag.contains(MapFlags::NO_QUAL) || qseq.is_empty() {
                 s.push('*');
             } else {
-                for &b in qseq {
-                    s.push(b as char);
-                }
+                push_ascii_bytes(&mut s, qseq);
             }
             s.push('\t');
             // Quality
             if qual.is_empty() || flag.contains(MapFlags::NO_QUAL) {
                 s.push('*');
             } else {
-                for &q in qual {
-                    s.push(q as char);
-                }
+                push_ascii_bytes(&mut s, qual);
             }
             if rep_len >= 0 {
                 write!(s, "\trl:i:{}", rep_len).unwrap();
@@ -178,9 +180,7 @@ pub fn write_sam_record_with_comment(
             s.push(SEQ_COMP_TABLE[qseq[i] as usize] as char);
         }
     } else {
-        for &b in &qseq[seq_start..seq_end] {
-            s.push(b as char);
-        }
+        push_ascii_bytes(&mut s, &qseq[seq_start..seq_end]);
     }
 
     s.push('\t');
@@ -196,9 +196,7 @@ pub fn write_sam_record_with_comment(
                 s.push(qual[i] as char);
             }
         } else {
-            for &q in &qual[qual_start..qual_end] {
-                s.push(q as char);
-            }
+            push_ascii_bytes(&mut s, &qual[qual_start..qual_end]);
         }
     }
 

@@ -625,7 +625,11 @@ fn main() {
 
     // Update mapping options based on index
     options::mapopt_update(&mut mo, &mi);
-    eprintln!("[M::main] mid_occ = {}", mo.mid_occ);
+    eprintln!(
+        "[M::mapopt_update::{:.3}] mid_occ = {}",
+        t_start.elapsed().as_secs_f64(),
+        mo.mid_occ
+    );
     let split_parts_ref = split_parts.as_deref();
 
     if cli.query.len() == 2 {
@@ -740,6 +744,10 @@ fn main() {
             }
         }
     }
+    eprintln!(
+        "[M::worker_pipeline::{:.3}] mapping done",
+        t_start.elapsed().as_secs_f64()
+    );
     let elapsed = t_start.elapsed();
     eprintln!("[M::main] Version: {}, pairwise mapping", MM_VERSION);
     eprintln!("[M::main] CMD: {}", args.join(" "));

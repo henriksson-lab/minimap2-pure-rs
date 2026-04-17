@@ -32,7 +32,7 @@ fn add_rg_tag(line: &mut String, rg_id: Option<&str>) {
 pub fn map_file_paf(mi: &MmIdx, opt: &MapOpt, path: &str, n_threads: usize) -> io::Result<()> {
     let mut fp = BseqFile::open(path)?;
     let stdout = io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
+    let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
 
     // Set up rayon thread pool
     let pool = rayon::ThreadPoolBuilder::new()
@@ -84,7 +84,7 @@ pub fn map_file_paf_split(
 ) -> io::Result<()> {
     let mut fp = BseqFile::open(path)?;
     let stdout = io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
+    let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
     let part_opts = prepare_part_opts(parts, opt);
     let rid_shifts = rid_shifts(parts);
 
@@ -135,7 +135,7 @@ pub fn map_file_sam(
 ) -> io::Result<()> {
     let mut fp = BseqFile::open(path)?;
     let stdout = io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
+    let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
 
     // Write SAM header
     let hdr = sam::write_sam_hdr(mi, rg, args);
@@ -224,7 +224,7 @@ pub fn map_file_sam_split(
 ) -> io::Result<()> {
     let mut fp = BseqFile::open(path)?;
     let stdout = io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
+    let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
     let hdr = sam::write_sam_hdr(mi, rg, args);
     writeln!(out, "{}", hdr)?;
     let rg_id = rg.and_then(sam::read_group_id);
@@ -351,7 +351,7 @@ pub fn map_file_frag_paf(mi: &MmIdx, opt: &MapOpt, path: &str, n_threads: usize)
     let mut fp = BseqFile::open(path)?;
     let mut pending = None;
     let stdout = io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
+    let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(n_threads)
@@ -388,7 +388,7 @@ pub fn map_file_frag_paf_split(
     let mut fp = BseqFile::open(path)?;
     let mut pending = None;
     let stdout = io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
+    let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
     let part_opts = prepare_part_opts(parts, opt);
     let shifts = rid_shifts(parts);
 
@@ -428,7 +428,7 @@ pub fn map_file_frag_sam(
     let mut fp = BseqFile::open(path)?;
     let mut pending = None;
     let stdout = io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
+    let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
 
     let hdr = sam::write_sam_hdr(mi, rg, args);
     writeln!(out, "{}", hdr)?;
@@ -472,7 +472,7 @@ pub fn map_file_frag_sam_split(
     let mut fp = BseqFile::open(path)?;
     let mut pending = None;
     let stdout = io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
+    let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
 
     let hdr = sam::write_sam_hdr(mi, rg, args);
     writeln!(out, "{}", hdr)?;
@@ -830,7 +830,7 @@ pub fn map_file_interleaved_pe_sam(
 ) -> io::Result<()> {
     let mut fp = BseqFile::open(path)?;
     let stdout = io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
+    let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
 
     let hdr = sam::write_sam_hdr(mi, rg, args);
     writeln!(out, "{}", hdr)?;
@@ -938,7 +938,7 @@ pub fn map_file_interleaved_pe_sam_split(
 ) -> io::Result<()> {
     let mut fp = BseqFile::open(path)?;
     let stdout = io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
+    let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
 
     let hdr = sam::write_sam_hdr(mi, rg, args);
     writeln!(out, "{}", hdr)?;
@@ -1071,7 +1071,7 @@ pub fn map_file_pe_sam(
     let mut fp1 = BseqFile::open(path1)?;
     let mut fp2 = BseqFile::open(path2)?;
     let stdout = io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
+    let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
 
     let hdr = sam::write_sam_hdr(mi, rg, args);
     writeln!(out, "{}", hdr)?;
@@ -1177,7 +1177,7 @@ pub fn map_file_pe_sam_split(
     let mut fp1 = BseqFile::open(path1)?;
     let mut fp2 = BseqFile::open(path2)?;
     let stdout = io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
+    let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
 
     let hdr = sam::write_sam_hdr(mi, rg, args);
     writeln!(out, "{}", hdr)?;
@@ -1548,7 +1548,7 @@ pub fn map_file_pe_paf(
     let mut fp1 = BseqFile::open(path1)?;
     let mut fp2 = BseqFile::open(path2)?;
     let stdout = io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
+    let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
 
     let pool = rayon::ThreadPoolBuilder::new()
         .num_threads(n_threads)
@@ -1637,7 +1637,7 @@ pub fn map_file_pe_paf_split(
     let mut fp1 = BseqFile::open(path1)?;
     let mut fp2 = BseqFile::open(path2)?;
     let stdout = io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
+    let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
 
     let part_opts = prepare_part_opts(parts, opt);
     let rid_shifts = rid_shifts(parts);
@@ -1733,7 +1733,7 @@ pub fn map_file_interleaved_pe_paf_split(
 ) -> io::Result<()> {
     let mut fp = BseqFile::open(path)?;
     let stdout = io::stdout();
-    let mut out = BufWriter::new(stdout.lock());
+    let mut out = BufWriter::with_capacity(1 << 20, stdout.lock());
 
     let part_opts = prepare_part_opts(parts, opt);
     let rid_shifts = rid_shifts(parts);

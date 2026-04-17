@@ -318,9 +318,7 @@ unsafe fn extz2_sse2(
                 let tmp = _mm_cmpgt_epi8(b2, zero_);
                 _mm_storeu_si128(yp.add(p) as *mut __m128i, _mm_and_si128(tmp, b2));
                 d = _mm_or_si128(d, _mm_and_si128(tmp, flag16_));
-                if pr_off + 16 <= bt.len() {
-                    _mm_storeu_si128(bt.as_mut_ptr().add(pr_off) as *mut __m128i, d);
-                }
+                _mm_storeu_si128(bt.as_mut_ptr().add(pr_off) as *mut __m128i, d);
             }
         }
 
@@ -977,9 +975,7 @@ unsafe fn extd2_sse2(
 
             if with_cigar {
                 let pr_off = r as usize * n_col_ * 16 + (t as i32 - st_) as usize * 16;
-                if pr_off + 16 <= bt.len() {
-                    _mm_storeu_si128(bt.as_mut_ptr().add(pr_off) as *mut __m128i, d);
-                }
+                _mm_storeu_si128(bt.as_mut_ptr().add(pr_off) as *mut __m128i, d);
             }
         }
 
@@ -1745,7 +1741,6 @@ unsafe fn extd2_sse41_inner<const WITH_CIGAR: bool, const HAS_AVX2: bool>(
             *off_a.get_unchecked_mut(r as usize) = st;
             *off_e.get_unchecked_mut(r as usize) = en;
             let bt_ptr = bt.as_mut_ptr();
-            let bt_len = bt.len();
             for t in st_ as usize..=en_ as usize {
                 let p = t * 16;
                 let z = _mm_loadu_si128(sp.add(p) as *const __m128i);
@@ -1856,9 +1851,7 @@ unsafe fn extd2_sse41_inner<const WITH_CIGAR: bool, const HAS_AVX2: bool>(
                 }
 
                 let pr_off = r as usize * n_col_ * 16 + (t as i32 - st_) as usize * 16;
-                if pr_off + 16 <= bt_len {
-                    _mm_storeu_si128(bt_ptr.add(pr_off) as *mut __m128i, d);
-                }
+                _mm_storeu_si128(bt_ptr.add(pr_off) as *mut __m128i, d);
             }
         }
 

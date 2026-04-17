@@ -33,6 +33,7 @@ criterion = "0.8"
 tempfile = "3"
 
 [profile.release]
+panic = "abort"
 lto = true
 codegen-units = 1
 opt-level = 3

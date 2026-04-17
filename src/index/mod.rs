@@ -11,7 +11,10 @@ use crate::types::{IdxSeq, Mm128};
 use bucket::IdxBucket;
 use flate2::read::GzDecoder;
 use hashbrown::HashMap;
+use rayon::prelude::*;
 use std::io::{BufRead, BufReader, Cursor, Read};
+use std::sync::mpsc;
+use std::thread;
 
 /// The minimap2 index. Mirrors mm_idx_t.
 pub struct MmIdx {
@@ -219,9 +222,7 @@ impl MmIdx {
     /// Post-process all buckets (sort + build hash tables).
     fn post_process(&mut self) {
         let bb = self.bucket_bits;
-        for b in &mut self.buckets {
-            b.post_process(bb);
-        }
+        self.buckets.par_iter_mut().for_each(|b| b.post_process(bb));
     }
 
     /// Build an index from a FASTA/FASTQ file. Matches mm_idx_gen().
@@ -251,64 +252,97 @@ impl MmIdx {
             batch_size as i64
         };
 
-        loop {
-            if sum_len > batch_size {
-                break;
-            }
-            let records = fp.read_batch(effective_batch, false)?;
-            if records.is_empty() {
-                break;
-            }
+        // 3-stage pipeline matching C kt_pipeline in index.c:
+        //   stage 0 (main): read batch, pack bases into packed_seq, push IdxSeq
+        //   stage 1 (sketch thread): mm_sketch every record in the batch
+        //   stage 2 (dispatch thread): bucket-dispatch minimizers
+        let bucket_mask = ((1i64 << mi.bucket_bits) - 1) as u64;
+        let w_u = w as usize;
+        let k_u = k as usize;
 
-            // Step 0: store sequence metadata and packed sequence
-            for rec in &records {
-                let seq_entry = IdxSeq {
-                    name: if store_name {
-                        rec.name.clone()
-                    } else {
-                        String::new()
-                    },
-                    offset: sum_len,
-                    len: rec.l_seq as u32,
-                    is_alt: false,
-                };
-
-                if store_seq {
-                    // Ensure packed_seq has enough room
-                    let needed = ((sum_len + rec.l_seq as u64).div_ceil(8)) as usize;
-                    if mi.packed_seq.len() < needed {
-                        mi.packed_seq.resize(needed, 0);
-                    }
-                    for (j, &b) in rec.seq.iter().enumerate() {
-                        let c = SEQ_NT4_TABLE[b as usize];
-                        packed::seq4_set(&mut mi.packed_seq, (sum_len + j as u64) as usize, c);
-                    }
-                }
-
-                sum_len += rec.l_seq as u64;
-                mi.seqs.push(seq_entry);
-            }
-
-            // Step 1: compute sketches
-            let mut all_minimizers = Vec::new();
-            let n_prev_seqs = mi.seqs.len() - records.len();
-            for (i, rec) in records.iter().enumerate() {
-                if rec.l_seq > 0 {
-                    let rid = (n_prev_seqs + i) as u32;
-                    mm_sketch(
-                        &rec.seq,
-                        w as usize,
-                        k as usize,
-                        rid,
-                        is_hpc,
-                        &mut all_minimizers,
-                    );
-                }
-            }
-
-            // Step 2: dispatch to buckets
-            mi.add_minimizers(&all_minimizers);
+        struct SketchBatch {
+            records: Vec<BseqRecord>,
+            base_rid: u32,
         }
+
+        // Depth-1 channels cap in-flight work at one batch per stage
+        // (so memory stays bounded at ~3 * mini_batch_size).
+        let (tx_sketch, rx_sketch) = mpsc::sync_channel::<SketchBatch>(1);
+        let (tx_dispatch, rx_dispatch) = mpsc::sync_channel::<Vec<Mm128>>(1);
+
+        let buckets = &mut mi.buckets;
+        let read_result: std::io::Result<()> = thread::scope(|s| {
+            s.spawn(move || {
+                while let Ok(batch) = rx_sketch.recv() {
+                    let mut minis: Vec<Mm128> = Vec::new();
+                    for (i, rec) in batch.records.iter().enumerate() {
+                        if rec.l_seq > 0 {
+                            let rid = batch.base_rid + i as u32;
+                            mm_sketch(&rec.seq, w_u, k_u, rid, is_hpc, &mut minis);
+                        }
+                    }
+                    if tx_dispatch.send(minis).is_err() {
+                        break;
+                    }
+                }
+            });
+
+            s.spawn(move || {
+                while let Ok(minis) = rx_dispatch.recv() {
+                    for m in &minis {
+                        let bi = ((m.x >> 8) & bucket_mask) as usize;
+                        buckets[bi].add(*m);
+                    }
+                }
+            });
+
+            loop {
+                if sum_len > batch_size {
+                    break;
+                }
+                let records = fp.read_batch(effective_batch, false)?;
+                if records.is_empty() {
+                    break;
+                }
+
+                let base_rid = mi.seqs.len() as u32;
+
+                for rec in &records {
+                    let seq_entry = IdxSeq {
+                        name: if store_name {
+                            rec.name.clone()
+                        } else {
+                            String::new()
+                        },
+                        offset: sum_len,
+                        len: rec.l_seq as u32,
+                        is_alt: false,
+                    };
+
+                    if store_seq {
+                        let needed = ((sum_len + rec.l_seq as u64).div_ceil(8)) as usize;
+                        if mi.packed_seq.len() < needed {
+                            mi.packed_seq.resize(needed, 0);
+                        }
+                        for (j, &b) in rec.seq.iter().enumerate() {
+                            let c = SEQ_NT4_TABLE[b as usize];
+                            packed::seq4_set(&mut mi.packed_seq, (sum_len + j as u64) as usize, c);
+                        }
+                    }
+
+                    sum_len += rec.l_seq as u64;
+                    mi.seqs.push(seq_entry);
+                }
+
+                if tx_sketch.send(SketchBatch { records, base_rid }).is_err() {
+                    break;
+                }
+            }
+
+            drop(tx_sketch);
+            Ok(())
+        });
+        read_result?;
 
         // Post-process: sort and build hash tables
         mi.post_process();

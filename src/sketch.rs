@@ -85,6 +85,11 @@ pub fn mm_sketch(seq: &[u8], w: usize, k: usize, rid: u32, is_hpc: bool, p: &mut
     };
     let mut tq = TinyQueue::new();
 
+    if !is_hpc {
+        mm_sketch_plain(seq, w, k, rid, p);
+        return;
+    }
+
     p.reserve(seq.len() / w);
 
     let len = seq.len();
@@ -174,6 +179,122 @@ pub fn mm_sketch(seq: &[u8], w: usize, k: usize, rid: u32, is_hpc: bool, p: &mut
                 p.push(min);
             }
             // find new minimum in buffer
+            min.x = u64::MAX;
+            for j in (buf_pos + 1)..w {
+                let bj = unsafe { *buf.get_unchecked(j) };
+                if min.x >= bj.x {
+                    min = bj;
+                    min_pos = j;
+                }
+            }
+            for j in 0..=buf_pos {
+                let bj = unsafe { *buf.get_unchecked(j) };
+                if min.x >= bj.x {
+                    min = bj;
+                    min_pos = j;
+                }
+            }
+            if l >= w + k - 1 && min.x != u64::MAX {
+                for j in (buf_pos + 1)..w {
+                    let bj = unsafe { *buf.get_unchecked(j) };
+                    if min.x == bj.x && min.y != bj.y {
+                        p.push(bj);
+                    }
+                }
+                for j in 0..=buf_pos {
+                    let bj = unsafe { *buf.get_unchecked(j) };
+                    if min.x == bj.x && min.y != bj.y {
+                        p.push(bj);
+                    }
+                }
+            }
+        }
+
+        buf_pos += 1;
+        if buf_pos == w {
+            buf_pos = 0;
+        }
+        i += 1;
+    }
+    if min.x != u64::MAX {
+        p.push(min);
+    }
+}
+
+#[allow(clippy::needless_range_loop)]
+fn mm_sketch_plain(seq: &[u8], w: usize, k: usize, rid: u32, p: &mut Vec<Mm128>) {
+    let shift1 = 2 * (k - 1);
+    let mask: u64 = (1u64 << (2 * k)) - 1;
+    let mut kmer = [0u64; 2];
+    let mut l: usize = 0;
+    let mut buf_pos: usize = 0;
+    let mut min_pos: usize = 0;
+    let mut buf = [Mm128 {
+        x: u64::MAX,
+        y: u64::MAX,
+    }; 256];
+    let mut min = Mm128 {
+        x: u64::MAX,
+        y: u64::MAX,
+    };
+
+    p.reserve(seq.len() / w);
+
+    let len = seq.len();
+    let mut i: usize = 0;
+    while i < len {
+        let c = unsafe { *SEQ_NT4_TABLE.get_unchecked(*seq.get_unchecked(i) as usize) };
+        let mut info = Mm128 {
+            x: u64::MAX,
+            y: u64::MAX,
+        };
+
+        if c < 4 {
+            kmer[0] = (kmer[0] << 2 | c as u64) & mask;
+            kmer[1] = (kmer[1] >> 2) | ((3u64 ^ c as u64) << shift1);
+            if kmer[0] == kmer[1] {
+                i += 1;
+                continue;
+            }
+            let z = if kmer[0] < kmer[1] { 0usize } else { 1usize };
+            l += 1;
+            if l >= k {
+                info.x = hash64(kmer[z], mask) << 8 | (if l + 1 < k { l + 1 } else { k }) as u64;
+                info.y = (rid as u64) << 32 | (i as u64) << 1 | z as u64;
+            }
+        } else {
+            l = 0;
+        }
+
+        unsafe {
+            *buf.get_unchecked_mut(buf_pos) = info;
+        }
+
+        if l == w + k - 1 && min.x != u64::MAX {
+            for j in (buf_pos + 1)..w {
+                let bj = unsafe { *buf.get_unchecked(j) };
+                if min.x == bj.x && bj.y != min.y {
+                    p.push(bj);
+                }
+            }
+            for j in 0..buf_pos {
+                let bj = unsafe { *buf.get_unchecked(j) };
+                if min.x == bj.x && bj.y != min.y {
+                    p.push(bj);
+                }
+            }
+        }
+
+        if info.x <= min.x {
+            if l >= w + k && min.x != u64::MAX {
+                p.push(min);
+            }
+            min = info;
+            min_pos = buf_pos;
+        } else if buf_pos == min_pos {
+            if l >= w + k - 1 && min.x != u64::MAX {
+                p.push(min);
+            }
             min.x = u64::MAX;
             for j in (buf_pos + 1)..w {
                 let bj = unsafe { *buf.get_unchecked(j) };

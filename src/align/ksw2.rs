@@ -1,7 +1,12 @@
 use crate::flags::KswFlags;
 
 #[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
+use std::{arch::x86_64::*, cell::RefCell};
+
+#[cfg(target_arch = "x86_64")]
+thread_local! {
+    static KSW_LL_SCRATCH: RefCell<Vec<__m128i>> = const { RefCell::new(Vec::new()) };
+}
 
 pub const KSW_NEG_INF: i32 = -0x40000000;
 
@@ -137,98 +142,106 @@ unsafe fn ksw_ll_i16_sse2(
     let m_u = m as usize;
     let slen = (qlen + 7) >> 3;
     let n_vec = slen * m_u;
-    let mut qp = vec![_mm_setzero_si128(); n_vec];
-    for a in 0..m_u {
-        for i in 0..slen {
-            let mut v = [0i16; 8];
-            for lane in 0..8 {
-                let k = i + lane * slen;
-                if k < qlen {
-                    v[lane] = *mat.get_unchecked(a * m_u + *query.get_unchecked(k) as usize) as i16;
-                }
-            }
-            *qp.get_unchecked_mut(a * slen + i) =
-                _mm_set_epi16(v[7], v[6], v[5], v[4], v[3], v[2], v[1], v[0]);
-        }
-    }
-
-    let mut h0 = vec![_mm_setzero_si128(); slen];
-    let mut h1 = vec![_mm_setzero_si128(); slen];
-    let mut e_arr = vec![_mm_setzero_si128(); slen];
-    let mut hmax = vec![_mm_setzero_si128(); slen];
-
     let zero = _mm_setzero_si128();
-    let gapoe = _mm_set1_epi16((gapo + gape) as i16);
-    let gape_v = _mm_set1_epi16(gape as i16);
-    let mut gmax = 0i32;
-    let mut te = -1i32;
+    let total_vec = n_vec + 4 * slen;
+    let mut scratch = KSW_LL_SCRATCH.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    if scratch.len() < total_vec {
+        scratch.resize(total_vec, zero);
+    }
+    scratch[..total_vec].fill(zero);
 
-    for i in 0..tlen {
-        let mut f = zero;
-        let mut max_v = zero;
-        let ti = *target.get_unchecked(i) as usize;
-        let s_base = ti * slen;
+    let result = {
+        let scratch = &mut scratch[..total_vec];
+        let (qp, rest) = scratch.split_at_mut(n_vec);
+        let (mut h0, rest) = rest.split_at_mut(slen);
+        let (mut h1, rest) = rest.split_at_mut(slen);
+        let (e_arr, hmax) = rest.split_at_mut(slen);
 
-        let mut h = _mm_loadu_si128(h0.as_ptr().add(slen - 1));
-        h = _mm_slli_si128::<2>(h);
-        for j in 0..slen {
-            h = _mm_adds_epi16(h, _mm_loadu_si128(qp.as_ptr().add(s_base + j)));
-            let e = _mm_loadu_si128(e_arr.as_ptr().add(j));
-            h = _mm_max_epi16(h, e);
-            h = _mm_max_epi16(h, f);
-            max_v = _mm_max_epi16(max_v, h);
-            _mm_storeu_si128(h1.as_mut_ptr().add(j), h);
-
-            h = _mm_subs_epu16(h, gapoe);
-            let e_new = _mm_max_epi16(_mm_subs_epu16(e, gape_v), h);
-            _mm_storeu_si128(e_arr.as_mut_ptr().add(j), e_new);
-            f = _mm_max_epi16(_mm_subs_epu16(f, gape_v), h);
-            h = _mm_loadu_si128(h0.as_ptr().add(j));
+        for a in 0..m_u {
+            for i in 0..slen {
+                let mut v = [0i16; 8];
+                for lane in 0..8 {
+                    let k = i + lane * slen;
+                    if k < qlen {
+                        v[lane] =
+                            *mat.get_unchecked(a * m_u + *query.get_unchecked(k) as usize) as i16;
+                    }
+                }
+                *qp.get_unchecked_mut(a * slen + i) =
+                    _mm_set_epi16(v[7], v[6], v[5], v[4], v[3], v[2], v[1], v[0]);
+            }
         }
 
-        for _ in 0..8 {
-            f = _mm_slli_si128::<2>(f);
-            let mut any_gt = false;
+        let gapoe = _mm_set1_epi16((gapo + gape) as i16);
+        let gape_v = _mm_set1_epi16(gape as i16);
+        let mut gmax = 0i32;
+        let mut te = -1i32;
+
+        for i in 0..tlen {
+            let mut f = zero;
+            let mut max_v = zero;
+            let ti = *target.get_unchecked(i) as usize;
+            let s_base = ti * slen;
+
+            let mut h = _mm_load_si128(h0.as_ptr().add(slen - 1));
+            h = _mm_slli_si128::<2>(h);
             for j in 0..slen {
-                let h_old = _mm_loadu_si128(h1.as_ptr().add(j));
-                let h_new = _mm_max_epi16(h_old, f);
-                _mm_storeu_si128(h1.as_mut_ptr().add(j), h_new);
-                let h_gap = _mm_subs_epu16(h_new, gapoe);
-                f = _mm_subs_epu16(f, gape_v);
-                let gt = _mm_cmpgt_epi16(f, h_gap);
-                if _mm_movemask_epi8(gt) != 0 {
-                    any_gt = true;
+                h = _mm_adds_epi16(h, _mm_load_si128(qp.as_ptr().add(s_base + j)));
+                let e = _mm_load_si128(e_arr.as_ptr().add(j));
+                h = _mm_max_epi16(h, e);
+                h = _mm_max_epi16(h, f);
+                max_v = _mm_max_epi16(max_v, h);
+                _mm_store_si128(h1.as_mut_ptr().add(j), h);
+
+                h = _mm_subs_epu16(h, gapoe);
+                let e_new = _mm_max_epi16(_mm_subs_epu16(e, gape_v), h);
+                _mm_store_si128(e_arr.as_mut_ptr().add(j), e_new);
+                f = _mm_max_epi16(_mm_subs_epu16(f, gape_v), h);
+                h = _mm_load_si128(h0.as_ptr().add(j));
+            }
+
+            'lazy_f: for _ in 0..8 {
+                f = _mm_slli_si128::<2>(f);
+                for j in 0..slen {
+                    let h_old = _mm_load_si128(h1.as_ptr().add(j));
+                    let h_new = _mm_max_epi16(h_old, f);
+                    _mm_store_si128(h1.as_mut_ptr().add(j), h_new);
+                    let h_gap = _mm_subs_epu16(h_new, gapoe);
+                    f = _mm_subs_epu16(f, gape_v);
+                    if _mm_movemask_epi8(_mm_cmpgt_epi16(f, h_gap)) == 0 {
+                        break 'lazy_f;
+                    }
                 }
             }
-            if !any_gt {
-                break;
+
+            let imax = hmax_epi16(max_v) as i32;
+            if imax >= gmax {
+                gmax = imax;
+                te = i as i32;
+                hmax.copy_from_slice(h1);
+            }
+            std::mem::swap(&mut h0, &mut h1);
+        }
+
+        let mut qe = -1i32;
+        for i in 0..(slen * 8) {
+            let vec_idx = i / 8;
+            let lane = i & 7;
+            let mut lanes = [0i16; 8];
+            _mm_storeu_si128(
+                lanes.as_mut_ptr() as *mut __m128i,
+                _mm_load_si128(hmax.as_ptr().add(vec_idx)),
+            );
+            if lanes[lane] as i32 == gmax {
+                let q = i / 8 + (i & 7) * slen;
+                qe = q as i32;
             }
         }
+        (gmax, qe, te)
+    };
 
-        let imax = hmax_epi16(max_v) as i32;
-        if imax >= gmax {
-            gmax = imax;
-            te = i as i32;
-            hmax.copy_from_slice(&h1);
-        }
-        std::mem::swap(&mut h0, &mut h1);
-    }
-
-    let mut qe = -1i32;
-    for i in 0..(slen * 8) {
-        let vec_idx = i / 8;
-        let lane = i & 7;
-        let mut lanes = [0i16; 8];
-        _mm_storeu_si128(
-            lanes.as_mut_ptr() as *mut __m128i,
-            _mm_loadu_si128(hmax.as_ptr().add(vec_idx)),
-        );
-        if lanes[lane] as i32 == gmax {
-            let q = i / 8 + (i & 7) * slen;
-            qe = q as i32;
-        }
-    }
-    (gmax, qe, te)
+    KSW_LL_SCRATCH.with(|c| *c.borrow_mut() = scratch);
+    result
 }
 
 #[cfg(target_arch = "x86_64")]
