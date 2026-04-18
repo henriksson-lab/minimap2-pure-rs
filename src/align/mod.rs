@@ -2510,6 +2510,46 @@ pub fn align_skeleton(
         return;
     }
 
+    // Cross-language parity probe (start). Captures the alignment inputs —
+    // option flags, query sequence, anchor array, and the pre-alignment reg
+    // state from chaining. Finalized at the function's single exit below.
+    // Mirrors the TH_CALL probe wrapping mm_align_skeleton in
+    // minimap2/align.c; canonical encoding must be kept identical on both
+    // sides (per-element u64 pushes, not bulk bytes).
+    // Anchor array `a` is intentionally NOT hashed here: the C-side
+    // `mm_align_skeleton` receives `a` without a length — length is derived
+    // later from per-region (as, cnt) fields after mm_squeeze_a. Hashing the
+    // Rust-known `a.len()` would desynchronize the two probes. The
+    // per-region `as_` / `cnt` inputs already expose the relevant offsets
+    // into `a`.
+    #[cfg(feature = "tracehash")]
+    let mut th = {
+        let mut th = tracehash::th_call!("mm_align_skeleton");
+        th.input_u64(opt.flag.bits() as u64);
+        th.input_i64(qlen as i64);
+        th.input_u64(qstr.len() as u64);
+        for &b in qstr {
+            th.input_u64(b as u64);
+        }
+        th.input_u64(regs.len() as u64);
+        for r in regs.iter() {
+            th.input_i64(r.id as i64);
+            th.input_i64(r.cnt as i64);
+            th.input_i64(r.rid as i64);
+            th.input_i64(r.score as i64);
+            th.input_i64(r.qs as i64);
+            th.input_i64(r.qe as i64);
+            th.input_i64(r.rs as i64);
+            th.input_i64(r.re as i64);
+            // `r.as_` (offset into the shared a[] anchor array) is
+            // intentionally excluded from the probe — it's an internal
+            // packing detail that can legitimately differ between C and Rust
+            // while producing identical alignments downstream.
+            th.input_i64(r.rev as i64);
+        }
+        th
+    };
+
     // Encode query (forward and reverse complement) using thread-local buffers
     let mut qseq_fwd = ALIGN_QSEQ_FWD.with(|c| std::mem::take(&mut *c.borrow_mut()));
     let mut qseq_rev = ALIGN_QSEQ_REV.with(|c| std::mem::take(&mut *c.borrow_mut()));
@@ -2674,6 +2714,50 @@ pub fn align_skeleton(
         crate::hit::filter_regs(opt, qlen, regs);
     }
     crate::hit::hit_sort(regs, opt.alt_drop);
+
+    // Cross-language parity probe (end). Emits the post-alignment reg state
+    // including CIGAR bytes. Matches the TH_FINISH probe at the tail of
+    // mm_align_skeleton in minimap2/align.c.
+    #[cfg(feature = "tracehash")]
+    {
+        th.output_u64(regs.len() as u64);
+        for r in regs.iter() {
+            th.output_i64(r.id as i64);
+            th.output_i64(r.cnt as i64);
+            th.output_i64(r.rid as i64);
+            th.output_i64(r.score as i64);
+            th.output_i64(r.qs as i64);
+            th.output_i64(r.qe as i64);
+            th.output_i64(r.rs as i64);
+            th.output_i64(r.re as i64);
+            th.output_i64(r.parent as i64);
+            th.output_i64(r.subsc as i64);
+            th.output_i64(r.mlen as i64);
+            th.output_i64(r.blen as i64);
+            th.output_i64(r.mapq as i64);
+            th.output_i64(r.rev as i64);
+            th.output_i64(r.split as i64);
+            match &r.extra {
+                Some(e) => {
+                    th.output_i64(1);
+                    th.output_i64(e.dp_score as i64);
+                    th.output_i64(e.dp_max as i64);
+                    th.output_i64(e.dp_max2 as i64);
+                    th.output_i64(e.dp_max0 as i64);
+                    th.output_u64(e.trans_strand as u64);
+                    th.output_u64(e.cigar.0.len() as u64);
+                    for &op in &e.cigar.0 {
+                        th.output_u64(op as u64);
+                    }
+                }
+                None => {
+                    th.output_i64(0);
+                }
+            }
+        }
+        th.finish();
+    }
+
     // Return thread-local buffers
     ALIGN_QSEQ_FWD.with(|c| *c.borrow_mut() = qseq_fwd);
     ALIGN_QSEQ_REV.with(|c| *c.borrow_mut() = qseq_rev);

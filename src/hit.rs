@@ -96,6 +96,39 @@ pub fn gen_regs(hash: u32, qlen: i32, u: &[u64], a: &[Mm128], is_qstrand: bool) 
         reg_set_coor(&mut r, qlen, a, is_qstrand);
         regs.push(r);
     }
+
+    // Cross-language parity probe. Matches TH_CALL in minimap2/hit.c
+    // mm_gen_regs. Inputs: hash, qlen, u[], anchors bytes.
+    // Outputs: per-region (rid, rs, re, qs, qe, rev, score, cnt).
+    #[cfg(feature = "tracehash")]
+    {
+        let mut th = tracehash::th_call!("mm_gen_regs");
+        th.input_u64(hash as u64);
+        th.input_i64(qlen as i64);
+        th.input_u64(u.len() as u64);
+        for &ui in u {
+            th.input_u64(ui);
+        }
+        th.input_u64(a.len() as u64);
+        for m in a {
+            th.input_u64(m.x);
+            th.input_u64(m.y);
+        }
+        th.input_i64(is_qstrand as i64);
+        th.output_u64(regs.len() as u64);
+        for r in &regs {
+            th.output_i64(r.rid as i64);
+            th.output_i64(r.rs as i64);
+            th.output_i64(r.re as i64);
+            th.output_i64(r.qs as i64);
+            th.output_i64(r.qe as i64);
+            th.output_i64(r.rev as i64);
+            th.output_i64(r.score as i64);
+            th.output_i64(r.cnt as i64);
+        }
+        th.finish();
+    }
+
     regs
 }
 

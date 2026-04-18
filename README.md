@@ -390,54 +390,59 @@ SAM headers plus core fields.
 
 ### Whole-genome HiFi benchmark (hg38, `map-hifi`, 8 threads)
 
-Real hg38 primary assembly (3.1 GB FASTA, 194 contigs) × 20,370 HG002 HiFi
-reads (unique names). 3 interleaved rounds per scenario, warm page cache, same
-NFS mount. Both binaries built with matched aggressive optimization
-(`-O3 -march=native -flto` for C, `opt-level=3` + LTO + `codegen-units=1` +
-`-C target-cpu=native` for Rust), both invoked with `-t 8`. Median wall time:
+Real hg38 primary assembly (3.1 GB FASTA, 194 contigs) × **20,370 unique
+HG002 HiFi reads** (374 MB FASTQ, mean 9.6 kb, downloaded from GIAB CCS 10kb
+SMRT cell `m54238_180628_014238`). 3 interleaved rounds per scenario, warm
+page cache, same NFS mount. Both binaries built with matched aggressive
+optimization (`-O3 -march=native -flto` for C, `opt-level=3` + LTO +
+`codegen-units=1` + `-C target-cpu=native` for Rust), both invoked with
+`-t 8`. Median wall time:
 
 | Scenario | C (2.30-r1290) | Rust (2.30-rs) | Δ |
 |----------|---------------:|---------------:|------:|
 | Index build + write (FASTA → `.mmi`) | 48.87 s | **42.09 s** | **-14 %** |
-| Load `.mmi` + map 20,370 reads | 20.25 s | **18.18 s** | **-10 %** |
+| Load `.mmi` + map 20,370 reads | 20.29 s | **16.26 s** | **-20 %** |
 
 Stage breakdown of the load+map scenario (from tool-internal checkpoints):
 
 | Stage | C | Rust | Δ |
 |-------|--:|-----:|------:|
-| `.mmi` load | 12.5 s | **10.5 s** | -16 % |
-| Mapping (20,370 reads done) | 7.7 s | 7.5 s | ≈ 0 % |
+| `.mmi` load | 12.8 s | **10.3 s** | -19 % |
+| Mapping (20,370 reads done) | 7.6 s | **5.3 s** | **-30 %** |
 
 **Where Rust is actually faster:**
 
 - **Index build (-14 %)** comes from the three-stage reader / sketcher /
   dispatcher pipeline + `par_iter_mut` bucket post-process running with less
   scheduling overhead than C's `kt_pipeline` + `kt_for` (Rust averages 175 %
-  CPU vs C's 148 % on 8 threads).
-- **`.mmi` load (-16 %)** comes from bulk-byte reads and hashbrown
+  CPU vs C's 148 % on 8 threads during indexing).
+- **`.mmi` load (-19 %)** comes from bulk-byte reads and hashbrown
   deserialization vs C's khash.
-- **Mapping is essentially tied at matched compile flags.** Earlier numbers
-  showed Rust mapping ~12–15 % faster, but that gap was almost entirely the
-  compiler-flag asymmetry (C built with upstream `-O2` default).
+- **Mapping (-30 %)** on diverse real reads, with Rust at 234 % CPU vs C's
+  179 %. An earlier, less realistic benchmark that replicated 679 reads
+  30× showed the stages essentially tied — the homogeneous data was hiding
+  the real picture by saturating cache in both tools. Diverse reads exercise
+  branch prediction, cache, and parallelism more realistically.
 
-**Output parity:** both tools emit byte-identical record counts (25,290 PAF
-lines on the 30× replicated query, 757 primary + 86 secondary on the raw
-679-read file). PAF core columns 1–12 are identical record-for-record. Rust
-matches C's FASTQ truncation-rejection behavior and its singleton-in-hash
-`.mmi` layout, and Rust `.mmi` files are byte-size-identical to C's
-(3.50 GB) and cross-readable: C minimap2 loads Rust-produced indexes and
-produces its own native PAF output from them.
+**Output parity on real data:** byte-identical PAF on both the diverse
+20,370-read file (24,978 lines) and the 843-line 679-read file. Known parity
+items now include: FASTQ truncation rejection, singleton-in-hash `.mmi`
+layout, `chn_pen_gap` / `chn_pen_skip` f64-intermediate rounding, and stable
+x-only radix sort of chain anchors before the RMQ re-chain rescue path
+(matching `radix_sort_128x` semantics vs Rust's `(x, y)` default `Ord`).
+The last three were caught by the tracehash integration — see the notes on
+optional parity tracing under `--features tracehash`.
+
+Rust `.mmi` files are **byte-size-identical to C's** (3.50 GB) and
+cross-readable: C minimap2 loads Rust-produced indexes and produces its own
+native PAF output from them.
 
 **Benchmark fairness caveats:**
 
-- The 30× replicated query multiplies 679 distinct HiFi reads, so it measures
-  steady-state throughput on homogeneous data rather than real-world diversity.
+- Reads are all from one SMRT cell. Broader cross-library diversity would be
+  needed for production claims.
 - NFS and CPU frequency scaling add timing noise; interleaved C/Rust rounds
   mitigate drift but do not eliminate it.
-- The `dv` (divergence estimate) tag differs in value between the two tools.
-  This is a pre-existing implementation difference in the divergence
-  estimator, not a parity regression — it does not affect record counts,
-  primary/secondary classification, or PAF core columns.
 
 ### Fixture benchmarks
 

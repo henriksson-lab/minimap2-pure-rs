@@ -214,6 +214,47 @@ pub fn lchain_dp(
     CHAIN_V.with(|c| *c.borrow_mut() = v_scores);
     CHAIN_T.with(|c| *c.borrow_mut() = t);
 
+    // Cross-language parity probe. Matches the TH_CALL probe after
+    // mg_chain_backtrack in minimap2/lchain.c:mg_lchain_dp. Placed here so
+    // both sides always emit a row when reached (call-count parity).
+    // Output u[] is the chain descriptor vector; each u64 element encodes
+    // (count << 32) | max_score. Not hashing the compacted anchor array to
+    // keep the probe cheap — chain-descriptor parity is a sufficient
+    // DP-output signal.
+    #[cfg(feature = "tracehash")]
+    {
+        let mut th = tracehash::th_call!("mg_lchain_dp");
+        th.input_i64(max_dist_x as i64);
+        th.input_i64(max_dist_y as i64);
+        th.input_i64(bw as i64);
+        th.input_i64(max_skip as i64);
+        th.input_i64(max_iter as i64);
+        th.input_i64(min_cnt as i64);
+        th.input_i64(min_sc as i64);
+        th.input_f32(chn_pen_gap);
+        th.input_f32(chn_pen_skip);
+        th.input_i64(is_cdna as i64);
+        th.input_i64(n_seg as i64);
+        th.input_u64(a.len() as u64);
+        for m in a {
+            th.input_u64(m.x);
+            th.input_u64(m.y);
+        }
+        th.output_u64(u.len() as u64);
+        for &uc in &u {
+            th.output_u64(uc);
+        }
+        // Also hash v[] (anchor indices selected during backtrack) — needed
+        // because compact_a downstream uses both u and v, and a parity bug
+        // in v would silently corrupt the post-compact anchor layout while
+        // u still matches.
+        th.output_u64(v_indices.len() as u64);
+        for &vi in &v_indices {
+            th.output_i64(vi as i64);
+        }
+        th.finish();
+    }
+
     if u.is_empty() {
         return None;
     }

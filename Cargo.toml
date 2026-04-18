@@ -27,6 +27,17 @@ env_logger = "0.11"
 thiserror = "2"
 flate2 = "1"
 memchr = "2"
+tracehash-rs = { version = "0.1", optional = true }
+
+[features]
+default = []
+# Cross-language input/output hash tracing for parity debugging vs C minimap2.
+# Enable on both sides:
+#   cargo build --release --features tracehash
+#   make -C minimap2 clean && make -C minimap2 TRACEHASH=1
+# Then run both binaries with TRACEHASH_OUT, TRACEHASH_SIDE, TRACEHASH_RUN_ID
+# set; diff the resulting TSVs to localize parity divergences.
+tracehash = ["dep:tracehash-rs"]
 
 [dev-dependencies]
 criterion = "0.8"

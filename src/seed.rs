@@ -315,6 +315,37 @@ pub fn collect_matches(
     // Filter in-place instead of cloning into a new Vec
     seeds.retain(|s| !s.flt);
 
+    // Cross-language parity probe. Must emit bytes identically to the
+    // TH_CALL probe at the tail of mm_collect_matches in minimap2/seed.c.
+    // Canonicalization (both sides):
+    //   inputs  = qlen, max_occ, max_max_occ, dist, mv.len,
+    //             for each Mm128 in mv: (x, y)
+    //   outputs = n_a, rep_len, seeds.len(), mini_pos.len(),
+    //             for each u64 in mini_pos: value
+    // Per-element u64 encoding (rather than bulk bytes) keeps C and Rust
+    // trivially in sync — the public API exposes u64 writers on both sides.
+    #[cfg(feature = "tracehash")]
+    {
+        let mut th = tracehash::th_call!("mm_collect_matches");
+        th.input_i64(qlen as i64);
+        th.input_i64(max_occ as i64);
+        th.input_i64(max_max_occ as i64);
+        th.input_i64(dist as i64);
+        th.input_u64(mv.len() as u64);
+        for m in mv {
+            th.input_u64(m.x);
+            th.input_u64(m.y);
+        }
+        th.output_i64(n_a);
+        th.output_i64(rep_len as i64);
+        th.output_u64(seeds.len() as u64);
+        th.output_u64(mini_pos.len() as u64);
+        for &mp in &mini_pos {
+            th.output_u64(mp);
+        }
+        th.finish();
+    }
+
     SeedResult {
         seeds,
         n_a,

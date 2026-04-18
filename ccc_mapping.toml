@@ -1,0 +1,304 @@
+# Mapping file for code-complexity-comparator (`ccc-rs`).
+#
+# Pins Rust functions to their C minimap2 counterparts when the names differ
+# enough that ccc's automatic matchers (FFI attribute / exact name /
+# normalized name / fingerprint) miss them. ccc-rs picks this file up by
+# default if it exists in the working directory.
+#
+# Use:
+#   ccc-rs analyze minimap2     -l c    --recurse -o c.json
+#   ccc-rs analyze src          -l rust --recurse -o rust.json
+#   ccc-rs compare rust.json c.json --top 25
+#
+# Each entry shape (see ccc-rs/src/compare/matching.rs):
+#   [[entries]]
+#   rust = "rust_name"           # function name in the Rust report
+#   other = "c_name"             # function name in the C report
+#   rust_path = "..."            # optional: Rust file path suffix to disambiguate
+#   other_path = "..."           # optional: C file path suffix
+#
+# Pin both sides whenever a function name appears in multiple files.
+
+# ---- index construction & I/O ----
+[[entries]]
+rust = "build_from_file"
+other = "mm_idx_gen"
+rust_path = "src/index/mod.rs"
+
+[[entries]]
+rust = "build_from_str"
+other = "mm_idx_str"
+rust_path = "src/index/mod.rs"
+
+[[entries]]
+rust = "build_parts_from_file"
+other = "mm_idx_split_init"
+rust_path = "src/index/mod.rs"
+
+[[entries]]
+rust = "post_process"
+other = "worker_post"
+rust_path = "src/index/bucket.rs"
+other_path = "minimap2/index.c"
+
+[[entries]]
+rust = "stat"
+other = "mm_idx_stat"
+rust_path = "src/index/mod.rs"
+
+[[entries]]
+rust = "cal_max_occ"
+other = "mm_idx_cal_max_occ"
+rust_path = "src/index/mod.rs"
+
+[[entries]]
+rust = "index_names"
+other = "mm_idx_index_name"
+rust_path = "src/index/mod.rs"
+
+[[entries]]
+rust = "name2id"
+other = "mm_idx_name2id"
+rust_path = "src/index/mod.rs"
+
+[[entries]]
+rust = "read_alt_file"
+other = "mm_idx_alt_read"
+rust_path = "src/index/mod.rs"
+
+[[entries]]
+rust = "getseq"
+other = "mm_idx_getseq"
+rust_path = "src/index/mod.rs"
+
+[[entries]]
+rust = "getseq_rev"
+other = "mm_idx_getseq_rev"
+rust_path = "src/index/mod.rs"
+
+[[entries]]
+rust = "getseq2"
+other = "mm_idx_getseq2"
+rust_path = "src/index/mod.rs"
+
+[[entries]]
+rust = "get"
+other = "mm_idx_get"
+rust_path = "src/index/bucket.rs"
+
+[[entries]]
+rust = "idx_dump"
+other = "mm_idx_dump"
+rust_path = "src/index/io.rs"
+
+[[entries]]
+rust = "idx_load"
+other = "mm_idx_load"
+rust_path = "src/index/io.rs"
+
+# ---- seed collection & sketching ----
+[[entries]]
+rust = "seed_collect_all"
+other = "mm_seed_collect_all"
+rust_path = "src/seed.rs"
+
+[[entries]]
+rust = "collect_matches"
+other = "mm_collect_matches"
+rust_path = "src/seed.rs"
+
+[[entries]]
+rust = "seed_select"
+other = "mm_seed_select"
+rust_path = "src/seed.rs"
+
+[[entries]]
+rust = "seed_mz_flt"
+other = "mm_seed_mz_flt"
+rust_path = "src/seed.rs"
+
+[[entries]]
+rust = "expand_seeds_to_anchors"
+other = "mm_seed_to_a"
+rust_path = "src/seed.rs"
+
+# `mm_sketch` keeps the C name in Rust — auto-match handles it, but pinned
+# here so the path constraint disambiguates from any test stubs.
+[[entries]]
+rust = "mm_sketch"
+other = "mm_sketch"
+rust_path = "src/sketch.rs"
+
+# ---- mapping pipeline ----
+[[entries]]
+rust = "map_query"
+other = "mm_map"
+rust_path = "src/map.rs"
+
+[[entries]]
+rust = "map_frag"
+other = "mm_map_frag"
+rust_path = "src/map.rs"
+
+[[entries]]
+rust = "est_err"
+other = "mm_est_err"
+rust_path = "src/esterr.rs"
+
+[[entries]]
+rust = "get_for_qpos"
+other = "get_for_qpos"
+rust_path = "src/esterr.rs"
+
+[[entries]]
+rust = "get_mini_idx"
+other = "get_mini_idx"
+rust_path = "src/esterr.rs"
+
+# ---- options / presets ----
+[[entries]]
+rust = "set_opt"
+other = "mm_set_opt"
+rust_path = "src/options.rs"
+
+[[entries]]
+rust = "mapopt_update"
+other = "mm_mapopt_update"
+rust_path = "src/options.rs"
+
+# ---- chaining ----
+[[entries]]
+rust = "lchain_dp"
+other = "mg_lchain_dp"
+rust_path = "src/chain/dp.rs"
+
+[[entries]]
+rust = "lchain_rmq"
+other = "mg_lchain_rmq"
+rust_path = "src/chain/rmq.rs"
+
+# ---- alignment ----
+[[entries]]
+rust = "align_skeleton"
+other = "mm_align_skeleton"
+rust_path = "src/align/mod.rs"
+
+[[entries]]
+rust = "fix_bad_ends"
+other = "mm_fix_bad_ends"
+rust_path = "src/align/mod.rs"
+
+[[entries]]
+rust = "test_zdrop"
+other = "mm_test_zdrop"
+rust_path = "src/align/mod.rs"
+
+# Scalar KSW2 kernels — the SIMD versions live in src/align/ksw2_simd.rs.
+[[entries]]
+rust = "ksw_extz2_sse"
+other = "ksw_extz2_sse"
+rust_path = "src/align/ksw2.rs"
+other_path = "minimap2/ksw2_extz2_sse.c"
+
+[[entries]]
+rust = "ksw_extd2_sse"
+other = "ksw_extd2_sse"
+rust_path = "src/align/ksw2.rs"
+other_path = "minimap2/ksw2_extd2_sse.c"
+
+[[entries]]
+rust = "ksw_exts2_sse"
+other = "ksw_exts2_sse"
+rust_path = "src/align/ksw2.rs"
+other_path = "minimap2/ksw2_exts2_sse.c"
+
+[[entries]]
+rust = "extz2_sse2"
+other = "ksw_extz2_sse"
+rust_path = "src/align/ksw2_simd.rs"
+
+[[entries]]
+rust = "extd2_sse2"
+other = "ksw_extd2_sse"
+rust_path = "src/align/ksw2_simd.rs"
+
+[[entries]]
+rust = "ksw_ll_i16"
+other = "ksw_ll_i16"
+rust_path = "src/align/ksw2.rs"
+
+# ---- hits / MAPQ ----
+[[entries]]
+rust = "set_parent"
+other = "mm_set_parent"
+rust_path = "src/hit.rs"
+
+[[entries]]
+rust = "set_sam_pri"
+other = "mm_set_sam_pri"
+rust_path = "src/hit.rs"
+
+[[entries]]
+rust = "filter_strand_retained"
+other = "mm_filter_regs"
+rust_path = "src/hit.rs"
+
+# ---- formatting ----
+[[entries]]
+rust = "write_paf"
+other = "mm_write_paf"
+rust_path = "src/format/paf.rs"
+
+[[entries]]
+rust = "write_sam"
+other = "mm_write_sam"
+rust_path = "src/format/sam.rs"
+
+[[entries]]
+rust = "gen_cs"
+other = "mm_gen_cs"
+rust_path = "src/format/cs.rs"
+
+[[entries]]
+rust = "gen_md"
+other = "mm_gen_MD"
+rust_path = "src/format/cs.rs"
+
+# ---- sort utilities ----
+[[entries]]
+rust = "radix_sort_mm128"
+other = "radix_sort_128x"
+rust_path = "src/sort.rs"
+
+[[entries]]
+rust = "radix_sort_u64"
+other = "radix_sort_64"
+rust_path = "src/sort.rs"
+
+[[entries]]
+rust = "ksmall_u32"
+other = "ks_ksmall_uint32_t"
+rust_path = "src/sort.rs"
+
+# ---- FASTA/FASTQ I/O ----
+[[entries]]
+rust = "read_record"
+other = "kseq_read"
+rust_path = "src/bseq.rs"
+
+[[entries]]
+rust = "read_batch"
+other = "mm_bseq_read"
+rust_path = "src/bseq.rs"
+
+# ---- paired-end ----
+[[entries]]
+rust = "pair"
+other = "mm_pair"
+rust_path = "src/pe.rs"
+
+# ---- threading / pipeline driver ----
+# Rust uses crossbeam channels + thread::scope + rayon; C uses pthread-based
+# kt_pipeline / kt_for. These are structurally different and not 1:1 — left
+# unmapped so ccc reports them as architecture differences rather than
+# unmatched functions.
