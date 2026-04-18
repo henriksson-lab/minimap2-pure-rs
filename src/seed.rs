@@ -294,7 +294,12 @@ pub fn collect_matches(
     }
     rep_len += rep_en - rep_st;
 
-    let mut mini_pos = Vec::with_capacity(mv.len());
+    // Matches C's mm_collect_matches in seed.c: push to mini_pos only for
+    // seeds that both had index matches (i.e. survived seed_collect_all) and
+    // passed the occurrence filter. Minimizers from `mv` with no matches are
+    // not in `seeds` and must not be emitted — otherwise mini_pos is too
+    // long and mm_est_err's avg_k / n_match / n_tot diverge from C.
+    let mut mini_pos = Vec::with_capacity(seeds.len());
     let mut seed_i = 0usize;
     for p in mv {
         let q_pos = p.y as u32;
@@ -304,8 +309,6 @@ pub fn collect_matches(
                 mini_pos.push((q_span as u64) << 32 | (q_pos >> 1) as u64);
             }
             seed_i += 1;
-        } else {
-            mini_pos.push((q_span as u64) << 32 | (q_pos >> 1) as u64);
         }
     }
 
@@ -667,6 +670,87 @@ mod tests {
         // Should have some seeds
         assert!(!result.seeds.is_empty());
         assert!(result.n_a > 0);
+    }
+
+    /// Regression test for mm_est_err parity with C: mini_pos must contain
+    /// only entries for query minimizers that (a) found matches in the index
+    /// during seed_collect_all, and (b) were not filtered out by occurrence
+    /// cutoffs. Matches mm_collect_matches() in seed.c:125.
+    ///
+    /// Prior bug: the Rust loop had an `else` branch that pushed to mini_pos
+    /// for every minimizer with no index match, inflating len and corrupting
+    /// avg_k / n_match / n_tot in est_err → wrong `dv` tag values.
+    #[test]
+    fn test_collect_matches_mini_pos_excludes_unmatched_minimizers() {
+        // Small index built from a specific sequence — query minimizers NOT
+        // present in this sequence will have no index matches.
+        let mi = make_test_index();
+        let ref_seq: &[u8] = b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT";
+        let k = 10usize;
+        let w = 5usize;
+
+        // Sketch a query that shares only a prefix with the reference; the
+        // unique suffix will produce minimizers with no matches.
+        let mut ref_mv = Vec::new();
+        mm_sketch(ref_seq, w, k, 0, false, &mut ref_mv);
+        let mut mv = Vec::new();
+        let mixed_query: &[u8] =
+            b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTGGGGCCCCAAAATTTTGGGGCCCCAAAATTTTGGGG";
+        mm_sketch(mixed_query, w, k, 1, false, &mut mv);
+        assert!(!mv.is_empty());
+
+        let result = collect_matches(&mi, &mv, mixed_query.len() as i32, 1000, 5000, 500);
+        // mini_pos must never exceed the number of seeds that actually had
+        // matches in the index; the unmatched minimizers from the unique
+        // suffix must NOT leak into mini_pos.
+        assert!(
+            result.mini_pos.len() <= result.seeds.len(),
+            "mini_pos ({}) must be ≤ seeds ({}); extra entries come from \
+             unmatched minimizers and break mm_est_err parity",
+            result.mini_pos.len(),
+            result.seeds.len()
+        );
+        // And there must be fewer mini_pos entries than total query
+        // minimizers, proving unmatched ones were dropped.
+        assert!(
+            result.mini_pos.len() < mv.len(),
+            "mv has {} minimizers but all {} ended up in mini_pos — the \
+             no-match branch is leaking again",
+            mv.len(),
+            result.mini_pos.len()
+        );
+    }
+
+    /// Invariant check: mini_pos entries must encode the exact
+    /// `(q_span << 32) | (q_pos >> 1)` layout C emits at seed.c:125.
+    #[test]
+    fn test_collect_matches_mini_pos_encoding() {
+        let mi = make_test_index();
+        let mut mv = Vec::new();
+        mm_sketch(
+            b"ACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGTACGT",
+            5,
+            10,
+            0,
+            false,
+            &mut mv,
+        );
+        let result = collect_matches(&mi, &mv, 54, 1000, 5000, 500);
+        for (i, &mp) in result.mini_pos.iter().enumerate() {
+            let span = (mp >> 32) & 0xff;
+            assert!(span > 0, "mini_pos[{i}] has zero q_span");
+            // Every mini_pos entry must correspond to one of the retained seeds.
+            let pos = mp as u32;
+            let found = result
+                .seeds
+                .iter()
+                .any(|s| !s.flt && s.q_span as u64 == span && s.q_pos >> 1 == pos);
+            assert!(
+                found,
+                "mini_pos[{i}] (span={span}, pos={pos}) has no matching \
+                 non-filtered seed"
+            );
+        }
     }
 
     #[test]

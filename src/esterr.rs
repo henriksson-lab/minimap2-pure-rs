@@ -83,7 +83,9 @@ pub fn est_err(mi: &MmIdx, qlen: i32, regs: &mut [AlignReg], a: &[Mm128], mini_p
         if r.qs as f32 > avg_k && r.rs as f32 > avg_k {
             n_tot += 1;
         }
-        if (qlen - r.qe) as f32 > avg_k && (l_ref - r.re) as f32 > avg_k {
+        // NB: C uses `qlen - r->qs` here, not `qlen - r->qe`. Looks like a
+        // typo in upstream esterr.c:61, but we must match C byte-for-byte.
+        if (qlen - r.qs) as f32 > avg_k && (l_ref - r.re) as f32 > avg_k {
             n_tot += 1;
         }
         r.div = if n_match >= n_tot {
