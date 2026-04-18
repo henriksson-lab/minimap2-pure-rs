@@ -619,6 +619,31 @@ pub fn set_mapq(
         return;
     }
 
+    // Cross-language parity probe: input snapshot of every reg's
+    // mapq-relevant fields. Paired with TH_FINISH at the tail below.
+    // Matches TH_CALL in minimap2/hit.c mm_set_mapq2.
+    #[cfg(feature = "tracehash")]
+    let mut th = {
+        let mut th = tracehash::th_call!("mm_set_mapq2");
+        th.input_i64(regs.len() as i64);
+        th.input_i64(min_chain_sc as i64);
+        th.input_i64(match_sc as i64);
+        th.input_i64(rep_len as i64);
+        th.input_i64(is_sr as i64);
+        th.input_i64(is_splice as i64);
+        for r in regs.iter() {
+            th.input_i64(r.id as i64);
+            th.input_i64(r.cnt as i64);
+            th.input_i64(r.score as i64);
+            th.input_i64(r.parent as i64);
+            th.input_i64(r.subsc as i64);
+            th.input_i64(r.n_sub as i64);
+            th.input_i64(r.inv as i64);
+            th.input_i64(r.is_spliced as i64);
+        }
+        th
+    };
+
     let mut sum_sc: i64 = 0;
     let mut n_2nd_splice = 0;
     for r in regs.iter() {
@@ -707,6 +732,18 @@ pub fn set_mapq(
         }
     }
     set_inv_mapq(regs);
+
+    // Close the parity probe: emit the post-MAPQ reg state.
+    #[cfg(feature = "tracehash")]
+    {
+        th.output_u64(regs.len() as u64);
+        for r in regs.iter() {
+            th.output_i64(r.id as i64);
+            th.output_i64(r.mapq as i64);
+            th.output_i64(r.parent as i64);
+        }
+        th.finish();
+    }
 }
 
 fn set_inv_mapq(regs: &mut [AlignReg]) {

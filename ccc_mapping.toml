@@ -1,25 +1,426 @@
 # Mapping file for code-complexity-comparator (`ccc-rs`).
 #
-# Pins Rust functions to their C minimap2 counterparts when the names differ
-# enough that ccc's automatic matchers (FFI attribute / exact name /
-# normalized name / fingerprint) miss them. ccc-rs picks this file up by
-# default if it exists in the working directory.
+# Pins Rust functions to their C minimap2 counterparts so ccc's auto-matcher
+# (FFI attribute / exact name / normalized name / fingerprint) does not make
+# wrong pairings. ccc-rs picks this file up automatically when it exists in
+# the working directory.
 #
-# Use:
-#   ccc-rs analyze minimap2     -l c    --recurse -o c.json
-#   ccc-rs analyze src          -l rust --recurse -o rust.json
-#   ccc-rs compare rust.json c.json --top 25
+# Usage:
+#   ccc-rs analyze minimap2 -l c    --recurse -o c.json
+#   ccc-rs analyze src      -l rust --recurse -o rust.json
+#   ccc-rs compare rust.json c.json --top 50
+#   ccc-rs constants-diff rust.json c.json
 #
-# Each entry shape (see ccc-rs/src/compare/matching.rs):
+# Entry shape (see ccc-rs/src/compare/matching.rs):
 #   [[entries]]
 #   rust = "rust_name"           # function name in the Rust report
 #   other = "c_name"             # function name in the C report
-#   rust_path = "..."            # optional: Rust file path suffix to disambiguate
-#   other_path = "..."           # optional: C file path suffix
+#   rust_path = "suffix/of/file" # optional Rust file path suffix
+#   other_path = "suffix/of/file.c" # optional C file path suffix
 #
-# Pin both sides whenever a function name appears in multiple files.
+# Groups below follow C file order in minimap2/.
 
-# ---- index construction & I/O ----
+# =========================================================================
+# align.c
+# =========================================================================
+[[entries]]
+rust = "align_skeleton"
+other = "mm_align_skeleton"
+rust_path = "src/align/mod.rs"
+
+[[entries]]
+rust = "align1"
+other = "mm_align1"
+rust_path = "src/align/mod.rs"
+
+[[entries]]
+rust = "align1_inv"
+other = "mm_align1_inv"
+rust_path = "src/align/mod.rs"
+
+[[entries]]
+rust = "align_pair"
+other = "mm_align_pair"
+rust_path = "src/align/mod.rs"
+
+[[entries]]
+rust = "align_pair_dual"
+other = "mm_align_pair"
+rust_path = "src/align/mod.rs"
+
+[[entries]]
+rust = "append_cigar"
+other = "mm_append_cigar"
+rust_path = "src/align/mod.rs"
+
+[[entries]]
+rust = "fix_bad_ends"
+other = "mm_fix_bad_ends"
+rust_path = "src/align/mod.rs"
+
+[[entries]]
+rust = "fix_cigar"
+other = "mm_fix_cigar"
+rust_path = "src/align/mod.rs"
+
+[[entries]]
+rust = "filter_bad_seeds"
+other = "mm_filter_bad_seeds"
+rust_path = "src/align/mod.rs"
+
+[[entries]]
+rust = "filter_bad_seeds_alt"
+other = "mm_filter_bad_seeds_alt"
+rust_path = "src/align/mod.rs"
+
+[[entries]]
+rust = "get_hplen_back"
+other = "mm_get_hplen_back"
+rust_path = "src/align/mod.rs"
+
+[[entries]]
+rust = "max_stretch"
+other = "mm_max_stretch"
+rust_path = "src/align/mod.rs"
+
+[[entries]]
+rust = "test_zdrop"
+other = "mm_test_zdrop"
+rust_path = "src/align/mod.rs"
+
+[[entries]]
+rust = "update_cigar_eqx"
+other = "mm_update_cigar_eqx"
+rust_path = "src/align/mod.rs"
+
+[[entries]]
+rust = "collect_long_gaps"
+other = "collect_long_gaps"
+rust_path = "src/align/mod.rs"
+other_path = "minimap2/align.c"
+
+[[entries]]
+rust = "adjust_minier"
+other = "mm_adjust_minier"
+rust_path = "src/align/mod.rs"
+
+[[entries]]
+rust = "cigar_alignment_score"
+other = "mm_event_identity"
+rust_path = "src/align/mod.rs"
+
+[[entries]]
+rust = "gen_simple_mat"
+other = "ksw_gen_simple_mat"
+rust_path = "src/align/score.rs"
+
+[[entries]]
+rust = "gen_ts_mat"
+other = "ksw_gen_ts_mat"
+rust_path = "src/align/score.rs"
+
+# =========================================================================
+# ksw2_*.c  (alignment kernels)
+# =========================================================================
+# Scalar KSW2
+[[entries]]
+rust = "ksw_extz2"
+other = "ksw_extz2_sse"
+rust_path = "src/align/ksw2.rs"
+other_path = "minimap2/ksw2_extz2_sse.c"
+
+[[entries]]
+rust = "ksw_extd2"
+other = "ksw_extd2_sse"
+rust_path = "src/align/ksw2.rs"
+other_path = "minimap2/ksw2_extd2_sse.c"
+
+[[entries]]
+rust = "ksw_exts2"
+other = "ksw_exts2_sse"
+rust_path = "src/align/ksw2.rs"
+other_path = "minimap2/ksw2_exts2_sse.c"
+
+[[entries]]
+rust = "ksw_ll_i16"
+other = "ksw_ll_i16"
+rust_path = "src/align/ksw2.rs"
+
+[[entries]]
+rust = "ksw_ll_i16_scalar"
+other = "ksw_ll_i16"
+rust_path = "src/align/ksw2.rs"
+
+[[entries]]
+rust = "ksw_ll_i16_sse2"
+other = "ksw_ll_i16"
+rust_path = "src/align/ksw2.rs"
+
+[[entries]]
+rust = "apply_zdrop"
+other = "ksw_apply_zdrop"
+rust_path = "src/align/ksw2.rs"
+
+[[entries]]
+rust = "push_cigar_fn"
+other = "ksw_push_cigar"
+rust_path = "src/align/ksw2.rs"
+
+# SIMD KSW2
+[[entries]]
+rust = "extz2_sse2"
+other = "ksw_extz2_sse"
+rust_path = "src/align/ksw2_simd.rs"
+other_path = "minimap2/ksw2_extz2_sse.c"
+
+[[entries]]
+rust = "extd2_sse2"
+other = "ksw_extd2_sse"
+rust_path = "src/align/ksw2_simd.rs"
+other_path = "minimap2/ksw2_extd2_sse.c"
+
+[[entries]]
+rust = "extd2_sse41_avx2"
+other = "ksw_extd2_sse"
+rust_path = "src/align/ksw2_simd.rs"
+other_path = "minimap2/ksw2_extd2_sse.c"
+
+[[entries]]
+rust = "extd2_sse41_only"
+other = "ksw_extd2_sse"
+rust_path = "src/align/ksw2_simd.rs"
+other_path = "minimap2/ksw2_extd2_sse.c"
+
+# =========================================================================
+# bseq.c / bseq.h  (FASTA/FASTQ I/O)
+# =========================================================================
+[[entries]]
+rust = "open"
+other = "mm_bseq_open"
+rust_path = "src/bseq.rs"
+
+[[entries]]
+rust = "is_eof"
+other = "mm_bseq_eof"
+rust_path = "src/bseq.rs"
+
+[[entries]]
+rust = "read_record"
+other = "kseq2bseq"
+rust_path = "src/bseq.rs"
+
+[[entries]]
+rust = "read_batch"
+other = "mm_bseq_read"
+rust_path = "src/bseq.rs"
+
+[[entries]]
+rust = "qname_len"
+other = "mm_qname_len"
+rust_path = "src/seq.rs"
+
+[[entries]]
+rust = "qname_same"
+other = "mm_qname_same"
+rust_path = "src/seq.rs"
+
+[[entries]]
+rust = "revcomp_ascii"
+other = "mm_revcomp_bseq"
+rust_path = "src/seq.rs"
+
+# =========================================================================
+# esterr.c  (divergence estimation)
+# =========================================================================
+[[entries]]
+rust = "est_err"
+other = "mm_est_err"
+rust_path = "src/esterr.rs"
+
+[[entries]]
+rust = "get_for_qpos"
+other = "get_for_qpos"
+rust_path = "src/esterr.rs"
+other_path = "minimap2/esterr.c"
+
+[[entries]]
+rust = "get_mini_idx"
+other = "get_mini_idx"
+rust_path = "src/esterr.rs"
+other_path = "minimap2/esterr.c"
+
+# =========================================================================
+# format.c  (PAF / SAM / cs / MD output)
+# =========================================================================
+[[entries]]
+rust = "write_paf"
+other = "mm_write_paf"
+rust_path = "src/format/paf.rs"
+
+[[entries]]
+rust = "write_paf_unmapped"
+other = "mm_write_paf4"
+rust_path = "src/format/paf.rs"
+
+[[entries]]
+rust = "write_tags"
+other = "write_tags"
+rust_path = "src/format/paf.rs"
+other_path = "minimap2/format.c"
+
+[[entries]]
+rust = "event_identity"
+other = "mm_event_identity"
+rust_path = "src/format/paf.rs"
+
+[[entries]]
+rust = "write_sam_record"
+other = "mm_write_sam"
+rust_path = "src/format/sam.rs"
+
+[[entries]]
+rust = "write_sam_hdr"
+other = "mm_write_sam_hdr"
+rust_path = "src/format/sam.rs"
+
+[[entries]]
+rust = "write_sam_cigar_text"
+other = "write_sam_cigar"
+rust_path = "src/format/sam.rs"
+
+[[entries]]
+rust = "sam_long_cigar_in_tag"
+other = "mm_write_sam"
+rust_path = "src/format/sam.rs"
+
+[[entries]]
+rust = "sam_sa_cigar"
+other = "write_sam_cigar"
+rust_path = "src/format/sam.rs"
+
+[[entries]]
+rust = "gen_cs"
+other = "mm_gen_cs"
+rust_path = "src/format/cs.rs"
+
+[[entries]]
+rust = "gen_ds"
+other = "mm_gen_ds"
+rust_path = "src/format/cs.rs"
+
+[[entries]]
+rust = "gen_md"
+other = "mm_gen_MD"
+rust_path = "src/format/cs.rs"
+
+[[entries]]
+rust = "write_indel_ds"
+other = "write_indel_ds"
+rust_path = "src/format/cs.rs"
+other_path = "minimap2/format.c"
+
+# =========================================================================
+# hit.c  (hit filtering, MAPQ, parent/secondary)
+# =========================================================================
+[[entries]]
+rust = "gen_regs"
+other = "mm_gen_regs"
+rust_path = "src/hit.rs"
+
+[[entries]]
+rust = "reg_set_coor"
+other = "mm_reg_set_coor"
+rust_path = "src/hit.rs"
+
+[[entries]]
+rust = "cal_fuzzy_len"
+other = "mm_cal_fuzzy_len"
+rust_path = "src/hit.rs"
+
+[[entries]]
+rust = "filter_regs"
+other = "mm_filter_regs"
+rust_path = "src/hit.rs"
+
+[[entries]]
+rust = "filter_strand_retained"
+other = "mm_filter_strand_retained"
+rust_path = "src/hit.rs"
+
+[[entries]]
+rust = "hit_sort"
+other = "mm_hit_sort"
+rust_path = "src/hit.rs"
+
+[[entries]]
+rust = "mark_alt"
+other = "mm_mark_alt"
+rust_path = "src/hit.rs"
+
+[[entries]]
+rust = "alt_score"
+other = "mm_alt_score"
+rust_path = "src/hit.rs"
+
+[[entries]]
+rust = "set_parent"
+other = "mm_set_parent"
+rust_path = "src/hit.rs"
+
+[[entries]]
+rust = "set_sam_pri"
+other = "mm_set_sam_pri"
+rust_path = "src/hit.rs"
+
+[[entries]]
+rust = "set_inv_mapq"
+other = "mm_set_inv_mapq"
+rust_path = "src/hit.rs"
+
+[[entries]]
+rust = "set_mapq"
+other = "mm_set_mapq2"
+rust_path = "src/hit.rs"
+
+[[entries]]
+rust = "select_sub"
+other = "mm_select_sub"
+rust_path = "src/hit.rs"
+
+[[entries]]
+rust = "select_sub_with_strand"
+other = "mm_select_sub"
+rust_path = "src/hit.rs"
+
+[[entries]]
+rust = "split_reg"
+other = "mm_split_reg"
+rust_path = "src/hit.rs"
+
+[[entries]]
+rust = "sync_regs"
+other = "mm_sync_regs"
+rust_path = "src/hit.rs"
+
+[[entries]]
+rust = "update_dp_max"
+other = "mm_update_dp_max"
+rust_path = "src/hit.rs"
+
+[[entries]]
+rust = "hash64"
+other = "hash64"
+rust_path = "src/hit.rs"
+other_path = "minimap2/hit.c"
+
+# =========================================================================
+# index.c  (index build and I/O)
+# =========================================================================
+[[entries]]
+rust = "new"
+other = "mm_idx_init"
+rust_path = "src/index/mod.rs"
+
 [[entries]]
 rust = "build_from_file"
 other = "mm_idx_gen"
@@ -31,15 +432,14 @@ other = "mm_idx_str"
 rust_path = "src/index/mod.rs"
 
 [[entries]]
-rust = "build_parts_from_file"
-other = "mm_idx_split_init"
+rust = "build_from_records"
+other = "mm_idx_gen"
 rust_path = "src/index/mod.rs"
 
 [[entries]]
-rust = "post_process"
-other = "worker_post"
-rust_path = "src/index/bucket.rs"
-other_path = "minimap2/index.c"
+rust = "build_parts_from_file"
+other = "mm_idx_gen"
+rust_path = "src/index/mod.rs"
 
 [[entries]]
 rust = "stat"
@@ -82,6 +482,28 @@ other = "mm_idx_getseq2"
 rust_path = "src/index/mod.rs"
 
 [[entries]]
+rust = "add_minimizers"
+other = "mm_idx_add"
+rust_path = "src/index/mod.rs"
+
+[[entries]]
+rust = "post_process"
+other = "mm_idx_post"
+rust_path = "src/index/mod.rs"
+
+# Bucket-level post_process matches C's kt_for worker body.
+[[entries]]
+rust = "post_process"
+other = "worker_post"
+rust_path = "src/index/bucket.rs"
+other_path = "minimap2/index.c"
+
+[[entries]]
+rust = "add"
+other = "mm_idx_add"
+rust_path = "src/index/bucket.rs"
+
+[[entries]]
 rust = "get"
 other = "mm_idx_get"
 rust_path = "src/index/bucket.rs"
@@ -96,7 +518,314 @@ rust = "idx_load"
 other = "mm_idx_load"
 rust_path = "src/index/io.rs"
 
-# ---- seed collection & sketching ----
+# =========================================================================
+# jump.c  (splice junction jumps)
+# =========================================================================
+[[entries]]
+rust = "jump_split"
+other = "mm_jump_split"
+rust_path = "src/jump.rs"
+
+[[entries]]
+rust = "jump_split_left"
+other = "mm_jump_split_left"
+rust_path = "src/jump.rs"
+
+[[entries]]
+rust = "jump_split_right"
+other = "mm_jump_split_right"
+rust_path = "src/jump.rs"
+
+[[entries]]
+rust = "jump_check_left"
+other = "mm_jump_check"
+rust_path = "src/jump.rs"
+
+[[entries]]
+rust = "jump_check_right"
+other = "mm_jump_check"
+rust_path = "src/jump.rs"
+
+# =========================================================================
+# lchain.c  (chaining DP + RMQ)
+# =========================================================================
+[[entries]]
+rust = "lchain_dp"
+other = "mg_lchain_dp"
+rust_path = "src/chain/dp.rs"
+
+[[entries]]
+rust = "lchain_rmq"
+other = "mg_lchain_rmq"
+rust_path = "src/chain/rmq.rs"
+
+[[entries]]
+rust = "chain_backtrack"
+other = "mg_chain_backtrack"
+rust_path = "src/chain/backtrack.rs"
+
+[[entries]]
+rust = "chain_bk_end"
+other = "mg_chain_bk_end"
+rust_path = "src/chain/backtrack.rs"
+
+[[entries]]
+rust = "compact_a"
+other = "compact_a"
+rust_path = "src/chain/backtrack.rs"
+other_path = "minimap2/lchain.c"
+
+[[entries]]
+rust = "comput_sc"
+other = "comput_sc"
+rust_path = "src/chain/mod.rs"
+other_path = "minimap2/lchain.c"
+
+[[entries]]
+rust = "comput_sc_simple"
+other = "comput_sc_simple"
+rust_path = "src/chain/mod.rs"
+other_path = "minimap2/lchain.c"
+
+# mg_log2 is declared in mmpriv.h and used by lchain.c scoring.
+[[entries]]
+rust = "mg_log2"
+other = "mg_log2"
+rust_path = "src/chain/mod.rs"
+other_path = "minimap2/mmpriv.h"
+
+# =========================================================================
+# main.c  (CLI entry point)
+# =========================================================================
+[[entries]]
+rust = "main"
+other = "main"
+rust_path = "src/main.rs"
+other_path = "minimap2/main.c"
+
+[[entries]]
+rust = "parse_num"
+other = "mm_parse_num"
+rust_path = "src/main.rs"
+
+# =========================================================================
+# map.c  (mapping pipeline)
+# =========================================================================
+[[entries]]
+rust = "map_query"
+other = "mm_map"
+rust_path = "src/map.rs"
+
+[[entries]]
+rust = "map_frag_queries"
+other = "mm_map_frag"
+rust_path = "src/map.rs"
+
+[[entries]]
+rust = "chain_fragment"
+other = "chain_post"
+rust_path = "src/map.rs"
+
+[[entries]]
+rust = "collect_fragment_minimizers"
+other = "collect_minimizers"
+rust_path = "src/map.rs"
+other_path = "minimap2/map.c"
+
+[[entries]]
+rust = "expand_seeds_to_anchors"
+other = "collect_seed_hits"
+rust_path = "src/seed.rs"
+
+[[entries]]
+rust = "expand_seeds_to_anchors_heap"
+other = "collect_seed_hits_heap"
+rust_path = "src/seed.rs"
+
+[[entries]]
+rust = "dust_minimizers"
+other = "mm_dust_minier"
+rust_path = "src/map.rs"
+
+[[entries]]
+rust = "skip_seed"
+other = "skip_seed"
+rust_path = "src/seed.rs"
+other_path = "minimap2/map.c"
+
+[[entries]]
+rust = "sort_seed_anchors"
+other = "collect_seed_hits"
+rust_path = "src/map.rs"
+
+[[entries]]
+rust = "best_chain_segment_count"
+other = "mm_map_frag_core"
+rust_path = "src/map.rs"
+
+[[entries]]
+rust = "query_hash"
+other = "hash64"
+rust_path = "src/map.rs"
+other_path = "minimap2/sketch.c"
+
+[[entries]]
+rust = "wang_hash"
+other = "__ac_Wang_hash"
+rust_path = "src/map.rs"
+
+[[entries]]
+rust = "hash_string"
+other = "__ac_X31_hash_string"
+rust_path = "src/map.rs"
+
+# Pipeline-level map orchestrators on the Rust side correspond loosely to
+# worker_pipeline / kt_pipeline in C — there isn't a 1:1 match since Rust
+# replaces pthread-based kt_pipeline with rayon + crossbeam channels.
+[[entries]]
+rust = "map_file_paf"
+other = "mm_map_file"
+rust_path = "src/pipeline.rs"
+
+[[entries]]
+rust = "map_file_sam"
+other = "mm_map_file"
+rust_path = "src/pipeline.rs"
+
+[[entries]]
+rust = "map_file_frag_paf"
+other = "mm_map_file_frag"
+rust_path = "src/pipeline.rs"
+
+[[entries]]
+rust = "map_file_frag_sam"
+other = "mm_map_file_frag"
+rust_path = "src/pipeline.rs"
+
+# Split-index pipeline variants share a C analogue.
+[[entries]]
+rust = "map_file_paf_split"
+other = "mm_split_merge"
+rust_path = "src/pipeline.rs"
+
+[[entries]]
+rust = "map_file_sam_split"
+other = "mm_split_merge"
+rust_path = "src/pipeline.rs"
+
+[[entries]]
+rust = "map_file_frag_paf_split"
+other = "mm_split_merge"
+rust_path = "src/pipeline.rs"
+
+[[entries]]
+rust = "map_file_frag_sam_split"
+other = "mm_split_merge"
+rust_path = "src/pipeline.rs"
+
+[[entries]]
+rust = "split_fragment_regs"
+other = "mm_map_frag_core"
+rust_path = "src/map.rs"
+
+[[entries]]
+rust = "read_fragment_batch"
+other = "mm_bseq_read_frag"
+rust_path = "src/pipeline.rs"
+
+# =========================================================================
+# options.c  (presets, option validation)
+# =========================================================================
+[[entries]]
+rust = "set_opt"
+other = "mm_set_opt"
+rust_path = "src/options.rs"
+
+[[entries]]
+rust = "check_opt"
+other = "mm_check_opt"
+rust_path = "src/options.rs"
+
+[[entries]]
+rust = "mapopt_update"
+other = "mm_mapopt_update"
+rust_path = "src/options.rs"
+
+[[entries]]
+rust = "max_spsc_bonus"
+other = "mm_max_spsc_bonus"
+rust_path = "src/options.rs"
+
+# IdxOpt::default and MapOpt::default mirror mm_idxopt_init / mm_mapopt_init.
+[[entries]]
+rust = "default"
+other = "mm_idxopt_init"
+rust_path = "src/options.rs"
+
+[[entries]]
+rust = "default"
+other = "mm_mapopt_init"
+rust_path = "src/options.rs"
+
+# =========================================================================
+# pe.c  (paired-end)
+# =========================================================================
+[[entries]]
+rust = "pair"
+other = "mm_pair"
+rust_path = "src/pe.rs"
+
+[[entries]]
+rust = "select_sub_multi"
+other = "mm_select_sub_multi"
+rust_path = "src/pe.rs"
+
+[[entries]]
+rust = "set_pe_thru"
+other = "mm_set_pe_thru"
+rust_path = "src/pe.rs"
+
+# =========================================================================
+# sdust.c  (low-complexity masking)
+# =========================================================================
+[[entries]]
+rust = "sdust"
+other = "sdust"
+rust_path = "src/sdust.rs"
+other_path = "minimap2/sdust.c"
+
+[[entries]]
+rust = "sdust_core"
+other = "sdust_core"
+rust_path = "src/sdust.rs"
+other_path = "minimap2/sdust.c"
+
+[[entries]]
+rust = "find_perfect"
+other = "find_perfect"
+rust_path = "src/sdust.rs"
+other_path = "minimap2/sdust.c"
+
+[[entries]]
+rust = "shift_window"
+other = "shift_window"
+rust_path = "src/sdust.rs"
+other_path = "minimap2/sdust.c"
+
+[[entries]]
+rust = "save_masked_regions"
+other = "save_masked_regions"
+rust_path = "src/sdust.rs"
+other_path = "minimap2/sdust.c"
+
+[[entries]]
+rust = "new"
+other = "sdust_buf_init"
+rust_path = "src/sdust.rs"
+
+# =========================================================================
+# seed.c  (seed collection / filtering)
+# =========================================================================
 [[entries]]
 rust = "seed_collect_all"
 other = "mm_seed_collect_all"
@@ -117,154 +846,52 @@ rust = "seed_mz_flt"
 other = "mm_seed_mz_flt"
 rust_path = "src/seed.rs"
 
-[[entries]]
-rust = "expand_seeds_to_anchors"
-other = "mm_seed_to_a"
-rust_path = "src/seed.rs"
-
-# `mm_sketch` keeps the C name in Rust — auto-match handles it, but pinned
-# here so the path constraint disambiguates from any test stubs.
+# =========================================================================
+# sketch.c  (minimizer extraction)
+# =========================================================================
 [[entries]]
 rust = "mm_sketch"
 other = "mm_sketch"
 rust_path = "src/sketch.rs"
-
-# ---- mapping pipeline ----
-[[entries]]
-rust = "map_query"
-other = "mm_map"
-rust_path = "src/map.rs"
+other_path = "minimap2/sketch.c"
 
 [[entries]]
-rust = "map_frag"
-other = "mm_map_frag"
-rust_path = "src/map.rs"
+rust = "hash64"
+other = "hash64"
+rust_path = "src/sketch.rs"
+other_path = "minimap2/sketch.c"
 
 [[entries]]
-rust = "est_err"
-other = "mm_est_err"
-rust_path = "src/esterr.rs"
+rust = "push"
+other = "tq_push"
+rust_path = "src/sketch.rs"
 
 [[entries]]
-rust = "get_for_qpos"
-other = "get_for_qpos"
-rust_path = "src/esterr.rs"
+rust = "shift"
+other = "tq_shift"
+rust_path = "src/sketch.rs"
+
+# =========================================================================
+# splitidx.c  (split-index temp files)
+# =========================================================================
+[[entries]]
+rust = "create_split_tmp"
+other = "mm_split_init"
+rust_path = "src/index/split.rs"
 
 [[entries]]
-rust = "get_mini_idx"
-other = "get_mini_idx"
-rust_path = "src/esterr.rs"
-
-# ---- options / presets ----
-[[entries]]
-rust = "set_opt"
-other = "mm_set_opt"
-rust_path = "src/options.rs"
+rust = "remove_split_tmps"
+other = "mm_split_rm_tmp"
+rust_path = "src/index/split.rs"
 
 [[entries]]
-rust = "mapopt_update"
-other = "mm_mapopt_update"
-rust_path = "src/options.rs"
+rust = "merge_split_query_records"
+other = "mm_split_merge_prep"
+rust_path = "src/index/split.rs"
 
-# ---- chaining ----
-[[entries]]
-rust = "lchain_dp"
-other = "mg_lchain_dp"
-rust_path = "src/chain/dp.rs"
-
-[[entries]]
-rust = "lchain_rmq"
-other = "mg_lchain_rmq"
-rust_path = "src/chain/rmq.rs"
-
-# ---- alignment ----
-[[entries]]
-rust = "align_skeleton"
-other = "mm_align_skeleton"
-rust_path = "src/align/mod.rs"
-
-[[entries]]
-rust = "fix_bad_ends"
-other = "mm_fix_bad_ends"
-rust_path = "src/align/mod.rs"
-
-[[entries]]
-rust = "test_zdrop"
-other = "mm_test_zdrop"
-rust_path = "src/align/mod.rs"
-
-# Scalar KSW2 kernels — the SIMD versions live in src/align/ksw2_simd.rs.
-[[entries]]
-rust = "ksw_extz2_sse"
-other = "ksw_extz2_sse"
-rust_path = "src/align/ksw2.rs"
-other_path = "minimap2/ksw2_extz2_sse.c"
-
-[[entries]]
-rust = "ksw_extd2_sse"
-other = "ksw_extd2_sse"
-rust_path = "src/align/ksw2.rs"
-other_path = "minimap2/ksw2_extd2_sse.c"
-
-[[entries]]
-rust = "ksw_exts2_sse"
-other = "ksw_exts2_sse"
-rust_path = "src/align/ksw2.rs"
-other_path = "minimap2/ksw2_exts2_sse.c"
-
-[[entries]]
-rust = "extz2_sse2"
-other = "ksw_extz2_sse"
-rust_path = "src/align/ksw2_simd.rs"
-
-[[entries]]
-rust = "extd2_sse2"
-other = "ksw_extd2_sse"
-rust_path = "src/align/ksw2_simd.rs"
-
-[[entries]]
-rust = "ksw_ll_i16"
-other = "ksw_ll_i16"
-rust_path = "src/align/ksw2.rs"
-
-# ---- hits / MAPQ ----
-[[entries]]
-rust = "set_parent"
-other = "mm_set_parent"
-rust_path = "src/hit.rs"
-
-[[entries]]
-rust = "set_sam_pri"
-other = "mm_set_sam_pri"
-rust_path = "src/hit.rs"
-
-[[entries]]
-rust = "filter_strand_retained"
-other = "mm_filter_regs"
-rust_path = "src/hit.rs"
-
-# ---- formatting ----
-[[entries]]
-rust = "write_paf"
-other = "mm_write_paf"
-rust_path = "src/format/paf.rs"
-
-[[entries]]
-rust = "write_sam"
-other = "mm_write_sam"
-rust_path = "src/format/sam.rs"
-
-[[entries]]
-rust = "gen_cs"
-other = "mm_gen_cs"
-rust_path = "src/format/cs.rs"
-
-[[entries]]
-rust = "gen_md"
-other = "mm_gen_MD"
-rust_path = "src/format/cs.rs"
-
-# ---- sort utilities ----
+# =========================================================================
+# sort helpers  (ksort.h macros → Rust radix sort)
+# =========================================================================
 [[entries]]
 rust = "radix_sort_mm128"
 other = "radix_sort_128x"
@@ -280,25 +907,12 @@ rust = "ksmall_u32"
 other = "ks_ksmall_uint32_t"
 rust_path = "src/sort.rs"
 
-# ---- FASTA/FASTQ I/O ----
-[[entries]]
-rust = "read_record"
-other = "kseq_read"
-rust_path = "src/bseq.rs"
-
-[[entries]]
-rust = "read_batch"
-other = "mm_bseq_read"
-rust_path = "src/bseq.rs"
-
-# ---- paired-end ----
-[[entries]]
-rust = "pair"
-other = "mm_pair"
-rust_path = "src/pe.rs"
-
-# ---- threading / pipeline driver ----
-# Rust uses crossbeam channels + thread::scope + rayon; C uses pthread-based
-# kt_pipeline / kt_for. These are structurally different and not 1:1 — left
-# unmapped so ccc reports them as architecture differences rather than
-# unmatched functions.
+# =========================================================================
+# Threading note
+# =========================================================================
+# C uses pthread-based kt_for / kt_pipeline with ktf_worker / ktp_worker
+# inner functions. The Rust port replaces these with rayon's global pool,
+# crossbeam channels, and thread::scope in src/index/mod.rs and
+# src/pipeline.rs. These are architecturally different — ccc should
+# report kt_for / kt_pipeline / steal_work / worker_for as unmatched
+# rather than auto-matching them to unrelated Rust functions.

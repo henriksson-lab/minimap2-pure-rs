@@ -172,8 +172,13 @@ pub fn write_sam_record_with_comment(
         }
     };
 
+    // Match C format.c:587,628 — secondary records (FLAG 0x100) emit '*'
+    // for SEQ and QUAL unless --secondary-seq is set.
+    let skip_secondary_seq =
+        (sam_flag & 0x100) != 0 && !flag.contains(MapFlags::SECONDARY_SEQ);
+
     // SEQ
-    if flag.contains(MapFlags::NO_QUAL) || qseq.is_empty() {
+    if flag.contains(MapFlags::NO_QUAL) || qseq.is_empty() || skip_secondary_seq {
         s.push('*');
     } else if r.rev {
         for i in (seq_start..seq_end).rev() {
@@ -186,7 +191,7 @@ pub fn write_sam_record_with_comment(
     s.push('\t');
 
     // QUAL
-    if qual.is_empty() || flag.contains(MapFlags::NO_QUAL) {
+    if qual.is_empty() || flag.contains(MapFlags::NO_QUAL) || skip_secondary_seq {
         s.push('*');
     } else {
         let qual_start = seq_start.min(qual.len());

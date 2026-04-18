@@ -4,8 +4,7 @@ A pure Rust reimplementation of [minimap2](https://github.com/lh3/minimap2) v2.3
 
 It is not yet validated as a drop-in replacement for every minimap2 workflow; see [Validation scope](#validation-scope).
 
-As of 2026-04-17, this crate pass validation with Codex on several realistic datasets. The crate might
-be ready for production but be vigilant to possible translation errors.
+** More issues found in an audit 2026-04-18. Not ready for production **
 
 
 ## This is an LLM-mediated faithful (hopefully) translation, not the original code!
@@ -451,29 +450,35 @@ scripts/benchmark_speed.py --threads 1 --reps 7 --warmups 1
 scripts/benchmark_speed.py --threads 1,4,8 --reps 3 --warmups 1 --case chr11
 ```
 
-Built with `--release`, `-C target-cpu=native`, LTO, and `codegen-units = 1`.
-Ratios below are Rust wall time divided by C minimap2 wall time; values below
-`1.00x` mean Rust was faster.
+Both binaries built with matched aggressive optimization: C with
+`-O3 -march=native -flto`, Rust with `--release`, `-C target-cpu=native`,
+LTO, and `codegen-units = 1`. Ratios below are Rust wall time divided by C
+minimap2 wall time; values below `1.00x` mean Rust was faster.
 
 | Case | Threads | C median | Rust median | Rust/C median |
 |------|---------|----------|-------------|---------------|
-| MT default PAF | 1 | 0.0167s | 0.0149s | 0.89x |
-| MT default PAF+cg | 1 | 0.0296s | 0.0252s | 0.85x |
-| MT map-hifi PAF+cg | 1 | 0.0312s | 0.0327s | 1.05x |
-| MT map-hifi SAM | 1 | 0.0304s | 0.0266s | 0.87x |
-| chr11 single HiFi PAF+cg | 1 | 0.0550s | 0.0564s | 1.02x |
-| chr11 x200 HiFi PAF+cg | 1 | 3.4860s | 3.6599s | 1.05x |
-| chr11 x200 HiFi SAM | 1 | 3.4380s | 3.7170s | 1.08x |
-| chr11 x200 HiFi PAF+cg | 4 | 0.9814s | 1.0420s | 1.06x |
-| chr11 x200 HiFi SAM | 4 | 0.9950s | 1.0476s | 1.05x |
-| chr11 x200 HiFi PAF+cg | 8 | 0.5866s | 0.5991s | 1.02x |
-| chr11 x200 HiFi SAM | 8 | 0.5969s | 0.6136s | 1.03x |
+| MT default PAF | 1 | 0.0163s | 0.0224s | 1.37x |
+| MT default PAF+cg | 1 | 0.0289s | 0.0383s | 1.32x |
+| MT map-hifi PAF+cg | 1 | 0.0306s | 0.0409s | 1.34x |
+| MT map-hifi SAM | 1 | 0.0343s | 0.0415s | 1.21x |
+| chr11 single HiFi PAF+cg | 1 | 0.0560s | 0.0612s | 1.09x |
+| chr11 single HiFi PAF+cg | 4 | 0.0633s | 0.0654s | 1.03x |
+| chr11 single HiFi PAF+cg | 8 | 0.0631s | 0.0684s | 1.08x |
+| chr11 x200 HiFi PAF+cg | 1 | 3.8396s | 3.7036s | **0.96x** |
+| chr11 x200 HiFi SAM | 1 | 4.0683s | 3.8622s | **0.95x** |
+| chr11 x200 HiFi PAF+cg | 4 | 1.1511s | 1.1629s | 1.01x |
+| chr11 x200 HiFi SAM | 4 | 1.1373s | 1.0781s | **0.95x** |
+| chr11 x200 HiFi PAF+cg | 8 | 0.6473s | 0.6168s | **0.95x** |
+| chr11 x200 HiFi SAM | 8 | 0.6566s | 0.6442s | **0.98x** |
 
-The MT cases are upstream mitochondrial smoke fixtures and are too small for
-performance claims; startup, indexing, cache state, and timing noise dominate
-their wall time. The `chr11 x200` cases are a better local regression signal,
-but still only exercise a small HiFi fixture. Broad performance claims should be
-based on real-data manifests.
+The MT cases are upstream mitochondrial smoke fixtures (~20–40 ms total)
+and are too small for performance claims; startup (rayon thread-pool init,
+allocator setup, argv parsing) dominates and shows Rust's constant
+overhead. The `chr11 single` cases (~60 ms) are still partly startup-bound.
+The `chr11 x200` cases (3–4 s single-threaded) are where per-read
+throughput dominates and Rust matches or slightly beats C on matched
+compile flags. Broad performance claims should be based on real-data
+manifests — see the whole-genome HiFi benchmark above.
 
 For real-data benchmarking, copy `scripts/benchmark_manifest.example.tsv`, fill
 in local FASTA/FASTQ paths, and run:

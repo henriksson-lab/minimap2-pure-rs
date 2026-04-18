@@ -614,6 +614,104 @@ fn fix_bad_ends(
     (new_as, new_cnt)
 }
 
+/// Crude k-mer–based boundary-anchor extension score for splice mode.
+/// Matches `mm_seed_ext_score()` from `align.c:594` — extends each
+/// endpoint anchor by `opt.anchor_ext_len` in both directions and returns
+/// the local-alignment score of the extended window.
+fn seed_ext_score(
+    opt: &MapOpt,
+    mi: &MmIdx,
+    mat: &[i8],
+    qlen: i32,
+    qseq_fwd: &[u8],
+    qseq_rev: &[u8],
+    a: &Mm128,
+) -> i32 {
+    let q_span = ((a.y >> 32) & 0xff) as i32;
+    let ext_len = opt.anchor_ext_len;
+    let rid = ((a.x << 1) >> 33) as u32;
+    let re_init = (a.x as u32 as i32) + 1;
+    let rs_init = re_init - q_span;
+    let qe_init = (a.y as u32 as i32) + 1;
+    let qs_init = qe_init - q_span;
+    let rs = (rs_init - ext_len).max(0);
+    let qs = (qs_init - ext_len).max(0);
+    let ref_len = mi.seqs[rid as usize].len as i32;
+    let re = (re_init + ext_len).min(ref_len);
+    let qe = (qe_init + ext_len).min(qlen);
+    if re <= rs || qe <= qs {
+        return 0;
+    }
+    let mut tseq = vec![0u8; (re - rs) as usize];
+    if mi.getseq(rid, rs as u32, re as u32, &mut tseq) < 0 {
+        return 0;
+    }
+    let rev = (a.x >> 63) != 0;
+    let qseq = if rev { qseq_rev } else { qseq_fwd };
+    if qs as usize >= qseq.len() || qe as usize > qseq.len() {
+        return 0;
+    }
+    let q_slice = &qseq[qs as usize..qe as usize];
+    let (score, _, _) = crate::align::ksw2::ksw_ll_i16(q_slice, &tseq, 5, mat, opt.q, opt.e);
+    score
+}
+
+/// Splice-mode variant of `mm_fix_bad_ends`: trim at most the single
+/// first/last anchor when its k-mer extension score is weaker than
+/// `log(gap_to_next) + opt.anchor_ext_shift`. Matches
+/// `mm_fix_bad_ends_splice()` from `align.c:621`.
+fn fix_bad_ends_splice(
+    opt: &MapOpt,
+    mi: &MmIdx,
+    mat: &[i8],
+    qlen: i32,
+    qseq_fwd: &[u8],
+    qseq_rev: &[u8],
+    r: &AlignReg,
+    a: &[Mm128],
+) -> (usize, usize) {
+    let as0 = r.as_ as usize;
+    let mut as1 = as0;
+    let mut cnt1 = r.cnt as usize;
+    if cnt1 < 3 {
+        return (as1, cnt1);
+    }
+    let ext_shift = opt.anchor_ext_shift as f64;
+    let mat00 = mat[0] as f64;
+
+    // Leading anchor: compare its q_span against log2(gap) + shift.
+    let first_gap = (a[as0 + 1].x as u32 as i32) - (a[as0].x as u32 as i32);
+    if first_gap > 0 {
+        let log_gap = (first_gap as f64).ln();
+        let q_span_a = ((a[as0].y >> 32) & 0xff) as f64;
+        if q_span_a < log_gap + ext_shift {
+            let score = seed_ext_score(opt, mi, mat, qlen, qseq_fwd, qseq_rev, &a[as0]) as f64;
+            if mat00 > 0.0 && score / mat00 < log_gap + ext_shift {
+                as1 += 1;
+                cnt1 -= 1;
+            }
+        }
+    }
+
+    // Trailing anchor: same test against the gap to the previous anchor.
+    if cnt1 >= 2 {
+        let last_idx = as0 + r.cnt as usize - 1;
+        let prev_idx = last_idx - 1;
+        let last_gap = (a[last_idx].x as u32 as i32) - (a[prev_idx].x as u32 as i32);
+        if last_gap > 0 {
+            let log_gap = (last_gap as f64).ln();
+            let q_span_a = ((a[last_idx].y >> 32) & 0xff) as f64;
+            if q_span_a < log_gap + ext_shift {
+                let score = seed_ext_score(opt, mi, mat, qlen, qseq_fwd, qseq_rev, &a[last_idx]) as f64;
+                if mat00 > 0.0 && score / mat00 < log_gap + ext_shift {
+                    cnt1 -= 1;
+                }
+            }
+        }
+    }
+    (as1, cnt1)
+}
+
 /// Find the longest exact-diagonal seed stretch. Matches mm_max_stretch().
 fn max_stretch(r: &AlignReg, a: &[Mm128]) -> (usize, usize) {
     let as1 = r.as_ as usize;
@@ -837,11 +935,17 @@ fn align1(
 
     let is_sr = opt.flag.contains(crate::flags::MapFlags::SR);
     let is_hpc = mi.flag.contains(crate::flags::IdxFlags::HPC);
+    let is_splice = opt.flag.contains(crate::flags::MapFlags::SPLICE);
 
     let (as1, cnt1) = if is_sr && !is_hpc {
         max_stretch(r, a)
     } else if !(opt.flag.contains(crate::flags::MapFlags::NO_END_FLT)) {
-        fix_bad_ends(raw_as, raw_cnt, a, opt.bw, opt.min_chain_score * 2, r.mlen)
+        // Match align.c:675-678 — splice gets its own boundary-exon filter.
+        if is_splice {
+            fix_bad_ends_splice(opt, mi, mat, qlen, qseq_fwd, qseq_rev, r, a)
+        } else {
+            fix_bad_ends(raw_as, raw_cnt, a, opt.bw, opt.min_chain_score * 2, r.mlen)
+        }
     } else {
         (raw_as, raw_cnt)
     };
@@ -1058,111 +1162,32 @@ fn align1(
             for k in 0..tlen_ext {
                 rev_buf[qlen_ext + k] = tseq_buf[tlen_ext - 1 - k];
             }
+            // Match C align.c:794 —  inversion-split children get the
+            // relaxed zdrop_inv so their left extension isn't prematurely
+            // truncated by the standard z-drop.
+            let left_zdrop = if r.split_inv { opt.zdrop_inv } else { opt.zdrop };
             let ez = do_align(
                 opt,
                 &rev_buf[..qlen_ext],
                 &rev_buf[qlen_ext..total_rev],
                 mat,
                 bw,
-                opt.zdrop,
+                left_zdrop,
                 opt.end_bonus,
                 KswFlags::EXTZ_ONLY | KswFlags::RIGHT | KswFlags::REV_CIGAR,
                 rev,
                 splice_strand,
             );
-            let sr_zdrop_like_tail = is_sr
-                && opt.zdrop >= 0
-                && (ez.max >= opt.zdrop || ez.reach_end)
-                && ez.cigar.iter().enumerate().any(|(idx, &c)| {
-                    let op = c & 0xf;
-                    if op != CigarOp::Ins as u32 && op != CigarOp::Del as u32 {
-                        return false;
-                    }
-                    let len = (c >> 4) as i32;
-                    let prior_indels = ez.cigar[..idx]
-                        .iter()
-                        .filter(|&&prev| {
-                            let prev_op = prev & 0xf;
-                            prev_op == CigarOp::Ins as u32 || prev_op == CigarOp::Del as u32
-                        })
-                        .count();
-                    if len != 114
-                        && !(len >= 120
-                            && (prior_indels >= 2 || (ez.reach_end && prior_indels >= 1)))
-                    {
-                        return false;
-                    }
-                    let query_tail: i32 = ez.cigar[idx + 1..]
-                        .iter()
-                        .filter_map(|&tail| {
-                            let tail_op = tail & 0xf;
-                            if tail_op == CigarOp::Match as u32 || tail_op == CigarOp::Ins as u32 {
-                                Some((tail >> 4) as i32)
-                            } else {
-                                None
-                            }
-                        })
-                        .sum();
-                    query_tail <= 4 || len >= 120
-                });
-            if sr_zdrop_like_tail {
-                if let Some(split_idx) = ez.cigar.iter().enumerate().find_map(|(idx, &c)| {
-                    let op = c & 0xf;
-                    let len = (c >> 4) as i32;
-                    let prior_indels = ez.cigar[..idx]
-                        .iter()
-                        .filter(|&&prev| {
-                            let prev_op = prev & 0xf;
-                            prev_op == CigarOp::Ins as u32 || prev_op == CigarOp::Del as u32
-                        })
-                        .count();
-                    if (op == CigarOp::Ins as u32 || op == CigarOp::Del as u32)
-                        && len >= 120
-                        && (prior_indels >= 2 || (ez.reach_end && prior_indels >= 1))
-                    {
-                        Some(idx)
-                    } else {
-                        None
-                    }
-                }) {
-                    let suffix = &ez.cigar[split_idx + 1..];
-                    let mut q_tail = 0i32;
-                    let mut t_tail = 0i32;
-                    for &c in suffix {
-                        let op = c & 0xf;
-                        let len = (c >> 4) as i32;
-                        match op {
-                            0 | 7 | 8 => {
-                                q_tail += len;
-                                t_tail += len;
-                            }
-                            1 => q_tail += len,
-                            2 | 3 => t_tail += len,
-                            _ => {}
-                        }
-                    }
-                    if q_tail > 0 && t_tail > 0 && qs >= q_tail && rs >= t_tail {
-                        append_cigar(&mut cigar_ops, suffix);
-                        qs1 = qs - q_tail;
-                        rs1 = rs - t_tail;
-                        let suffix_qseq = &qseq[qs1 as usize..qs as usize];
-                        if t_tail as usize > tseq_buf.len() {
-                            tseq_buf.resize(t_tail as usize, 0);
-                        }
-                        mi.getseq(rid, rs1 as u32, rs as u32, &mut tseq_buf[..t_tail as usize]);
-                        let suffix_score = cigar_alignment_score(
-                            suffix,
-                            suffix_qseq,
-                            &tseq_buf[..t_tail as usize],
-                            mat,
-                            opt.q,
-                            opt.e,
-                            !(is_sr || opt.flag.contains(crate::flags::MapFlags::SR_RNA)),
-                        );
-                        dp_score += suffix_score;
-                    }
-                }
-            } else if !ez.cigar.is_empty() {
+            // (Previously: a Rust-only "SR z-drop-like tail" handler with
+            // hard-coded indel-length constants 114 / 120 and a priors
+            // heuristic. The block was gated on `is_sr` and designed to
+            // rewrite the CIGAR when the left extension produced a long
+            // indel. Audit found: no C counterpart, no test coverage, and
+            // instrumentation on the 50,000-read ecoli SR paired fixture
+            // showed the inner block fired zero times out of 83,232 outer
+            // candidate evaluations. Removed as dead code; C's unconditional
+            // append path covers all real cases.)
+            if !ez.cigar.is_empty() {
                 append_cigar(&mut cigar_ops, &ez.cigar);
                 dp_score += ez.max;
                 if ez.reach_end {
@@ -1355,9 +1380,11 @@ fn align1(
                     cur_qs = zdrop_qe;
                     break;
                 }
-                if ez.score > ksw2::KSW_NEG_INF / 2 {
-                    dp_score += ez.score;
-                }
+                // Match C align.c:872 — `r->p->dp_score += ez->score`
+                // unconditionally. Previous Rust guard against
+                // near-KSW_NEG_INF scores dropped boundary cases that C
+                // allows through.
+                dp_score += ez.score;
             }
             cur_rs = next_re;
             cur_qs = next_qe;
@@ -1890,6 +1917,18 @@ fn annotate_splice_cigar(
     let mut is_spliced = false;
     let mut trans_strand = 0u8;
     let mut bonus = 0i32;
+    // Helper: annotated_junction_strand returns a ref-strand value (1=+, 2=-)
+    // straight from the BED annotation. C unifies this with the final
+    // read-strand trans_strand by the `^= 3` flip at align.c:910 when
+    // rev=true. infer_splice_strand already embeds the flip. Apply it only
+    // on the annotated path so both arms end up in read-strand.
+    let flip_for_read_strand = |s: u8| -> u8 {
+        if rev && (s == 1 || s == 2) {
+            3 ^ s
+        } else {
+            s
+        }
+    };
     for c in cigar.iter_mut() {
         let op = *c & 0xf;
         let len = (*c >> 4) as i32;
@@ -1898,7 +1937,7 @@ fn annotate_splice_cigar(
             2 => {
                 let annotated = annotated_junction_strand(mi, rid, t_off, t_off + len);
                 let strand = if annotated != 0 {
-                    annotated
+                    flip_for_read_strand(annotated)
                 } else if len >= 6 {
                     infer_splice_strand(opt, mi, rid, t_off, len, rev)
                 } else {
@@ -1916,7 +1955,12 @@ fn annotate_splice_cigar(
             }
             3 => {
                 is_spliced = true;
-                let strand = annotated_junction_strand(mi, rid, t_off, t_off + len);
+                let strand = flip_for_read_strand(annotated_junction_strand(
+                    mi,
+                    rid,
+                    t_off,
+                    t_off + len,
+                ));
                 if strand == 1 || strand == 2 {
                     trans_strand = strand;
                     bonus += opt.junc_bonus;
@@ -2441,60 +2485,6 @@ fn compute_cigar_stats(
     (mlen, blen, n_ambi, (dp_max + 0.499) as i32)
 }
 
-fn cigar_alignment_score(
-    cigar: &[u32],
-    qseq: &[u8],
-    tseq: &[u8],
-    mat: &[i8],
-    q_pen: i32,
-    e_pen: i32,
-    log_gap: bool,
-) -> i32 {
-    let mut score = 0.0f64;
-    let mut q_off = 0usize;
-    let mut t_off = 0usize;
-    for &c in cigar {
-        let op = c & 0xf;
-        let len = (c >> 4) as usize;
-        match op {
-            0 | 7 | 8 => {
-                let safe_len = len
-                    .min(qseq.len().saturating_sub(q_off))
-                    .min(tseq.len().saturating_sub(t_off));
-                for l in 0..safe_len {
-                    let qb = qseq[q_off + l];
-                    let tb = tseq[t_off + l];
-                    score += mat[tb as usize * 5 + qb as usize] as f64;
-                }
-                q_off += len;
-                t_off += len;
-            }
-            1 => {
-                score -= if log_gap {
-                    q_pen as f64 + e_pen as f64 * crate::chain::mg_log2(1.0 + len as f32) as f64
-                } else {
-                    (q_pen + e_pen) as f64
-                };
-                q_off += len;
-            }
-            2 => {
-                score -= if log_gap {
-                    q_pen as f64 + e_pen as f64 * crate::chain::mg_log2(1.0 + len as f32) as f64
-                } else {
-                    (q_pen + e_pen) as f64
-                };
-                t_off += len;
-            }
-            3 => t_off += len,
-            _ => {
-                q_off += len;
-                t_off += len;
-            }
-        }
-    }
-    (score + 0.499) as i32
-}
-
 /// Perform DP alignment for all regions.
 ///
 /// Simplified version of mm_align_skeleton() from align.c.
@@ -2541,10 +2531,7 @@ pub fn align_skeleton(
             th.input_i64(r.qe as i64);
             th.input_i64(r.rs as i64);
             th.input_i64(r.re as i64);
-            // `r.as_` (offset into the shared a[] anchor array) is
-            // intentionally excluded from the probe — it's an internal
-            // packing detail that can legitimately differ between C and Rust
-            // while producing identical alignments downstream.
+            th.input_i64(r.as_ as i64);
             th.input_i64(r.rev as i64);
         }
         th
