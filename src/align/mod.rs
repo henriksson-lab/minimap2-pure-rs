@@ -298,7 +298,7 @@ fn do_align(
         if flag.contains(KswFlags::EXTZ_ONLY) && rev {
             return dual_ez();
         }
-        let splice_ez = ksw2::ksw_exts2(
+        let splice_ez = ksw2_simd::ksw_exts2_dispatch(
             qsub,
             tsub,
             5,
@@ -926,6 +926,85 @@ fn align1(
     mat: &[i8],
     splice_strand: crate::flags::MapFlags,
 ) -> Vec<AlignReg> {
+    if r.cnt == 0 {
+        return Vec::new();
+    }
+    // Snapshot inputs for the cross-language tracehash probe. Mirrors the
+    // C-side TH_IN_*_TO probe wrapping mm_align1 in minimap2/align.c.
+    #[cfg(feature = "tracehash")]
+    let th_in_anchors: Vec<(u64, u64)> = (0..r.cnt as usize)
+        .map(|i| {
+            let an = &a[r.as_ as usize + i];
+            (an.x, an.y)
+        })
+        .collect();
+    #[cfg(feature = "tracehash")]
+    let (th_qlen, th_splice, th_id, th_cnt, th_as, th_rid, th_rev, th_qs, th_qe, th_rs, th_re) = (
+        qlen as i64,
+        splice_strand.bits() as i64,
+        r.id as i64,
+        r.cnt as i64,
+        r.as_ as i64,
+        r.rid as i64,
+        if r.rev { 1i64 } else { 0i64 },
+        r.qs as i64,
+        r.qe as i64,
+        r.rs as i64,
+        r.re as i64,
+    );
+
+    let split_regs = align1_impl(opt, mi, qlen, qseq_fwd, qseq_rev, r, a, mat, splice_strand);
+
+    #[cfg(feature = "tracehash")]
+    {
+        let mut th = tracehash::th_call!("mm_align1");
+        th.input_i64(th_qlen);
+        th.input_i64(th_splice);
+        th.input_i64(th_id);
+        th.input_i64(th_cnt);
+        th.input_i64(th_as);
+        th.input_i64(th_rid);
+        th.input_i64(th_rev);
+        th.input_i64(th_qs);
+        th.input_i64(th_qe);
+        th.input_i64(th_rs);
+        th.input_i64(th_re);
+        for (x, y) in &th_in_anchors {
+            th.input_u64(*x);
+            th.input_u64(*y);
+        }
+        th.output_i64(r.qs as i64);
+        th.output_i64(r.qe as i64);
+        th.output_i64(r.rs as i64);
+        th.output_i64(r.re as i64);
+        th.output_i64(r.mlen as i64);
+        th.output_i64(r.blen as i64);
+        th.output_i64(r.score as i64);
+        th.output_i64(r.extra.as_ref().map(|p| p.dp_max as i64).unwrap_or(-1));
+        th.output_i64(r.extra.as_ref().map(|p| p.dp_score as i64).unwrap_or(-1));
+        let n_cig = r.extra.as_ref().map(|p| p.cigar.0.len() as i64).unwrap_or(0);
+        th.output_i64(n_cig);
+        if let Some(ref p) = r.extra {
+            for c in &p.cigar.0 {
+                th.output_u64(*c as u64);
+            }
+        }
+        th.finish();
+    }
+    split_regs
+}
+
+fn align1_impl(
+    opt: &MapOpt,
+    mi: &MmIdx,
+    qlen: i32,
+    qseq_fwd: &[u8],
+    qseq_rev: &[u8],
+    r: &mut AlignReg,
+    a: &mut [Mm128],
+    mat: &[i8],
+    splice_strand: crate::flags::MapFlags,
+) -> Vec<AlignReg> {
     let mut split_regs: Vec<AlignReg> = Vec::new();
     if r.cnt == 0 {
         return split_regs;
@@ -1463,7 +1542,19 @@ fn align1(
         return split_regs;
     }
 
-    if opt.flag.contains(crate::flags::MapFlags::SPLICE) && !rev {
+    // Rescue path: applies in single-round splice mode (splice_strand has
+    // both SPLICE_FOR & SPLICE_REV, i.e. neither flag is exclusively set).
+    // In the two-round dispatch each round receives only ONE of FOR/REV; the
+    // rescue's `dp_score = qlen*a + bonus` overwrite would tie the two
+    // rounds' scores and mask the splice-DP-derived strand preference. C
+    // minimap2 has no equivalent rescue, so skipping it in two-round mode is
+    // both correct for parity and avoids the masking effect.
+    let in_two_round_dispatch = splice_strand
+        .intersection(crate::flags::MapFlags::SPLICE_FOR | crate::flags::MapFlags::SPLICE_REV)
+        != (crate::flags::MapFlags::SPLICE_FOR | crate::flags::MapFlags::SPLICE_REV)
+        && splice_strand
+            .intersects(crate::flags::MapFlags::SPLICE_FOR | crate::flags::MapFlags::SPLICE_REV);
+    if opt.flag.contains(crate::flags::MapFlags::SPLICE) && !rev && !in_two_round_dispatch {
         if let Some(rescue) = rescue_exact_annotated_introns(opt, mi, rid, qseq, rs1, re1, rev) {
             rs1 = rescue.rs;
             re1 = rescue.re;
@@ -1525,8 +1616,14 @@ fn align1(
     // Return thread-local buffers for reuse
     ALIGN_TSEQ_BUF.with(|c| *c.borrow_mut() = tseq_buf);
 
+    // C (align.c) accumulates dp_score purely from ez->max/ez->score across
+    // ksw_exts2 calls; splice signal bonuses are already baked into those
+    // scores via donor/acceptor arrays inside the DP. Earlier Rust also
+    // added `splice_bonus` post-DP, double-counting annotated junctions on
+    // some reads. Drop it so dp_score exactly matches C.
+    let _ = splice_bonus;
     let extra = AlignExtra {
-        dp_score: dp_score + splice_bonus,
+        dp_score,
         dp_max,
         dp_max2: 0,
         dp_max0: dp_max,
@@ -1935,21 +2032,24 @@ fn annotate_splice_cigar(
         match op {
             0 | 7 | 8 => t_off += len,
             2 => {
+                // Convert D→N only for ANNOTATED junctions (BED). C does NOT
+                // signal-infer post-DP — splice detection happens inside the
+                // DP via donor/acceptor scoring, producing state 3 (N) there.
+                // Earlier Rust path also flipped D→N when `infer_splice_strand`
+                // detected a canonical GT-AG signal at any D≥6 region; this
+                // produced spurious N-skips on yeast reads (e.g.
+                // SRR30335018.169095 had 7N where C had 7D). Removed.
                 let annotated = annotated_junction_strand(mi, rid, t_off, t_off + len);
                 let strand = if annotated != 0 {
                     flip_for_read_strand(annotated)
-                } else if len >= 6 {
-                    infer_splice_strand(opt, mi, rid, t_off, len, rev)
                 } else {
                     0
                 };
-                if annotated != 0 || strand == 1 || strand == 2 {
+                if annotated != 0 {
                     *c = (len as u32) << 4 | 3;
                     is_spliced = true;
                     trans_strand = strand;
-                    if annotated != 0 {
-                        bonus += opt.junc_bonus;
-                    }
+                    bonus += opt.junc_bonus;
                 }
                 t_off += len;
             }
@@ -2559,9 +2659,28 @@ pub fn align_skeleton(
         score::gen_simple_mat(5, &mut mat, opt.a, opt.b, opt.sc_ambi);
     }
 
+    // Match C's mm_squeeze_a (hit.c:347-365): compact anchors referenced by
+    // regions to the front of `a`, visiting regions in ascending `as` order
+    // (not regs[] order) so lower-`as` regions settle first. Critical: without
+    // sorting by `as` first, later regions overwrite anchors before earlier
+    // regions have been copied.
+    {
+        let n = regs.len();
+        let mut aux: Vec<(i32, usize)> = (0..n).map(|i| (regs[i].as_, i)).collect();
+        aux.sort_by_key(|&(a_, _)| a_);
+        let mut as_cur: i32 = 0;
+        for (_, i) in aux {
+            let src = regs[i].as_ as usize;
+            let cnt = regs[i].cnt as usize;
+            if regs[i].as_ != as_cur && cnt > 0 {
+                a.copy_within(src..src + cnt, as_cur as usize);
+            }
+            regs[i].as_ = as_cur;
+            as_cur += cnt as i32;
+        }
+    }
+
     // Align each region, collecting any split regions.
-    // Like C's mm_align_skeleton, split regions are inserted back into the work queue
-    // so they can be further split (cascading z-drop splits).
     let mut work: Vec<AlignReg> = regs.drain(..).collect();
     let mut new_regs: Vec<AlignReg> = Vec::new();
     let mut wi = 0;
@@ -2607,14 +2726,11 @@ pub fn align_skeleton(
                 (r_rev, splits_rev, 3u8)
             };
             if let Some(extra) = chosen.extra.as_mut() {
-                let final_trans_strand = if extra.trans_strand == 1 || extra.trans_strand == 2 {
-                    extra.trans_strand
-                } else {
-                    trans_strand
-                };
-                extra.trans_strand = final_trans_strand;
+                // Match C align.c:1124 — `r->p->trans_strand = trans_strand;`
+                // unconditional assignment from the score-derived winner.
+                extra.trans_strand = trans_strand;
                 if chosen.is_spliced {
-                    if final_trans_strand == 1 || final_trans_strand == 2 {
+                    if trans_strand == 1 || trans_strand == 2 {
                         extra.dp_max += (opt.a + opt.b) + ((opt.a + opt.b) >> 1);
                     } else {
                         extra.dp_max -= opt.a + opt.b;
@@ -2826,7 +2942,12 @@ mod tests {
     }
 
     #[test]
-    fn test_annotate_splice_cigar_converts_intronic_deletion() {
+    fn test_annotate_splice_cigar_keeps_unannotated_deletion() {
+        // C minimap2 does not signal-infer post-DP — splice detection is
+        // entirely a DP-time decision (state 3 → N). Without an annotated
+        // junction (BED), even a canonical-looking GT-AG region must stay
+        // as a deletion. This reverses an earlier Rust-only behavior that
+        // produced spurious N-skips on yeast reads.
         let mi = MmIdx::build_from_str(
             5,
             3,
@@ -2842,12 +2963,11 @@ mod tests {
             | crate::flags::MapFlags::SPLICE_REV;
         let mut cigar = vec![(4u32 << 4), (8u32 << 4) | 2, (4u32 << 4)];
 
-        let (is_spliced, trans_strand, _) =
+        let (is_spliced, _trans_strand, _) =
             annotate_splice_cigar(&opt, &mi, 0, 0, &mut cigar, false);
 
-        assert!(is_spliced);
-        assert_eq!(trans_strand, 1);
-        assert_eq!(cigar_to_string(&cigar), "4M8N4M");
+        assert!(!is_spliced);
+        assert_eq!(cigar_to_string(&cigar), "4M8D4M");
     }
 
     #[test]

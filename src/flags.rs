@@ -58,18 +58,19 @@ bitflags! {
     /// KSW2 extension flags. Mirrors KSW_EZ_* from ksw2.h.
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct KswFlags: i32 {
-        const SCORE_ONLY  = 0x01;
-        const RIGHT       = 0x02;
-        const GENERIC_SC  = 0x04;
-        const APPROX_MAX  = 0x08;
-        const APPROX_DROP = 0x10;
-        const EXTZ_ONLY   = 0x20;
-        const REV_CIGAR   = 0x40;
-        const SPLICE_FOR  = 0x80;
-        const SPLICE_REV  = 0x100;
-        const SPLICE_FLANK= 0x200;
-        const SPLICE_CMPLX= 0x400;
-        const SPLICE_SCORE= 0x800;
+        const SCORE_ONLY  = 0x001;
+        const RIGHT       = 0x002;
+        const GENERIC_SC  = 0x004;
+        const APPROX_MAX  = 0x008;
+        const APPROX_DROP = 0x010;
+        // 0x020 is reserved/unused in C ksw2.h
+        const EXTZ_ONLY   = 0x040;
+        const REV_CIGAR   = 0x080;
+        const SPLICE_FOR  = 0x100;
+        const SPLICE_REV  = 0x200;
+        const SPLICE_FLANK= 0x400;
+        const SPLICE_CMPLX= 0x800;
+        const SPLICE_SCORE= 0x1000;
     }
 }
 

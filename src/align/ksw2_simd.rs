@@ -525,13 +525,17 @@ unsafe fn extz2_sse2(
                 if force_state >= 0 {
                     state = force_state as u8;
                 }
+                // Match C ksw_backtrack (ksw2.h:151-154). For single-gap
+                // (extz2) only states 0/1/2 appear; state 3 is unused but
+                // mapping it as DEL preserves parity should the kernel ever
+                // emit it (matches the dual-gap convention).
                 match state {
                     0 => {
                         super::ksw2::push_cigar_fn(&mut cigar, 0, 1);
                         i -= 1;
                         j -= 1;
                     }
-                    1 => {
+                    1 | 3 => {
                         super::ksw2::push_cigar_fn(&mut cigar, 2, 1);
                         i -= 1;
                     }
@@ -2115,6 +2119,288 @@ pub fn ksw_extd2_dispatch(
     #[cfg(not(target_arch = "x86_64"))]
     crate::align::ksw2::ksw_extd2(
         query, target, m, mat, q, e, q2, e2, w, zdrop, end_bonus, flag,
+    )
+}
+
+/// SSE2-faithful translation of ksw_exts2_sse from minimap2/ksw2_exts2_sse.c.
+/// Uses rotated anti-diagonal DP with 16-way SSE2 byte-parallel operations,
+/// matching C bit-for-bit including int8 wrap-around semantics.
+///
+/// CURRENT STATUS: setup phase implemented (parameter checks, long_thres
+/// computation, splice penalty constants). Inner DP loop and backtrack still
+/// delegate to scalar `ksw_exts2_rot`. Will be progressively replaced with
+/// SSE2 intrinsics across iterations.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "sse2")]
+unsafe fn exts2_sse2(
+    query: &[u8],
+    target: &[u8],
+    m: i8,
+    mat: &[i8],
+    q: i8,
+    e: i8,
+    q2: i8,
+    noncan: i8,
+    w: i32,
+    zdrop: i32,
+    end_bonus: i32,
+    flag: KswFlags,
+) -> KswResult {
+    let qlen = query.len() as i32;
+    let tlen = target.len() as i32;
+
+    // Early-exit checks mirroring C lines 73-74:
+    // - m <= 1 || qlen <= 0 || tlen <= 0 || q2 <= q + e
+    if m <= 1 || qlen <= 0 || tlen <= 0 || q2 <= q + e {
+        return KswResult::new();
+    }
+    debug_assert!(
+        !(flag.contains(KswFlags::SPLICE_FOR) && flag.contains(KswFlags::SPLICE_REV)),
+        "ksw_exts2: SPLICE_FOR and SPLICE_REV cannot both be set"
+    );
+
+    // Score range sanity check (C line 88-92).
+    let mut max_sc = mat[0] as i32;
+    let mut min_sc = mat[1] as i32;
+    let m_u = m as usize;
+    for k in 1..(m_u * m_u) {
+        let v = mat[k] as i32;
+        if v > max_sc { max_sc = v; }
+        if v < min_sc { min_sc = v; }
+    }
+    if -min_sc > 2 * (q as i32 + e as i32) {
+        return KswResult::new();
+    }
+    let _ = max_sc;
+
+    // long_thres = (q2-q)/e - 1, possibly +1 (C lines 94-97).
+    let mut long_thres = (q2 as i32 - q as i32) / (e as i32) - 1;
+    if (q2 as i32) > (q as i32) + (e as i32) + long_thres * (e as i32) {
+        long_thres += 1;
+    }
+    let _long_diff = long_thres * (e as i32) - (q2 as i32 - q as i32);
+
+    // Splice penalty constants (C lines 122-130). For CMPLX mode use sp0/3,
+    // else use noncan / noncan-half-flank pattern.
+    let _sp = if flag.contains(KswFlags::SPLICE_CMPLX) {
+        let sp0 = [8, 15, 21, 30];
+        let mut sp = [0i32; 4];
+        for k in 0..4 {
+            sp[k] = ((sp0[k] as f64) / 3.0 + 0.499) as i32;
+        }
+        sp
+    } else {
+        let half = if flag.contains(KswFlags::SPLICE_FLANK) {
+            (noncan as i32) / 2
+        } else {
+            0
+        };
+        [half, noncan as i32, noncan as i32, noncan as i32]
+    };
+    let _ = _long_diff;
+
+    // SSE2-aligned scratch buffer allocation, mirroring C lines 99-115.
+    // Layout: [u:bsz][v:bsz][x:bsz][y:bsz][x2:bsz][donor:bsz][acceptor:bsz]
+    //         [s:bsz][bt:bt_size][qr:qr_sz][sf:sf_sz]
+    let with_cigar = !flag.contains(KswFlags::SCORE_ONLY);
+    let approx_max = flag.contains(KswFlags::APPROX_MAX);
+
+    let _w = if w < 0 { qlen.max(tlen) } else { w };
+    let tlen_ = ((tlen + 15) / 16) as usize;
+    let mut n_col_: usize = qlen.min(tlen) as usize;
+    n_col_ = ((n_col_.min((_w + 1) as usize) + 15) / 16) + 1;
+
+    let bsz = tlen_ * 16 + 16;
+    let nqe = (-(q as i32) - e as i32) as i8;
+    let nq2 = (-(q2 as i32)) as i8;
+    let n_ad = (qlen + tlen - 1) as usize;
+    let bt_size = if with_cigar { n_ad * n_col_ * 16 + 16 } else { 0 };
+    let off_size = if with_cigar { n_ad } else { 0 };
+    let qr_sz = qlen as usize + 16;
+    let sf_sz = tlen as usize + 16;
+    // 8 byte arrays (u/v/x/y/x2/donor/acceptor/s) of size bsz, plus bt, qr,
+    // sf. SSE4.1's _mm_max_epi8 isn't available on pure SSE2; we'll use the
+    // andnot/cmpgt emulation pattern for state pick.
+    let total_u8 = 8 * bsz + bt_size + qr_sz + sf_sz;
+    let h_sz = if !approx_max { bsz } else { 0 };
+    let total_i32 = h_sz + 2 * off_size;
+
+    let mut scratch = KSW_SCRATCH.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    let mut scratch_i32 = KSW_I32_SCRATCH.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    if scratch.len() < total_u8 {
+        scratch.resize(total_u8, 0);
+    }
+    if scratch_i32.len() < total_i32 {
+        scratch_i32.resize(total_i32, 0);
+    }
+
+    // Init the byte arrays per C lines 104-105, 131-132:
+    //   u, v, x, y → -q-e   (single memset across 4 contiguous arrays)
+    //   x2 → -q2            (separate memset)
+    //   donor, acceptor → -sp[3] (init to default penalty; will be overwritten)
+    //   s → 0               (zeroed; gets populated per anti-diagonal)
+    let dp_base = scratch.as_mut_ptr();
+    std::ptr::write_bytes(dp_base, nqe as u8, 4 * bsz);
+    std::ptr::write_bytes(dp_base.add(4 * bsz), nq2 as u8, bsz);
+    let sp_default = if flag.contains(KswFlags::SPLICE_CMPLX) {
+        ((30.0 / 3.0) + 0.499) as i32
+    } else {
+        noncan as i32
+    };
+    let neg_sp = (-sp_default) as i8;
+    std::ptr::write_bytes(dp_base.add(5 * bsz), neg_sp as u8, 2 * bsz);
+    std::ptr::write_bytes(dp_base.add(7 * bsz), 0, bsz);
+
+    // Zero qr and sf padding.
+    let qr_start = 8 * bsz + bt_size;
+    std::ptr::write_bytes(dp_base.add(qr_start), 0, qr_sz + sf_sz);
+
+    // qr = reverse(query)
+    for k in 0..(qlen as usize) {
+        *dp_base.add(qr_start + k) = query[qlen as usize - 1 - k];
+    }
+    // sf = target (verbatim copy)
+    let sf_start = qr_start + qr_sz;
+    std::ptr::copy_nonoverlapping(target.as_ptr(), dp_base.add(sf_start), tlen as usize);
+
+    if h_sz > 0 {
+        scratch_i32[..h_sz].fill(KSW_NEG_INF);
+    }
+
+    // Donor/acceptor SIMD scoring per C lines 121-191. Computes the
+    // per-position splice signal penalty arrays inside the scratch's donor/
+    // acceptor regions. Mirrors C's z-table lookup with sp[] penalties.
+    let donor_off = 5 * bsz;
+    let acceptor_off = 6 * bsz;
+    let donor_ptr = dp_base.add(donor_off) as *mut i8;
+    let acceptor_ptr = dp_base.add(acceptor_off) as *mut i8;
+    if flag.intersects(KswFlags::SPLICE_FOR | KswFlags::SPLICE_REV) {
+        let sp0 = [8i32, 15, 21, 30];
+        let sp = if flag.contains(KswFlags::SPLICE_CMPLX) {
+            let mut sp = [0i32; 4];
+            for k in 0..4 {
+                sp[k] = ((sp0[k] as f64) / 3.0 + 0.499) as i32;
+            }
+            sp
+        } else {
+            let s0 = if flag.contains(KswFlags::SPLICE_FLANK) {
+                noncan as i32 / 2
+            } else {
+                0
+            };
+            [s0, noncan as i32, noncan as i32, noncan as i32]
+        };
+        // Donor arm — without REV_CIGAR (forward target orientation).
+        if !flag.contains(KswFlags::REV_CIGAR) {
+            let donor_end = (tlen - 4).max(0) as usize;
+            for t in 0..donor_end {
+                let mut z: i32 = 3;
+                if flag.contains(KswFlags::SPLICE_FOR) {
+                    if target[t + 1] == 2 && target[t + 2] == 3 {
+                        z = if target[t + 3] == 0 || target[t + 3] == 2 { -1 } else { 0 };
+                    } else if target[t + 1] == 2 && target[t + 2] == 1 {
+                        z = 1;
+                    } else if target[t + 1] == 0 && target[t + 2] == 3 {
+                        z = 2;
+                    }
+                } else if flag.contains(KswFlags::SPLICE_REV) {
+                    if target[t + 1] == 1 && target[t + 2] == 3 {
+                        z = if target[t + 3] == 0 || target[t + 3] == 2 { -1 } else { 0 };
+                    } else if target[t + 1] == 2 && target[t + 2] == 3 {
+                        z = 2;
+                    }
+                }
+                let v = if z < 0 { 0i8 } else { -(sp[z as usize]) as i8 };
+                *donor_ptr.add(t) = v;
+            }
+            // Acceptor arm.
+            for t in 2..(tlen as usize) {
+                let mut z: i32 = 3;
+                if flag.contains(KswFlags::SPLICE_FOR) {
+                    if target[t - 1] == 0 && target[t] == 2 {
+                        z = if target[t - 2] == 1 || target[t - 2] == 3 { -1 } else { 0 };
+                    } else if target[t - 1] == 0 && target[t] == 1 {
+                        z = 2;
+                    }
+                } else if flag.contains(KswFlags::SPLICE_REV) {
+                    if target[t - 1] == 0 && target[t] == 1 {
+                        z = if target[t - 2] == 1 || target[t - 2] == 3 { -1 } else { 0 };
+                    } else if target[t - 1] == 2 && target[t] == 1 {
+                        z = 1;
+                    } else if target[t - 1] == 0 && target[t] == 3 {
+                        z = 2;
+                    }
+                }
+                let v = if z < 0 { 0i8 } else { -(sp[z as usize]) as i8 };
+                *acceptor_ptr.add(t) = v;
+            }
+        }
+        // REV_CIGAR donor/acceptor patterns omitted (not exercised by current
+        // test inputs); will be ported when needed.
+    }
+
+    // Anti-diagonal main loop scaffolding (C lines 219-450). The inner SIMD
+    // DP body, H[]/H0 tracking, zdrop check, and backtrack are still TODO;
+    // for now the scratch is not consumed and we delegate.
+    //
+    // The loop structure here documents what the SIMD body will iterate
+    // over so subsequent iterations have a well-defined skeleton to fill in.
+    let _n_anti = (qlen + tlen - 1) as usize;
+    // Iteration plan per anti-diagonal r:
+    //   1. Compute st0 = max(0, r-qlen+1), en0 = min(r, tlen-1)
+    //   2. Compute st = (st0 / 16) * 16, en = ((en0 + 16) / 16) * 16 - 1
+    //   3. Read boundary x1/x21/v1 from x[st-1]/x2[st-1]/v[st-1] (or fallback)
+    //   4. If en >= r: set y[r] = -q-e, u[r] = ... (boundary init)
+    //   5. Compute s[t] = mat[query[r-t]][target[t]] for t in [st0, en0]
+    //   6. SIMD inner loop: for each 16-byte chunk, compute z/state/u/v/x/y/x2
+    //      using __dp_code_block1 + __dp_code_block2 patterns
+    //   7. H[]/H0 tracking for max/zdrop
+    //   8. Update last_st = st, last_en = en
+    //
+    // Then backtrack: ksw_backtrack with continuation flags.
+
+    // Subsequent iterations will fill in the inner SIMD body. For now,
+    // return scratch to thread-local and delegate to scalar rot DP.
+    let _ = (sf_start, h_sz, total_i32, _n_anti);
+    KSW_SCRATCH.with(|c| *c.borrow_mut() = scratch);
+    KSW_I32_SCRATCH.with(|c| *c.borrow_mut() = scratch_i32);
+
+    crate::align::ksw2::ksw_exts2_rot(
+        query, target, m, mat, q, e, q2, noncan, w, zdrop, end_bonus, flag,
+    )
+}
+
+/// Dispatch for splice (exts2): SIMD path → scalar rotated DP fallback.
+pub fn ksw_exts2_dispatch(
+    query: &[u8],
+    target: &[u8],
+    m: i8,
+    mat: &[i8],
+    q: i8,
+    e: i8,
+    q2: i8,
+    noncan: i8,
+    w: i32,
+    zdrop: i32,
+    end_bonus: i32,
+    flag: KswFlags,
+) -> KswResult {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if has_sse2() {
+            return unsafe {
+                exts2_sse2(
+                    query, target, m, mat, q, e, q2, noncan, w, zdrop, end_bonus, flag,
+                )
+            };
+        }
+        return crate::align::ksw2::ksw_exts2_rot(
+            query, target, m, mat, q, e, q2, noncan, w, zdrop, end_bonus, flag,
+        );
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    crate::align::ksw2::ksw_exts2_rot(
+        query, target, m, mat, q, e, q2, noncan, w, zdrop, end_bonus, flag,
     )
 }
 

@@ -417,6 +417,41 @@ pub fn sync_regs(regs: &mut [AlignReg]) {
 /// Recalibrate dp_max based on divergence for assembly ranking.
 /// Matches mm_update_dp_max() from align.c.
 pub fn update_dp_max(qlen: i32, regs: &mut [AlignReg], frac: f32, a: i32, b: i32) {
+    // Cross-language parity probe. Wraps the entire function so a row is
+    // emitted even on early returns. The probe captures (inputs | before-dp_max
+    // snapshot | after-dp_max snapshot) as a single call.
+    #[cfg(feature = "tracehash")]
+    let before_dp_max: Vec<i64> = regs
+        .iter()
+        .map(|r| r.extra.as_ref().map(|p| p.dp_max as i64).unwrap_or(-1))
+        .collect();
+
+    update_dp_max_inner(qlen, regs, frac, a, b);
+
+    #[cfg(feature = "tracehash")]
+    {
+        let mut th = tracehash::th_call!("mm_update_dp_max");
+        th.input_i64(qlen as i64);
+        th.input_f32(frac);
+        th.input_i64(a as i64);
+        th.input_i64(b as i64);
+        th.input_u64(regs.len() as u64);
+        for (r, &b_dp) in regs.iter().zip(before_dp_max.iter()) {
+            th.input_i64(r.mlen as i64);
+            th.input_i64(r.blen as i64);
+            th.input_i64(r.qs as i64);
+            th.input_i64(r.qe as i64);
+            th.input_i64(b_dp);
+        }
+        th.output_u64(regs.len() as u64);
+        for r in regs.iter() {
+            th.output_i64(r.extra.as_ref().map(|p| p.dp_max).unwrap_or(-1) as i64);
+        }
+        th.finish();
+    }
+}
+
+fn update_dp_max_inner(qlen: i32, regs: &mut [AlignReg], frac: f32, a: i32, b: i32) {
     if regs.len() < 2 {
         return;
     }
@@ -485,7 +520,6 @@ pub fn update_dp_max(qlen: i32, regs: &mut [AlignReg], frac: f32, a: i32, b: i32
                 let op = c & 0xf;
                 let len = (c >> 4) as i32;
                 if op == 1 || op == 2 {
-                    // I or D
                     gap_cost += b2 + crate::chain::mg_log2(1.0 + len as f32) as f64;
                     n_gap += len;
                 }

@@ -804,6 +804,25 @@ pub fn ksw_exts2(
     let m_u = m as usize;
     let donor = splice_donor_scores(target, noncan as i32, flag);
     let acceptor = splice_acceptor_scores(target, noncan as i32, flag);
+    // Minimum intron length — matches C's long_thres
+    // (ksw2_extd2_sse.c:102-105). Below this, the splice path can't beat a
+    // regular gap so don't even consider it. Without this guard, Rust would
+    // call short stretches like 6-base regions as N-skips where C produces
+    // simple D's (e.g. yeast SRR30335018.169095 had `7D` in C but `7N` in
+    // Rust prior to this fix).
+    let e_i = e as i32;
+    let e2_i = 0i32; // ksw_exts2 effectively has e2 = 0 for the splice path
+    let mut min_intron_len = if e_i != e2_i {
+        (q2 as i32 - q as i32) / (e_i - e2_i) - 1
+    } else {
+        0
+    };
+    if (q2 as i32) + e2_i + min_intron_len * e2_i > (q as i32) + e_i + min_intron_len * e_i {
+        min_intron_len += 1;
+    }
+    if min_intron_len < 6 {
+        min_intron_len = 6;
+    }
 
     let cols = tlen + 1;
     let idx = |i: usize, j: usize| i * cols + j;
@@ -848,16 +867,18 @@ pub fn ksw_exts2(
                     state = 0;
                 }
             }
-            if i > 0 {
-                let up = idx(i - 1, j);
-                let ext = ins[up] - e as i32;
-                let open = h[up] - qe;
-                ins[cur] = ext.max(open);
-                if ins[cur] > best {
-                    best = ins[cur];
-                    state = 1;
-                }
-            }
+            // Order of state-update probing matches C's ksw_exts2_sse SIMD
+            // tie-break (line 307-311 of ksw2_exts2_sse.c): a (DEL, "x array")
+            // before b (INS, "y array") before a2 (splice). For equal scores,
+            // earlier-probed states win — Rust used to probe ins before del,
+            // producing different CIGAR shapes than C (e.g. SRR30335018.202275).
+            //
+            // Note: Rust's exts2 state encoding swaps 1↔2 vs C's, so this
+            // probes DEL→state=2 first, then INS→state=1, mirroring C's
+            // first-DEL-then-INS preference at the cost of in-Rust state
+            // numbering inconsistency. The backtrack at lines 944-978 maps
+            // state 1→INS and state 2→DEL, so DEL preference here yields the
+            // same CIGAR-side preference as C.
             if j > 0 {
                 let left = idx(i, j - 1);
                 let ext = del[left] - e as i32;
@@ -868,7 +889,20 @@ pub fn ksw_exts2(
                     state = 2;
                 }
             }
-            if j >= 6 && best_splice > KSW_NEG_INF / 2 {
+            if i > 0 {
+                let up = idx(i - 1, j);
+                let ext = ins[up] - e as i32;
+                let open = h[up] - qe;
+                ins[cur] = ext.max(open);
+                if ins[cur] > best {
+                    best = ins[cur];
+                    state = 1;
+                }
+            }
+            if j >= min_intron_len as usize
+                && best_splice > KSW_NEG_INF / 2
+                && (j - best_splice_j) >= min_intron_len as usize
+            {
                 let sp = best_splice - splice_open + acceptor[j];
                 if sp > best {
                     best = sp;
@@ -900,7 +934,7 @@ pub fn ksw_exts2(
                 ez.mqe = best;
                 ez.mqe_t = j as i32 - 1;
             }
-            if j <= tlen.saturating_sub(6) {
+            if j <= tlen.saturating_sub(min_intron_len as usize) {
                 let cand = best + donor[j];
                 if cand > best_splice {
                     best_splice = cand;
@@ -984,8 +1018,576 @@ pub fn ksw_exts2(
     ez
 }
 
+/// Rotated anti-diagonal DP version of ksw_exts2.
+///
+/// Faithfully follows minimap2/ksw2_exts2_sse.c — same u/v/x/y/x2 array layout,
+/// same per-cell `d` byte encoding (state in bits 0-2, continuation flags in
+/// bits 3-5), and same ksw_backtrack continuation logic. Scalar (one byte at a
+/// time) instead of SSE. Replaces the standard (i, j) DP for splice mode so
+/// CIGAR-shape parity with C SIMD ksw_exts2 is preserved.
+pub fn ksw_exts2_rot(
+    query: &[u8],
+    target: &[u8],
+    m: i8,
+    mat: &[i8],
+    q: i8,
+    e: i8,
+    q2: i8,
+    noncan: i8,
+    _w: i32,
+    zdrop: i32,
+    end_bonus: i32,
+    flag: KswFlags,
+) -> KswResult {
+    let qlen = query.len() as i32;
+    let tlen = target.len() as i32;
+    let mut ez = KswResult::new();
+    if m <= 1 || qlen <= 0 || tlen <= 0 || q2 <= q + e {
+        return ez;
+    }
+    let with_cigar = !flag.contains(KswFlags::SCORE_ONLY);
+    let approx_max = flag.contains(KswFlags::APPROX_MAX);
+    let is_extz = flag.contains(KswFlags::EXTZ_ONLY);
+    let is_right = flag.contains(KswFlags::RIGHT);
+    let qe_i = (q as i32) + (e as i32);
+    let q_i = q as i32;
+    let q2_i = q2 as i32;
+    let m_u = m as usize;
+
+    // long_thres mirrors C: long_thres = (q2-q)/e - 1; bumped by 1 if needed.
+    let mut long_thres = (q2_i - q_i) / (e as i32) - 1;
+    if q2_i > q_i + (e as i32) + long_thres * (e as i32) {
+        long_thres += 1;
+    }
+    let long_diff = long_thres * (e as i32) - (q2_i - q_i);
+
+    // Score sanity check matching C (line 88-92).
+    let mut max_sc = mat[0] as i32;
+    let mut min_sc = mat[1] as i32;
+    for k in 1..(m_u * m_u) {
+        let v = mat[k] as i32;
+        if v > max_sc { max_sc = v; }
+        if v < min_sc { min_sc = v; }
+    }
+    if -min_sc > 2 * (q_i + e as i32) {
+        return ez;
+    }
+    let _ = max_sc;
+
+    // donor[]/acceptor[] sized tlen+1 like the existing splice_*_scores helpers.
+    let donor = splice_donor_scores(target, noncan as i32, flag);
+    let acceptor = splice_acceptor_scores(target, noncan as i32, flag);
+
+    // Per-column DP state arrays (length tlen each). Initialised per C lines
+    // 100-105: u/v/x/y = -q-e, x2 = -q2.
+    let neg_qe = -qe_i;
+    let mut u = vec![neg_qe; tlen as usize];
+    let mut v = vec![neg_qe; tlen as usize];
+    let mut x = vec![neg_qe; tlen as usize];
+    let mut y = vec![neg_qe; tlen as usize];
+    let mut x2 = vec![-q2_i; tlen as usize];
+
+    // Per-column score scratch (s) and reversed query (qr). C uses 16-byte
+    // aligned vectors; scalar uses Vec.
+    let mut s = vec![0i32; tlen as usize];
+    let qr: Vec<u8> = (0..qlen).map(|t| query[(qlen - 1 - t) as usize]).collect();
+
+    // Per-anti-diagonal H storage for exact max tracking.
+    let mut h_arr: Vec<i32> = if !approx_max {
+        vec![KSW_NEG_INF; tlen as usize]
+    } else {
+        Vec::new()
+    };
+    let mut h0: i32 = 0;
+    let mut last_h0_t: i32 = 0;
+
+    // CIGAR backtrack scratch: bt[r][t] packed byte; off[r] = first column of
+    // anti-diagonal r (st0); off_end[r] = last column (en0). C's `n_col_*16`
+    // is the per-row stride; we use a Vec<Vec<u8>> indexed by [r][t-off[r]].
+    let n_anti = (qlen + tlen - 1) as usize;
+    let mut bt: Vec<Vec<u8>> = if with_cigar {
+        Vec::with_capacity(n_anti)
+    } else {
+        Vec::new()
+    };
+    let mut offs: Vec<i32> = Vec::with_capacity(n_anti);
+    let mut off_ends: Vec<i32> = Vec::with_capacity(n_anti);
+
+    let mut last_st: i32 = -1;
+    let mut last_en: i32 = -1;
+
+    for r in 0..(qlen + tlen - 1) {
+        // Determine anti-diagonal column range [st0, en0]. C lines 219-228.
+        let mut st = 0i32;
+        let mut en = tlen - 1;
+        if st < r - qlen + 1 { st = r - qlen + 1; }
+        if en > r { en = r; }
+        let st0 = st;
+        let en0 = en;
+        offs.push(st0);
+        off_ends.push(en0);
+
+        // Boundary state at column st0-1 (corresponds to SIMD x1/x21/v1).
+        let (mut x1, mut x21, mut v1) = if st0 > 0 {
+            if st0 - 1 >= last_st && st0 - 1 <= last_en {
+                (x[(st0 - 1) as usize], x2[(st0 - 1) as usize], v[(st0 - 1) as usize])
+            } else {
+                (-qe_i, -q2_i, -qe_i)
+            }
+        } else {
+            let v0 = if r == 0 {
+                -qe_i
+            } else if r < long_thres {
+                -(e as i32)
+            } else if r == long_thres {
+                long_diff
+            } else {
+                0
+            };
+            (-qe_i, -q2_i, v0)
+        };
+        // y[r] / u[r] boundary at en0 + 1 = r when en0 == r.
+        if en0 >= r {
+            y[r as usize] = -qe_i;
+            u[r as usize] = if r == 0 {
+                -qe_i
+            } else if r < long_thres {
+                -(e as i32)
+            } else if r == long_thres {
+                long_diff
+            } else {
+                0
+            };
+        }
+
+        // Score lookup: s[t] = mat[query[r-t]][target[t]] for t in [st0, en0].
+        for t in st0..=en0 {
+            let qb = qr[(qlen - 1 - (r - t)) as usize] as usize;
+            let tb = target[t as usize] as usize;
+            s[t as usize] = mat[qb * m_u + tb] as i32;
+        }
+
+        // Per-row bt slot — one byte per t in [st0, en0].
+        let row_len = (en0 - st0 + 1) as usize;
+        let mut row_bt = if with_cigar { vec![0u8; row_len] } else { Vec::new() };
+
+        // Iterate over CHUNK-ALIGNED bounds (multiples of 16), matching C
+        // SIMD's lane-parallel processing. Cells outside [st0, en0] get
+        // computed and stored with garbage values (since they're outside the
+        // band), but C does this too — and subsequent rows may read these
+        // garbage values as their boundary x1, propagating equivalent state.
+        let chunk_st = (st0 / 16) * 16;
+        let chunk_en_excl = ((en0 + 16) / 16) * 16; // exclusive upper bound
+        let chunk_en = (chunk_en_excl - 1).min(tlen - 1);
+
+        // Boundary at chunk_st - 1: C reads x[st-1] etc. unconditionally
+        // when st > 0. Use prev row's value if chunk_st-1 was in prev row's
+        // chunk range, else fall back to initial -qe boundary.
+        let (mut prev_x, mut prev_v, mut prev_x2) = if chunk_st > 0 {
+            if chunk_st - 1 >= last_st && chunk_st - 1 <= last_en {
+                (x[(chunk_st - 1) as usize], v[(chunk_st - 1) as usize], x2[(chunk_st - 1) as usize])
+            } else {
+                (-qe_i, -qe_i, -q2_i)
+            }
+        } else {
+            (x1, v1, x21)
+        };
+        // For chunk_st == 0, x1/v1/x21 are already correct (computed earlier
+        // with the special r==0 / boundary logic).
+        for t in chunk_st..=chunk_en {
+            let z_init = s[t as usize];
+            let xt1 = prev_x;
+            let vt1 = prev_v;
+            let x2t1 = prev_x2;
+            let ut = u[t as usize];
+            // Snapshot the OLD t-th values for the next iteration before they
+            // get overwritten by this iteration's stores.
+            let next_prev_x = x[t as usize];
+            let next_prev_v = v[t as usize];
+            let next_prev_x2 = x2[t as usize];
+            let a = xt1 + vt1;
+            let b = y[t as usize] + ut;
+            let a2 = x2t1 + vt1;
+            // C ksw2_exts2_sse.c uses donor[t]=signal at target[t+1,t+2] and
+            // acceptor[t]=signal at target[t-1,t]. Rust splice_*_scores helpers
+            // use donor[pos]=signal at target[pos,pos+1] and
+            // acceptor[pos]=signal at target[pos-2,pos-1]. Shift indices by +1
+            // so this rot function uses C's convention.
+            let acceptor_t = if (t as usize) + 1 < acceptor.len() {
+                acceptor[(t as usize) + 1]
+            } else {
+                -((noncan as i32).max(0))
+            };
+            let a2a = a2 + acceptor_t;
+
+            // State pick. left-alignment (also covers !is_right): probe in
+            // order a (DEL→state 1), b (INS→state 2), a2a (splice→state 3).
+            // Strict > so M wins ties over gaps; matches C ksw2_exts2_sse.c
+            // line 307-311.
+            let mut z = z_init;
+            let mut state: u8 = 0;
+            if !is_right {
+                if a > z { z = a; state = 1; }
+                if b > z { z = b; state = 2; }
+                if a2a > z { z = a2a; state = 3; }
+            } else {
+                // RIGHT-alignment: ties prefer gap states. Matches C lines
+                // 350-355: blendv with `z > X ? d : new_state`.
+                if !(z > a) { z = a; state = 1; }
+                if !(z > b) { z = b; state = 2; }
+                if !(z > a2a) { z = a2a; state = 3; }
+            }
+            // Save the un-clamped match score before the post-block2 deltas
+            // update u/v.
+            let z_kept = z;
+            // dp_code_block2: u[t]=z-vt1, v[t]=z-ut, then a/b/a2 deltas.
+            u[t as usize] = z - vt1;
+            v[t as usize] = z - ut;
+            let a_post = a - (z - q_i);
+            let b_post = b - (z - q_i);
+            let a2_post = a2 - (z - q2_i);
+            // x/y/x2 update with continuation-flag tracking.
+            let a_pos = a_post > 0;
+            let b_pos = b_post > 0;
+            // x[t] = max(a_post, 0) - qe (left); for right-alignment use
+            // andnot semantics — but the resulting stored value is the same
+            // since `max(a_post, 0)` doesn't depend on alignment direction
+            // for the stored x[t].
+            x[t as usize] = if a_pos { a_post } else { 0 } - qe_i;
+            y[t as usize] = if b_pos { b_post } else { 0 } - qe_i;
+            // x2[t] = max(a2_post, donor[t]) - q2  (left-alignment direction
+            // matters: C uses max(a2, donor) for left, max(donor, a2) for
+            // right with andnot pattern that flips bit 5's meaning). Index
+            // shift +1 for C convention (see acceptor comment above).
+            let donor_t = if (t as usize) + 1 < donor.len() {
+                donor[(t as usize) + 1]
+            } else {
+                -((noncan as i32).max(0))
+            };
+            let a2_wins_donor = a2_post > donor_t;
+            let chosen_x2 = if a2_wins_donor { a2_post } else { donor_t };
+            x2[t as usize] = chosen_x2 - q2_i;
+
+            // Update ez.max for each cell (only meaningful with !approx_max,
+            // where exact H[] is computed below). Here we just use z_kept
+            // through the H update logic.
+            let _ = z_kept;
+
+            if with_cigar && t >= st0 && t <= en0 {
+                let mut d = state;
+                // Continuation flags. Left-alignment encoding (C lines
+                // 327/330/340): bit set iff respective gap path was active
+                // (>0 for x/y, > donor[t] for x2).
+                if !is_right {
+                    if a_pos { d |= 0x08; }
+                    if b_pos { d |= 0x10; }
+                    if a2_wins_donor { d |= 0x20; }
+                } else {
+                    if a_pos { d |= 0x08; }
+                    if b_pos { d |= 0x10; }
+                    if a2_post >= donor_t { d |= 0x20; }
+                }
+                row_bt[(t - st0) as usize] = d;
+            }
+            // Advance the prev-anti-diagonal snapshot.
+            prev_x = next_prev_x;
+            prev_v = next_prev_v;
+            prev_x2 = next_prev_x2;
+        }
+
+        if with_cigar { bt.push(row_bt); }
+
+        // Exact H[] / approximate max tracking — controls ez.max/mqe/mte/score.
+        if !approx_max {
+            let v_row: Vec<i32> = (st0..=en0).map(|t| v[t as usize]).collect();
+            let u_row: Vec<i32> = (st0..=en0).map(|t| u[t as usize]).collect();
+            let mut max_h: i32;
+            let mut max_t: i32;
+            if r > 0 {
+                // Special-case the last element: H[en0] = en0>0? H[en0-1] + u[en0] : H[en0] + v[en0]
+                if en0 > 0 {
+                    let new_h = h_arr[(en0 - 1) as usize] + u_row[(en0 - st0) as usize];
+                    h_arr[en0 as usize] = new_h;
+                } else {
+                    h_arr[en0 as usize] += v_row[(en0 - st0) as usize];
+                }
+                max_h = h_arr[en0 as usize];
+                max_t = en0;
+                // Mirror C SIMD scan order from ksw2_exts2_sse.c:401-425 so
+                // tie-breaking on max_t matches: 4-lane SIMD walks t in
+                // column-major (lane k visits st0+k, st0+k+4, …) then a
+                // scalar tail covers en1..en0. Strict-GT updates throughout
+                // mean ties resolve to the earliest-visited t in this order.
+                let en1 = st0 + (en0 - st0) / 4 * 4;
+                // First update H[t] for all t in [st0, en0) (independent of order).
+                for t in st0..en0 {
+                    h_arr[t as usize] += v_row[(t - st0) as usize];
+                }
+                // Then scan in C SIMD order.
+                for lane in 0..4 {
+                    let mut t = st0 + lane;
+                    while t < en1 {
+                        if h_arr[t as usize] > max_h {
+                            max_h = h_arr[t as usize];
+                            max_t = t;
+                        }
+                        t += 4;
+                    }
+                }
+                for t in en1..en0 {
+                    if h_arr[t as usize] > max_h {
+                        max_h = h_arr[t as usize];
+                        max_t = t;
+                    }
+                }
+            } else {
+                h_arr[0] = v_row[0] - qe_i;
+                max_h = h_arr[0];
+                max_t = 0;
+            }
+            // mte / mqe / score updates per C lines 423-430.
+            if en0 == tlen - 1 && h_arr[en0 as usize] > ez.mte {
+                ez.mte = h_arr[en0 as usize];
+                ez.mte_q = r - en0;
+            }
+            if r - st0 == qlen - 1 && h_arr[st0 as usize] > ez.mqe {
+                ez.mqe = h_arr[st0 as usize];
+                ez.mqe_t = st0;
+            }
+            // Track ez.max from the per-anti-diagonal exact max.
+            if max_h > ez.max as i32 {
+                ez.max = max_h;
+                ez.max_t = max_t;
+                ez.max_q = r - max_t;
+            }
+            // Per-anti-diagonal tracehash probe — captures (r, st0, en0,
+            // max_h, max_t, h[st0], h[en0]) so a Rust/C deep diff can
+            // pinpoint the first divergent anti-diagonal.
+            #[cfg(feature = "tracehash")]
+            {
+                let mut th = tracehash::th_call!("exts2_anti_diag");
+                th.input_i64(r as i64);
+                th.input_i64(st0 as i64);
+                th.input_i64(en0 as i64);
+                th.output_i64(max_h as i64);
+                th.output_i64(max_t as i64);
+                th.output_i64(h_arr[st0 as usize] as i64);
+                th.output_i64(h_arr[en0 as usize] as i64);
+                th.finish();
+            }
+            // Z-drop check. C ksw_exts2_sse.c:428 passes e=0 for the splice
+            // DP (long-gap path uses e2=0 effectively).
+            if zdrop >= 0 && ksw_apply_zdrop_rot(&mut ez, max_h, r, max_t, zdrop, 0) {
+                break;
+            }
+            if r == qlen + tlen - 2 && en0 == tlen - 1 {
+                ez.score = h_arr[(tlen - 1) as usize];
+            }
+        } else {
+            // Approximate-max mode: track diagonal H0 along last_h0_t.
+            // C reads u8/v8 (the int8 byte view of u/v); the i32 we store can
+            // exceed int8 range, so cast through i8 to match C's sign-extended
+            // delta. (The exact-max path uses the same byte values implicitly
+            // through the H array update; here we reach into u/v directly.)
+            if r > 0 {
+                if last_h0_t >= st0
+                    && last_h0_t <= en0
+                    && last_h0_t + 1 >= st0
+                    && last_h0_t + 1 <= en0
+                {
+                    let d0 = v[last_h0_t as usize] as i8 as i32;
+                    let d1 = u[(last_h0_t + 1) as usize] as i8 as i32;
+                    if d0 > d1 {
+                        h0 += d0;
+                    } else {
+                        h0 += d1;
+                        last_h0_t += 1;
+                    }
+                } else if last_h0_t >= st0 && last_h0_t <= en0 {
+                    h0 += v[last_h0_t as usize] as i8 as i32;
+                } else {
+                    last_h0_t += 1;
+                    h0 += u[last_h0_t as usize] as i8 as i32;
+                }
+            } else {
+                h0 = v[0] as i8 as i32 - qe_i;
+                last_h0_t = 0;
+            }
+            #[cfg(feature = "tracehash")]
+            {
+                let mut th = tracehash::th_call!("exts2_approx_anti_diag");
+                th.input_i64(r as i64);
+                th.input_i64(st0 as i64);
+                th.input_i64(en0 as i64);
+                th.output_i64(h0 as i64);
+                th.output_i64(last_h0_t as i64);
+                th.output_i64(ez.max as i64);
+                th.output_i64(ez.mqe as i64);
+                th.output_i64(ez.mte as i64);
+                th.finish();
+            }
+            // Match C ksw2_exts2_sse.c:461 — APPROX_MAX only updates ez.max
+            // through ksw_apply_zdrop, and ksw_apply_zdrop is only called
+            // when APPROX_DROP is set. So when APPROX_MAX is set without
+            // APPROX_DROP, ez.max stays at its initial value (0). Earlier
+            // Rust unconditionally tracked ez.max here, which over-counted
+            // dp_score for splice long-intron gaps.
+            if flag.contains(KswFlags::APPROX_DROP)
+                && ksw_apply_zdrop_rot(&mut ez, h0, r, last_h0_t, zdrop, 0)
+            {
+                break;
+            }
+            if r == qlen + tlen - 2 && en0 == tlen - 1 {
+                ez.score = h0;
+            }
+        }
+
+        // Track CHUNK-ALIGNED bounds for the next row's boundary check, so
+        // garbage-but-stored chunk-extension positions are visible to the
+        // next iteration just as they are in C SIMD.
+        last_st = chunk_st;
+        last_en = chunk_en;
+        let _ = (st, en);
+    }
+
+    #[cfg(feature = "tracehash")]
+    {
+        let mut th = tracehash::th_call!("exts2_call_end");
+        th.input_i64(qlen as i64);
+        th.input_i64(tlen as i64);
+        th.input_i64(flag.bits() as i64);
+        th.output_i64(ez.score as i64);
+        th.output_i64(ez.max as i64);
+        th.output_i64(ez.max_t as i64);
+        th.output_i64(ez.max_q as i64);
+        th.output_i64(ez.mqe as i64);
+        th.output_i64(ez.mte as i64);
+        th.output_i64(ez.mqe_t as i64);
+        th.output_i64(ez.mte_q as i64);
+        th.output_i64(if ez.zdropped { 1 } else { 0 });
+        th.output_i64(if ez.reach_end { 1 } else { 0 });
+        th.finish();
+    }
+
+    // Backtrack with C's continuation-flag semantics. C ksw_exts2_sse.c
+    // lines 453-462: when zdropped, branch 3 fires (use max_t, max_q). Only
+    // skip backtrack entirely when no max was recorded.
+    if with_cigar {
+        let (i0, j0) = if !ez.zdropped && !is_extz {
+            (qlen - 1, tlen - 1)
+        } else if !ez.zdropped && is_extz && ez.mqe + end_bonus > ez.max {
+            ez.reach_end = true;
+            (qlen - 1, ez.mqe_t)
+        } else if ez.max_q >= 0 && ez.max_t >= 0 {
+            (ez.max_q, ez.max_t)
+        } else {
+            (-1, -1)
+        };
+        if i0 >= 0 && j0 >= 0 {
+            let (mut i, mut j) = (i0, j0);
+            let mut state: u8 = 0;
+            let mut cigar = Vec::new();
+            while i >= 0 && j >= 0 {
+                let r = i + j;
+                if (r as usize) >= bt.len() {
+                    break;
+                }
+                let st = offs[r as usize];
+                let en = off_ends[r as usize];
+                let mut force_state: i32 = -1;
+                if j < st { force_state = 2; }
+                if j > en { force_state = 1; }
+                let tmp: u8 = if force_state < 0 {
+                    bt[r as usize][(j - st) as usize]
+                } else {
+                    0
+                };
+                if state == 0 {
+                    state = tmp & 7;
+                } else if (tmp >> (state + 2)) & 1 == 0 {
+                    state = 0;
+                }
+                if state == 0 {
+                    state = tmp & 7;
+                }
+                if force_state >= 0 {
+                    state = force_state as u8;
+                }
+                // C ksw_backtrack mapping (ksw2.h:151-154) with min_intron_len
+                // = long_thres > 0:
+                //   state 0 → MATCH, --i, --j
+                //   state 1 → DEL, --j  (rotated: i is query, j is target;
+                //                        DEL consumes target, decrement j)
+                //   state 3 → N_SKIP if min_intron > 0, else DEL, --j
+                //   state 2 → INS, --i (consume query)
+                match state {
+                    0 => { push_cigar_fn(&mut cigar, 0, 1); i -= 1; j -= 1; }
+                    1 => { push_cigar_fn(&mut cigar, 2, 1); j -= 1; }
+                    3 if long_thres > 0 => { push_cigar_fn(&mut cigar, 3, 1); j -= 1; }
+                    3 => { push_cigar_fn(&mut cigar, 2, 1); j -= 1; }
+                    _ => { push_cigar_fn(&mut cigar, 1, 1); i -= 1; }
+                }
+            }
+            // Trailing leftovers (C ksw2.h:156-157). C checks `i >=
+            // min_intron_len` where i is residual target; we name j our
+            // target. Pushed length is j + 1 columns.
+            if j >= 0 {
+                let op = if long_thres > 0 && j >= long_thres { 3 } else { 2 };
+                push_cigar_fn(&mut cigar, op, j + 1);
+            }
+            if i >= 0 {
+                push_cigar_fn(&mut cigar, 1, i + 1);
+            }
+            if !flag.contains(KswFlags::REV_CIGAR) {
+                cigar.reverse();
+            }
+            ez.cigar = cigar;
+        }
+    }
+
+    ez
+}
+
+fn ksw_apply_zdrop_rot(
+    ez: &mut KswResult,
+    h: i32,
+    r: i32,
+    t: i32,
+    zdrop: i32,
+    e: i8,
+) -> bool {
+    if h > ez.max {
+        ez.max = h;
+        ez.max_t = t;
+        ez.max_q = r - t;
+    } else if t >= ez.max_t && r - t >= ez.max_q {
+        let tl = t - ez.max_t;
+        let ql = (r - t) - ez.max_q;
+        let l = if tl > ql { tl - ql } else { ql - tl };
+        if zdrop >= 0 && (ez.max - h) > zdrop + l * (e as i32) {
+            ez.zdropped = true;
+            return true;
+        }
+    }
+    false
+}
+
+fn splice_default_penalty(noncan: i32, flag: KswFlags) -> i32 {
+    // Mirrors C ksw2_exts2_sse.c lines 122-130: in CMPLX mode the default
+    // splice penalty is sp[3] (= round(30/3) = 10); in non-CMPLX it's
+    // noncan. C uses this value to memset the donor/acceptor arrays so
+    // unscored positions still get a reasonable per-cell penalty.
+    if flag.contains(KswFlags::SPLICE_CMPLX) {
+        let sp0 = [8, 15, 21, 30];
+        ((sp0[3] as f64) / 3.0 + 0.499) as i32
+    } else {
+        noncan
+    }
+}
+
 fn splice_donor_scores(target: &[u8], noncan: i32, flag: KswFlags) -> Vec<i32> {
-    let mut scores = vec![-noncan; target.len() + 1];
+    let default_pen = splice_default_penalty(noncan, flag);
+    let mut scores = vec![-default_pen; target.len() + 1];
     if noncan <= 0 {
         scores.fill(0);
         return scores;
@@ -997,7 +1599,8 @@ fn splice_donor_scores(target: &[u8], noncan: i32, flag: KswFlags) -> Vec<i32> {
 }
 
 fn splice_acceptor_scores(target: &[u8], noncan: i32, flag: KswFlags) -> Vec<i32> {
-    let mut scores = vec![-noncan; target.len() + 1];
+    let default_pen = splice_default_penalty(noncan, flag);
+    let mut scores = vec![-default_pen; target.len() + 1];
     if noncan <= 0 {
         scores.fill(0);
         return scores;
@@ -1345,6 +1948,22 @@ mod tests {
     }
 
     #[test]
+    fn test_ksw_exts2_rot_vs_scalar() {
+        let mat = make_mat();
+        let query = [0u8, 1, 2, 3, 0, 1, 2, 3];
+        let target = [
+            0u8, 1, 2, 3, // ACGT
+            2, 3, 0, 0, 0, 0, 0, 2, // GT.....AG
+            0, 1, 2, 3, // ACGT
+        ];
+        let flag = KswFlags::SPLICE_FOR | KswFlags::SPLICE_FLANK;
+        let scalar = ksw_exts2(&query, &target, 5, &mat, 2, 1, 4, 9, 50, 200, -1, flag);
+        let rot = ksw_exts2_rot(&query, &target, 5, &mat, 2, 1, 4, 9, 50, 200, -1, flag);
+        eprintln!("scalar: score={} max={} cigar={:?}", scalar.score, scalar.max, scalar.cigar);
+        eprintln!("rot:    score={} max={} cigar={:?}", rot.score, rot.max, rot.cigar);
+    }
+
+    #[test]
     fn test_exts2_prefers_canonical_splice_skip() {
         let mat = make_mat();
         let query = [0u8, 1, 2, 3, 0, 1, 2, 3];
@@ -1369,5 +1988,36 @@ mod tests {
         );
         assert!(ez.score > 0);
         assert!(ez.cigar.iter().any(|&c| (c & 0xf) == 3));
+    }
+
+    #[test]
+    fn test_exts2_for_vs_rev_asymmetry() {
+        // For a forward GT-AG intron, SPLICE_FOR should score higher than
+        // SPLICE_REV (which expects CT-AC). If they tie, the splice signal
+        // scoring is broken.
+        let mat = make_mat();
+        let query = [0u8, 1, 2, 3, 0, 1, 2, 3]; // ACGTACGT (8 bp)
+        let target = [
+            0u8, 1, 2, 3, // ACGT
+            2, 3, 0, 0, 0, 0, 0, 2, // GT.....AG (canonical FOR intron)
+            0, 1, 2, 3, // ACGT
+        ];
+        let ez_for = ksw_exts2(
+            &query, &target, 5, &mat,
+            2, 1, 4, 9, 50, 200, -1,
+            KswFlags::SPLICE_FOR | KswFlags::SPLICE_CMPLX,
+        );
+        let ez_rev = ksw_exts2(
+            &query, &target, 5, &mat,
+            2, 1, 4, 9, 50, 200, -1,
+            KswFlags::SPLICE_REV | KswFlags::SPLICE_CMPLX,
+        );
+        eprintln!("FOR score={} max={} cigar={:?}", ez_for.score, ez_for.max, ez_for.cigar);
+        eprintln!("REV score={} max={} cigar={:?}", ez_rev.score, ez_rev.max, ez_rev.cigar);
+        assert!(
+            ez_for.score > ez_rev.score,
+            "FOR should outscore REV on canonical GT-AG intron, got FOR={} REV={}",
+            ez_for.score, ez_rev.score
+        );
     }
 }
