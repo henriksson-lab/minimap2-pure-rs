@@ -314,7 +314,11 @@ tested CLI workflows.
   transcript-strand tags, annotated junction rescue, and splice-specific DP
   scoring are wired and covered by fixtures. The external yeast direct-RNA
   200-read PAF/SAM strict matrix now matches C minimap2, including the noisy
-  annotated intron normalization case `SRR30335018.261583`.
+  annotated intron normalization case `SRR30335018.261583`. Larger checked
+  RNA/splice runs also match exactly in PAF mode on the bundled yeast direct-RNA
+  regression sets (`rna.5000.fq`, `rna.50000.fq`) and on the full raw
+  `SRR30335018_1.fastq.gz` run when executed via the standalone comparison
+  script under `scripts/run_raw_rna_full_compare.sh`.
 - **Split-index mapping is implemented for tested CLI paths.** `--split-prefix`
   maps single-end, grouped fragment, and two-file paired-end reads through split
   index parts and merges per-query hits. Compatibility has been validated on
@@ -375,6 +379,9 @@ scripts/prepare_external_small_conformance_data.sh
 
 # Fast splice performance loop on the yeast RNA regression fixtures
 scripts/benchmark_yeast_splice.py --reads 5000 --check-output
+
+# Full raw yeast direct-RNA splice comparison (writes under /husky by default)
+scripts/run_raw_rna_full_compare.sh
 
 # Currently passing strict external categories
 scripts/conformance_matrix.py data/conformance/external_small/conformance_manifest.tsv --category HiFi --category ONT --category Assembly --category ShortRead --category SplitIndex --category ALT --category Overlap --category RNA --diff-limit 40
@@ -496,6 +503,37 @@ scripts/benchmark_speed.py --threads 1,8 --reps 5 --warmups 1 \
 
 A useful manifest should include at least HiFi reads, ONT reads, paired short
 reads, assembly contigs, and one splice/RNA case when splice performance matters.
+
+### Yeast direct-RNA splice benchmarks
+
+The splice/RNA path now has exact PAF parity against vendored C minimap2 on the
+bundled larger yeast direct-RNA regression datasets and on one full raw run.
+These runs were all executed with `-t 1` for both binaries.
+
+Quick checked loop on the bundled RNA fixtures:
+
+```bash
+scripts/benchmark_yeast_splice.py --reads 5000 --reps 1 --warmups 0 --check-output --metric cpu
+scripts/benchmark_yeast_splice.py --reads 50000 --reps 1 --warmups 0 --check-output --metric cpu
+```
+
+Standalone full raw comparison:
+
+```bash
+scripts/run_raw_rna_full_compare.sh
+```
+
+Validated results from those runs:
+
+| Dataset | Output parity | C wall | Rust wall | C CPU | Rust CPU | Rust/C CPU |
+|---------|---------------|-------:|----------:|------:|---------:|-----------:|
+| `rna.5000.fq` | exact PAF match | 13.981 s | **3.399 s** | 13.976 s | **5.185 s** | **0.37x** |
+| `rna.50000.fq` | exact PAF match | 92.018 s | **20.750 s** | 91.889 s | **22.675 s** | **0.25x** |
+| `SRR30335018_1.fastq.gz` | exact PAF match | 1429.71 s | **302.81 s** | 1427.28 s | **301.92 s** | **0.21x** |
+
+For these splice benchmarks, values below `1.00x` mean Rust used less CPU time
+than the local vendored C build. On this machine and these tested RNA inputs,
+Rust was substantially faster while still matching C output exactly.
 
 Key factors: SSE4.1+AVX2 SIMD extension alignment, SSE2 low-level local
 alignment (`ksw_ll_i16`), bounds-check elimination in hot loops, thread-local
