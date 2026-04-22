@@ -1,9 +1,13 @@
 use super::MmIdx;
 use crate::flags::IdxFlags;
+use crate::junc::{JumpDb, JumpEdge};
+#[cfg(test)]
+use crate::junc::JUNC_ANNO;
 use crate::types::{IdxSeq, MM_IDX_MAGIC};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 
 const MM2RS_ALT_MAGIC: &[u8; 4] = b"ALT\0";
+const MM2RS_JUMP_MAGIC: &[u8; 4] = b"JJP\0";
 
 /// Write an index to a binary .mmi file. Matches mm_idx_dump().
 pub fn idx_dump<W: Write>(w: &mut W, mi: &MmIdx) -> io::Result<()> {
@@ -107,6 +111,20 @@ pub fn idx_dump<W: Write>(w: &mut W, mi: &MmIdx) -> io::Result<()> {
         w.write_all(&(mi.seqs.len() as u32).to_le_bytes())?;
         let alt_flags: Vec<u8> = mi.seqs.iter().map(|s| s.is_alt as u8).collect();
         w.write_all(&alt_flags)?;
+    }
+    if let Some(jump_db) = &mi.jump_db {
+        w.write_all(MM2RS_JUMP_MAGIC)?;
+        w.write_all(&(jump_db.jumps.len() as u32).to_le_bytes())?;
+        for jumps in &jump_db.jumps {
+            w.write_all(&(jumps.len() as u32).to_le_bytes())?;
+            for jump in jumps {
+                w.write_all(&jump.off.to_le_bytes())?;
+                w.write_all(&jump.off2.to_le_bytes())?;
+                w.write_all(&jump.cnt.to_le_bytes())?;
+                w.write_all(&jump.strand.to_le_bytes())?;
+                w.write_all(&jump.flag.to_le_bytes())?;
+            }
+        }
     }
     w.flush()?;
     Ok(())
@@ -216,22 +234,30 @@ pub fn idx_load<R: Read>(r: &mut R) -> io::Result<Option<MmIdx>> {
             mi.packed_seq.push(u32::from_le_bytes(buf));
         }
     }
-    read_optional_alt_extension(&mut r, &mut mi)?;
+    read_optional_extensions(&mut r, &mut mi)?;
 
     Ok(Some(mi))
 }
 
-fn read_optional_alt_extension<R: Read>(r: &mut R, mi: &mut MmIdx) -> io::Result<()> {
-    let mut magic = [0u8; 4];
-    match r.read_exact(&mut magic) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
-        Err(e) => return Err(e),
+fn read_optional_extensions<R: Read>(r: &mut R, mi: &mut MmIdx) -> io::Result<()> {
+    loop {
+        let mut magic = [0u8; 4];
+        match r.read_exact(&mut magic) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+            Err(e) => return Err(e),
+        }
+        if &magic == MM2RS_ALT_MAGIC {
+            read_alt_extension(r, mi)?;
+        } else if &magic == MM2RS_JUMP_MAGIC {
+            read_jump_extension(r, mi)?;
+        } else {
+            return Ok(());
+        }
     }
-    if &magic != MM2RS_ALT_MAGIC {
-        return Ok(());
-    }
+}
 
+fn read_alt_extension<R: Read>(r: &mut R, mi: &mut MmIdx) -> io::Result<()> {
     let mut n_buf = [0u8; 4];
     r.read_exact(&mut n_buf)?;
     let n_seq = u32::from_le_bytes(n_buf) as usize;
@@ -247,6 +273,40 @@ fn read_optional_alt_extension<R: Read>(r: &mut R, mi: &mut MmIdx) -> io::Result
         }
     }
     mi.n_alt = n_alt;
+    Ok(())
+}
+
+fn read_jump_extension<R: Read>(r: &mut R, mi: &mut MmIdx) -> io::Result<()> {
+    let mut n_buf = [0u8; 4];
+    r.read_exact(&mut n_buf)?;
+    let n_seq = u32::from_le_bytes(n_buf) as usize;
+    let mut jumps = Vec::with_capacity(n_seq);
+    for _ in 0..n_seq {
+        r.read_exact(&mut n_buf)?;
+        let n_jump = u32::from_le_bytes(n_buf) as usize;
+        let mut seq_jumps = Vec::with_capacity(n_jump);
+        for _ in 0..n_jump {
+            let mut off = [0u8; 4];
+            let mut off2 = [0u8; 4];
+            let mut cnt = [0u8; 4];
+            let mut strand = [0u8; 2];
+            let mut flag = [0u8; 2];
+            r.read_exact(&mut off)?;
+            r.read_exact(&mut off2)?;
+            r.read_exact(&mut cnt)?;
+            r.read_exact(&mut strand)?;
+            r.read_exact(&mut flag)?;
+            seq_jumps.push(JumpEdge {
+                off: i32::from_le_bytes(off),
+                off2: i32::from_le_bytes(off2),
+                cnt: i32::from_le_bytes(cnt),
+                strand: i16::from_le_bytes(strand),
+                flag: u16::from_le_bytes(flag),
+            });
+        }
+        jumps.push(seq_jumps);
+    }
+    mi.jump_db = Some(JumpDb { jumps });
     Ok(())
 }
 
@@ -321,6 +381,45 @@ mod tests {
         assert_eq!(mi2.n_alt, 1);
         assert!(!mi2.seqs[0].is_alt);
         assert!(mi2.seqs[1].is_alt);
+    }
+
+    #[test]
+    fn test_dump_load_roundtrip_preserves_jump_db() {
+        let seqs: Vec<&[u8]> = vec![b"ACGTACGTACGTACGT"];
+        let names = vec!["seq1"];
+        let mut mi = MmIdx::build_from_str(10, 15, false, 14, &seqs, Some(&names)).unwrap();
+        mi.jump_db = Some(JumpDb {
+            jumps: vec![vec![
+                JumpEdge {
+                    off: 10,
+                    off2: 30,
+                    cnt: 2,
+                    strand: 1,
+                    flag: JUNC_ANNO,
+                },
+                JumpEdge {
+                    off: 30,
+                    off2: 10,
+                    cnt: 2,
+                    strand: 1,
+                    flag: JUNC_ANNO,
+                },
+            ]],
+        });
+
+        let mut buf = Vec::new();
+        idx_dump(&mut buf, &mi).unwrap();
+
+        let mut cursor = io::Cursor::new(buf);
+        let mi2 = idx_load(&mut cursor).unwrap().unwrap();
+        let jump_db = mi2.jump_db.as_ref().unwrap();
+        assert_eq!(jump_db.jumps.len(), 1);
+        assert_eq!(jump_db.jumps[0].len(), 2);
+        assert_eq!(jump_db.jumps[0][0].off, 10);
+        assert_eq!(jump_db.jumps[0][0].off2, 30);
+        assert_eq!(jump_db.jumps[0][0].cnt, 2);
+        assert_eq!(jump_db.jumps[0][0].strand, 1);
+        assert_eq!(jump_db.jumps[0][0].flag, JUNC_ANNO);
     }
 
     #[test]

@@ -29,6 +29,7 @@ pub struct MmIdx {
     pub index_part: i32,
     name_map: Option<HashMap<String, u32>>,
     pub junc_db: Option<crate::junc::JuncDb>,
+    pub jump_db: Option<crate::junc::JumpDb>,
 }
 
 impl MmIdx {
@@ -57,6 +58,7 @@ impl MmIdx {
             index_part: 0,
             name_map: None,
             junc_db: None,
+            jump_db: None,
         }
     }
 

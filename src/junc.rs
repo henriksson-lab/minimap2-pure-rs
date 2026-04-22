@@ -23,25 +23,52 @@ pub struct JuncDb {
     pub juncs: Vec<Vec<JuncIntv>>,
 }
 
+pub const JUNC_ANNO: u16 = 0x1;
+pub const JUNC_MISC: u16 = 0x2;
+
+/// Junction jump edge used by the post-MAPQ jump rescue path (`mi->J` in C).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct JumpEdge {
+    pub off: i32,
+    pub off2: i32,
+    pub cnt: i32,
+    pub strand: i16, // +1 / -1 / 0
+    pub flag: u16,
+}
+
+/// Separate jump database for `-j/--pass1` splice rescue. This is distinct
+/// from `JuncDb`, which backs splice scoring for `--junc-bed`.
+#[derive(Clone, Debug, Default)]
+pub struct JumpDb {
+    pub jumps: Vec<Vec<JumpEdge>>,
+}
+
 impl JuncDb {
     /// Create a junction byte-array for a reference region.
     /// Returns a byte per reference position: 0 = no junction,
     /// 1 = donor (GT), 2 = acceptor (AG), based on strand.
-    pub fn get_junc_array(&self, rid: u32, st: i32, en: i32, rev: bool) -> Vec<u8> {
+    pub fn get_junc_array(&self, rid: u32, st: i32, en: i32, _rev: bool) -> Vec<u8> {
         let len = (en - st) as usize;
         let mut junc = vec![0u8; len];
         if (rid as usize) >= self.juncs.len() {
             return junc;
         }
         for j in &self.juncs[rid as usize] {
-            // Mark donor and acceptor sites
+            // Match minimap2/index.c:mm_idx_bed_junc():
+            // BED annotations are stored in genomic-strand space and do not
+            // depend on the current read/splice orientation. The downstream
+            // DP interprets these fixed bits together with SPLICE_FOR/REV and
+            // REV_CIGAR.
+            if j.strand == 0 || j.st < st || j.en > en {
+                continue;
+            }
             let donor = j.st - st;
             let acceptor = j.en - st - 1;
             if donor >= 0 && (donor as usize) < len {
-                junc[donor as usize] |= if rev { 2 } else { 1 };
+                junc[donor as usize] |= if j.strand == 2 { 8 } else { 1 };
             }
             if acceptor >= 0 && (acceptor as usize) < len {
-                junc[acceptor as usize] |= if rev { 1 } else { 2 };
+                junc[acceptor as usize] |= if j.strand == 2 { 4 } else { 2 };
             }
         }
         junc
@@ -80,16 +107,9 @@ fn parse_comma_i32s(s: &str) -> Vec<i32> {
         .collect()
 }
 
-/// Read splice junctions from a BED/BED12 file and annotate the index.
-///
-/// BED12 records contribute introns inferred from gaps between blocks. Records
-/// with fewer than 12 fields are accepted as direct intervals, matching C
-/// minimap2's fallback behavior in mm_idx_bed_read_core().
-pub fn read_junc_bed(mi: &mut MmIdx, path: &str) -> io::Result<usize> {
+fn read_bed_intervals(mi: &mut MmIdx, path: &str, read_junc: bool, min_sc: i32) -> io::Result<Vec<Vec<JuncIntv>>> {
     let reader = open_maybe_gzip(path)?;
-    let mut db = JuncDb {
-        juncs: vec![Vec::new(); mi.seqs.len()],
-    };
+    let mut per_ref = vec![Vec::new(); mi.seqs.len()];
 
     mi.index_names();
 
@@ -119,13 +139,19 @@ pub fn read_junc_bed(mi: &mut MmIdx, path: &str) -> io::Result<usize> {
         if chrom_start < 0 || chrom_end <= chrom_start {
             continue;
         }
+        if min_sc >= 0 {
+            let score = fields.get(4).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+            if score < min_sc {
+                continue;
+            }
+        }
 
         let Some(rid) = mi.name2id(chrom) else {
             continue;
         };
         let strand = parse_strand(fields.get(5));
 
-        if fields.len() >= 12 {
+        if read_junc && fields.len() >= 12 {
             if let Some(block_count) = fields.get(9).and_then(|s| s.parse::<usize>().ok()) {
                 let block_sizes = parse_comma_i32s(fields[10]);
                 let block_starts = parse_comma_i32s(fields[11]);
@@ -137,29 +163,41 @@ pub fn read_junc_bed(mi: &mut MmIdx, path: &str) -> io::Result<usize> {
                         let junc_start = chrom_start + block_starts[i - 1] + block_sizes[i - 1];
                         let junc_end = chrom_start + block_starts[i];
                         if junc_end > junc_start {
-                            db.juncs[rid as usize].push(JuncIntv {
+                            per_ref[rid as usize].push(JuncIntv {
                                 st: junc_start,
                                 en: junc_end,
                                 strand,
                             });
                         }
                     }
+                    continue;
                 }
-                continue;
             }
         }
 
-        db.juncs[rid as usize].push(JuncIntv {
+        per_ref[rid as usize].push(JuncIntv {
             st: chrom_start,
             en: chrom_end,
             strand,
         });
     }
 
-    for juncs in &mut db.juncs {
-        juncs.sort_by_key(|j| (j.st, j.en));
+    for juncs in &mut per_ref {
+        juncs.sort_by_key(|j| (j.st, j.en, j.strand));
         juncs.dedup_by(|a, b| a.st == b.st && a.en == b.en && a.strand == b.strand);
     }
+    Ok(per_ref)
+}
+
+/// Read splice junctions from a BED/BED12 file and annotate the index.
+///
+/// BED12 records contribute introns inferred from gaps between blocks. Records
+/// with fewer than 12 fields are accepted as direct intervals, matching C
+/// minimap2's fallback behavior in mm_idx_bed_read_core().
+pub fn read_junc_bed(mi: &mut MmIdx, path: &str) -> io::Result<usize> {
+    let db = JuncDb {
+        juncs: read_bed_intervals(mi, path, true, -1)?,
+    };
     let n_junc = db.juncs.iter().map(Vec::len).sum();
 
     if n_junc > 0 {
@@ -167,6 +205,64 @@ pub fn read_junc_bed(mi: &mut MmIdx, path: &str) -> io::Result<usize> {
     }
     mi.junc_db = Some(db);
     Ok(n_junc)
+}
+
+fn merge_jump_edges(edges: &mut Vec<JumpEdge>) {
+    edges.sort_by_key(|e| (e.off, e.off2));
+    let mut merged: Vec<JumpEdge> = Vec::with_capacity(edges.len());
+    for edge in edges.drain(..) {
+        if let Some(last) = merged.last_mut() {
+            if last.off == edge.off && last.off2 == edge.off2 {
+                last.cnt += edge.cnt;
+                last.flag |= edge.flag;
+                if last.strand == 0 {
+                    last.strand = edge.strand;
+                }
+                continue;
+            }
+        }
+        merged.push(edge);
+    }
+    *edges = merged;
+}
+
+pub fn read_jump_bed(mi: &mut MmIdx, path: &str, flag: u16, min_sc: i32) -> io::Result<usize> {
+    let intervals = read_bed_intervals(mi, path, true, min_sc)?;
+    let mut db = mi.jump_db.take().unwrap_or_else(|| JumpDb {
+        jumps: vec![Vec::new(); mi.seqs.len()],
+    });
+    if db.jumps.len() < mi.seqs.len() {
+        db.jumps.resize_with(mi.seqs.len(), Vec::new);
+    }
+
+    for (rid, juncs) in intervals.into_iter().enumerate() {
+        for j in juncs {
+            let strand = match j.strand {
+                1 => 1,
+                2 => -1,
+                _ => 0,
+            };
+            db.jumps[rid].push(JumpEdge {
+                off: j.st,
+                off2: j.en,
+                cnt: 1,
+                strand,
+                flag,
+            });
+            db.jumps[rid].push(JumpEdge {
+                off: j.en,
+                off2: j.st,
+                cnt: 1,
+                strand,
+                flag,
+            });
+        }
+        merge_jump_edges(&mut db.jumps[rid]);
+    }
+
+    let n_jump: usize = db.jumps.iter().map(Vec::len).sum();
+    mi.jump_db = Some(db);
+    Ok(n_jump)
 }
 
 #[cfg(test)]
@@ -244,5 +340,101 @@ mod tests {
         assert_eq!(n, 1);
         let j = &mi.junc_db.as_ref().unwrap().juncs[0][0];
         assert_eq!((j.st, j.en, j.strand), (10, 30, 1));
+    }
+
+    #[test]
+    fn test_get_junc_array_preserves_minus_strand_bits() {
+        let db = JuncDb {
+            juncs: vec![vec![JuncIntv {
+                st: 12,
+                en: 34,
+                strand: 2,
+            }]],
+        };
+        let junc = db.get_junc_array(0, 10, 40, false);
+        assert_eq!(junc[2], 8);
+        assert_eq!(junc[23], 4);
+    }
+
+    #[test]
+    fn test_get_junc_array_skips_unknown_strand_bits() {
+        let db = JuncDb {
+            juncs: vec![vec![JuncIntv {
+                st: 12,
+                en: 34,
+                strand: 0,
+            }]],
+        };
+        let junc = db.get_junc_array(0, 10, 40, false);
+        assert!(junc.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_get_junc_array_skips_partial_window_overlap() {
+        let db = JuncDb {
+            juncs: vec![vec![JuncIntv {
+                st: 12,
+                en: 34,
+                strand: 1,
+            }]],
+        };
+        let left_cut = db.get_junc_array(0, 13, 40, false);
+        let right_cut = db.get_junc_array(0, 10, 33, false);
+        assert!(left_cut.iter().all(|&b| b == 0));
+        assert!(right_cut.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn test_read_jump_bed_bed12_builds_bidirectional_edges() {
+        let mut mi = build_test_idx();
+
+        let mut bed = tempfile::NamedTempFile::new().unwrap();
+        writeln!(bed, "chr1\t0\t50\tjunc1\t100\t+\t0\t50\t0\t2\t10,10\t0,30").unwrap();
+        bed.flush().unwrap();
+
+        let n = read_jump_bed(&mut mi, bed.path().to_str().unwrap(), JUNC_ANNO, -1).unwrap();
+        assert_eq!(n, 2);
+        let jumps = &mi.jump_db.as_ref().unwrap().jumps[0];
+        assert_eq!(
+            jumps,
+            &vec![
+                JumpEdge {
+                    off: 10,
+                    off2: 30,
+                    cnt: 1,
+                    strand: 1,
+                    flag: JUNC_ANNO,
+                },
+                JumpEdge {
+                    off: 30,
+                    off2: 10,
+                    cnt: 1,
+                    strand: 1,
+                    flag: JUNC_ANNO,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_read_jump_bed_merges_duplicate_edges_and_flags() {
+        let mut mi = build_test_idx();
+
+        let mut anno = tempfile::NamedTempFile::new().unwrap();
+        writeln!(anno, "chr1\t0\t50\tjunc1\t100\t+\t0\t50\t0\t2\t10,10\t0,30").unwrap();
+        anno.flush().unwrap();
+        read_jump_bed(&mut mi, anno.path().to_str().unwrap(), JUNC_ANNO, -1).unwrap();
+
+        let mut pass1 = tempfile::NamedTempFile::new().unwrap();
+        writeln!(pass1, "chr1\t0\t50\tjunc1\t10\t+\t0\t50\t0\t2\t10,10\t0,30").unwrap();
+        pass1.flush().unwrap();
+        read_jump_bed(&mut mi, pass1.path().to_str().unwrap(), JUNC_MISC, 5).unwrap();
+
+        let jumps = &mi.jump_db.as_ref().unwrap().jumps[0];
+        assert_eq!(jumps.len(), 2);
+        assert_eq!(jumps[0].cnt, 2);
+        assert_eq!(jumps[0].flag, JUNC_ANNO | JUNC_MISC);
+        assert_eq!(jumps[1].cnt, 2);
+        assert_eq!(jumps[1].flag, JUNC_ANNO | JUNC_MISC);
     }
 }

@@ -5,6 +5,7 @@ ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${1:-$ROOT/data/conformance/external_small}"
 ECOLI_REF="${ECOLI_REF:-$ROOT/data/conformance/ecoli_srr13321180/ref/ecoli_k12_mg1655.fa}"
 MANIFEST="$OUT_DIR/conformance_manifest.tsv"
+FULL_MANIFEST="$OUT_DIR/conformance_full_manifest.tsv"
 DOWNLOADS="$OUT_DIR/downloads"
 
 HIFI_RUN="${HIFI_RUN:-SRR10971019}"
@@ -17,6 +18,7 @@ ONT_N="${ONT_N:-20000}"
 SR_N="${SR_N:-50000}"
 RNA_N="${RNA_N:-200}"
 ONT_AVA_N="${ONT_AVA_N:-1000}"
+RNA_BROADER_N="${RNA_BROADER_N:-5000}"
 
 UTI89_URL="${UTI89_URL:-https://ftp.ncbi.nlm.nih.gov/genomes/all/GCA/000/013/265/GCA_000013265.1_ASM1326v1/GCA_000013265.1_ASM1326v1_genomic.fna.gz}"
 YEAST_FASTA_URL="${YEAST_FASTA_URL:-https://ftp.ensemblgenomes.ebi.ac.uk/pub/fungi/current/fasta/saccharomyces_cerevisiae/dna/Saccharomyces_cerevisiae.R64-1-1.dna.toplevel.fa.gz}"
@@ -147,7 +149,9 @@ PYALT
 download_run_fastqs "$RNA_RUN" "$OUT_DIR/yeast_rna/raw"
 RNA_RAW="$(first_fastq "$OUT_DIR/yeast_rna/raw")"
 RNA_SUB="$OUT_DIR/yeast_rna/rna.${RNA_N}.fq"
+RNA_BROADER_SUB="$OUT_DIR/yeast_rna/rna.${RNA_BROADER_N}.fq"
 sample_single "$RNA_RAW" "$RNA_N" "$RNA_SUB"
+sample_single "$RNA_RAW" "$RNA_BROADER_N" "$RNA_BROADER_SUB"
 
 YEAST_FA_GZ="$OUT_DIR/yeast_rna/yeast.fa.gz"
 YEAST_FA="$OUT_DIR/yeast_rna/yeast.fa"
@@ -232,7 +236,13 @@ UTI89_ARG="$(relpath "$UTI89_FA")"
 ALT_ARG="$(relpath "$OUT_DIR/ecoli_uti89/alt.txt")"
 YEAST_REF_ARG="$(relpath "$YEAST_FA")"
 RNA_ARG="$(relpath "$RNA_SUB")"
+RNA_BROADER_ARG="$(relpath "$RNA_BROADER_SUB")"
 JUNC_ARG="$(relpath "$OUT_DIR/yeast_rna/junctions.bed")"
+HIFI_RAW_ARG="$(relpath "$HIFI_RAW")"
+ONT_RAW_ARG="$(relpath "$ONT_RAW")"
+SR_R1_RAW_ARG="$(relpath "${SR_FASTQS[0]}")"
+SR_R2_RAW_ARG="$(relpath "${SR_FASTQS[1]}")"
+RNA_RAW_ARG="$(relpath "$RNA_RAW")"
 
 cat > "$MANIFEST" <<EOF
 HiFi	E coli K12 HiFi ${HIFI_N} reads PAF	paf	-x map-hifi -c $REF_ARG $HIFI_ARG
@@ -251,5 +261,22 @@ RNA	Yeast direct RNA splice ${RNA_N} reads PAF	paf	-x splice -c --junc-bed $JUNC
 RNA	Yeast direct RNA splice ${RNA_N} reads SAM	sam-core	-x splice -a --junc-bed $JUNC_ARG $YEAST_REF_ARG $RNA_ARG
 EOF
 
+cat > "$FULL_MANIFEST" <<EOF
+HiFiFull	E coli K12 HiFi full run PAF	paf	-x map-hifi -c $REF_ARG $HIFI_RAW_ARG
+HiFiFull	E coli K12 HiFi full run SAM	sam-core	-x map-hifi -a $REF_ARG $HIFI_RAW_ARG
+ONTFull	E coli ONT full run PAF	paf	-x map-ont -c $REF_ARG $ONT_RAW_ARG
+ONTFull	E coli ONT full run SAM	sam-core	-x map-ont -a $REF_ARG $ONT_RAW_ARG
+ShortReadFull	E coli paired full run PAF	paf	-x sr -c $REF_ARG $SR_R1_RAW_ARG $SR_R2_RAW_ARG
+ShortReadFull	E coli paired full run SAM	sam-core	-x sr -a $REF_ARG $SR_R1_RAW_ARG $SR_R2_RAW_ARG
+SplitIndexFull	E coli HiFi full forced split PAF	paf	-x map-hifi -c -I 500k --split-prefix /tmp/mm2rs-conf-ext-hifi-full-split $REF_ARG $HIFI_RAW_ARG
+SplitIndexFull	E coli ONT full forced split SAM	sam-core	-x map-ont -a -I 500k --split-prefix /tmp/mm2rs-conf-ext-ont-full-split $REF_ARG $ONT_RAW_ARG
+RNAFull	Yeast direct RNA splice ${RNA_BROADER_N} reads PAF	paf	-x splice -c --junc-bed $JUNC_ARG $YEAST_REF_ARG $RNA_BROADER_ARG
+RNAFull	Yeast direct RNA splice ${RNA_BROADER_N} reads SAM	sam-core	-x splice -a --junc-bed $JUNC_ARG $YEAST_REF_ARG $RNA_BROADER_ARG
+RNAFull	Yeast direct RNA splice full run PAF	paf	-x splice -c --junc-bed $JUNC_ARG $YEAST_REF_ARG $RNA_RAW_ARG
+RNAFull	Yeast direct RNA splice full run SAM	sam-core	-x splice -a --junc-bed $JUNC_ARG $YEAST_REF_ARG $RNA_RAW_ARG
+EOF
+
 echo "[prepare] wrote $MANIFEST"
+echo "[prepare] wrote $FULL_MANIFEST"
 echo "[prepare] run: scripts/conformance_matrix.py $MANIFEST"
+echo "[prepare] full-data run: scripts/conformance_matrix.py $FULL_MANIFEST"

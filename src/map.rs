@@ -352,7 +352,18 @@ pub fn map_query(mi: &MmIdx, opt: &MapOpt, qname: &str, qseq: &[u8]) -> MapResul
 
     // C minimap2 leaves the post-alignment order intact after MAPQ assignment.
     hit::sync_regs(&mut regs);
-
+    // Splice scoring via --junc-bed does not imply jump-based exon rescue.
+    // C minimap2 only calls mm_jump_split() when a separate jump index
+    // (`mi->J`) has been loaded via -j/--pass1.
+    if is_splice && mi.jump_db.is_some() {
+        let qseq_enc: Vec<u8> = qseq
+            .iter()
+            .map(|&b| crate::seq::SEQ_NT4_TABLE[b as usize])
+            .collect();
+        for r in &mut regs {
+            crate::jump::jump_split(mi, opt, qlen, &qseq_enc, r, 0);
+        }
+    }
     MapResult {
         regs,
         rep_len,
@@ -486,6 +497,15 @@ pub fn map_frag_queries(mi: &MmIdx, opt: &MapOpt, qname: &str, qseqs: &[&[u8]]) 
             is_splice,
         );
         hit::sync_regs(&mut segs[s].regs);
+        if is_splice && mi.jump_db.is_some() {
+            let qseq_enc: Vec<u8> = qseqs[s]
+                .iter()
+                .map(|&b| crate::seq::SEQ_NT4_TABLE[b as usize])
+                .collect();
+            for r in &mut segs[s].regs {
+                crate::jump::jump_split(mi, opt, qlens[s], &qseq_enc, r, 0);
+            }
+        }
     }
 
     segs.into_iter()

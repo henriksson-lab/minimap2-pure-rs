@@ -3,6 +3,7 @@ use minimap2::index::MmIdx;
 use minimap2::map;
 use minimap2::options::{self, IdxOpt, MapOpt};
 use std::path::Path;
+use std::process::Command;
 
 fn build_index(seqs: &[(&str, &[u8])], io: &IdxOpt) -> MmIdx {
     let seq_data: Vec<&[u8]> = seqs.iter().map(|s| s.1).collect();
@@ -247,7 +248,7 @@ fn map_file_pair(
 }
 
 fn command_stdout(program: &str, args: &[&str]) -> String {
-    let output = std::process::Command::new(program)
+    let output = Command::new(program)
         .args(args)
         .stderr(std::process::Stdio::null())
         .output()
@@ -271,6 +272,27 @@ fn non_header_lines(output: &str) -> Vec<String> {
         .collect()
 }
 
+fn rust_bin() -> &'static str {
+    env!("CARGO_BIN_EXE_minimap2-pure-rs")
+}
+
+fn command_stdout_owned(program: &str, args: &[String]) -> String {
+    let output = Command::new(program)
+        .args(args)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .unwrap_or_else(|e| panic!("failed to run {} {:?}: {}", program, args, e));
+    assert!(
+        output.status.success(),
+        "{} {:?} failed with status {}",
+        program,
+        args,
+        output.status
+    );
+    String::from_utf8(output.stdout)
+        .unwrap_or_else(|e| panic!("{} {:?} produced non-UTF8 stdout: {}", program, args, e))
+}
+
 fn sam_core_fields(output: &str) -> Vec<String> {
     const SAM_TAGS: [&str; 4] = ["NM", "AS", "ms", "nn"];
     non_header_lines(output)
@@ -288,6 +310,70 @@ fn sam_core_fields(output: &str) -> Vec<String> {
             normalized.join("\t")
         })
         .collect()
+}
+
+#[test]
+fn test_cli_jump_and_pass1_match_on_real_data() {
+    let ref_path = "data/conformance/external_small/yeast_rna/yeast.fa";
+    let qry_path = "data/conformance/external_small/yeast_rna/rna.200.fq";
+    let bed_path = "data/conformance/external_small/yeast_rna/junctions.bed";
+    if !Path::new(ref_path).exists() || !Path::new(qry_path).exists() || !Path::new(bed_path).exists()
+    {
+        return;
+    }
+
+    let jump_out = command_stdout(
+        rust_bin(),
+        &["-x", "splice", "-c", "-j", bed_path, ref_path, qry_path],
+    );
+    let pass1_out = command_stdout(
+        rust_bin(),
+        &["-x", "splice", "-c", "--pass1", bed_path, ref_path, qry_path],
+    );
+    assert_eq!(jump_out, pass1_out, "-j and --pass1 should agree on the small RNA fixture");
+}
+
+#[test]
+fn test_dumped_index_preserves_jump_db_for_mapping() {
+    let ref_path = "data/conformance/external_small/yeast_rna/yeast.fa";
+    let qry_path = "data/conformance/external_small/yeast_rna/rna.200.fq";
+    let bed_path = "data/conformance/external_small/yeast_rna/junctions.bed";
+    if !Path::new(ref_path).exists() || !Path::new(qry_path).exists() || !Path::new(bed_path).exists()
+    {
+        return;
+    }
+
+    let idx = tempfile::NamedTempFile::new().unwrap();
+    let idx_path = idx.path().to_str().unwrap().to_string();
+
+    let _ = command_stdout_owned(
+        rust_bin(),
+        &[
+            "-x".to_string(),
+            "splice".to_string(),
+            "-j".to_string(),
+            bed_path.to_string(),
+            "-d".to_string(),
+            idx_path.clone(),
+            ref_path.to_string(),
+        ],
+    );
+
+    let direct = command_stdout(
+        rust_bin(),
+        &["-x", "splice", "-c", "-j", bed_path, ref_path, qry_path],
+    );
+    let loaded = command_stdout_owned(
+        rust_bin(),
+        &[
+            "-x".to_string(),
+            "splice".to_string(),
+            "-c".to_string(),
+            idx_path,
+            qry_path.to_string(),
+        ],
+    );
+    assert_eq!(direct, loaded, "mapping from a dumped index should preserve jump-db behavior");
 }
 
 #[test]

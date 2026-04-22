@@ -186,6 +186,14 @@ struct Cli {
     #[arg(long = "junc-bed", value_name = "FILE")]
     junc_bed: Option<String>,
 
+    /// Junction BED12 file used for jump-based splice rescue
+    #[arg(short = 'j', value_name = "FILE")]
+    jump_bed: Option<String>,
+
+    /// Junctions extracted from pass-1 alignment for jump rescue
+    #[arg(long = "pass1", value_name = "FILE")]
+    pass1_bed: Option<String>,
+
     /// Write splice junctions extracted from spliced alignments
     #[arg(long = "write-junc")]
     write_junc: bool,
@@ -583,6 +591,18 @@ fn main() {
             Err(e) => eprintln!("[WARNING] failed to read junctions: {}", e),
         }
     }
+    if let Some(ref jump_path) = cli.jump_bed {
+        match minimap2::junc::read_jump_bed(&mut mi, jump_path, minimap2::junc::JUNC_ANNO, -1) {
+            Ok(n) => eprintln!("[M::main] loaded {} jump edges from {}", n, jump_path),
+            Err(e) => eprintln!("[WARNING] failed to read jump BED: {}", e),
+        }
+    }
+    if let Some(ref pass1_path) = cli.pass1_bed {
+        match minimap2::junc::read_jump_bed(&mut mi, pass1_path, minimap2::junc::JUNC_MISC, 5) {
+            Ok(n) => eprintln!("[M::main] loaded {} pass-1 jump edges from {}", n, pass1_path),
+            Err(e) => eprintln!("[WARNING] failed to read pass-1 jump BED: {}", e),
+        }
+    }
 
     if let Some(ref alt_path) = cli.alt {
         match mi.read_alt_file(alt_path) {
@@ -756,6 +776,7 @@ fn main() {
         elapsed.as_secs_f64(),
         peak_rss_gb()
     );
+    minimap2::align::report_align_profile();
 }
 
 #[cfg(unix)]

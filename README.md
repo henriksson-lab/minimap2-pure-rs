@@ -373,8 +373,14 @@ scripts/conformance_matrix.py data/conformance/ecoli_srr13321180/conformance_ful
 # Small external HiFi, ONT, assembly, ALT, paired short-read, split-index, overlap, and RNA/splice data
 scripts/prepare_external_small_conformance_data.sh
 
+# Fast splice performance loop on the yeast RNA regression fixtures
+scripts/benchmark_yeast_splice.py --reads 5000 --check-output
+
 # Currently passing strict external categories
 scripts/conformance_matrix.py data/conformance/external_small/conformance_manifest.tsv --category HiFi --category ONT --category Assembly --category ShortRead --category SplitIndex --category ALT --category Overlap --category RNA --diff-limit 40
+
+# Heavier real-world external runs from the same downloaded inputs
+scripts/conformance_matrix.py data/conformance/external_small/conformance_full_manifest.tsv
 
 # All tests
 cargo test --all

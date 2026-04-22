@@ -3,7 +3,7 @@
 //! Matches jump.c: mm_jump_split(), mm_jump_split_left(), mm_jump_split_right().
 //!
 use crate::index::MmIdx;
-use crate::junc::JuncIntv;
+use crate::junc::{JumpEdge, JUNC_ANNO};
 use crate::options::MapOpt;
 use crate::types::AlignReg;
 
@@ -11,8 +11,6 @@ const MIN_EXON_LEN: i32 = 20;
 
 #[derive(Clone, Copy)]
 struct JumpCandidate {
-    st: i32,
-    en: i32,
     off: i32,
     off2: i32,
     mm: i32,
@@ -25,7 +23,7 @@ pub fn jump_split(
     qlen: i32,
     qseq: &[u8],
     r: &mut AlignReg,
-    _ts_strand: i32,
+    ts_strand: i32,
 ) {
     let aligned_qseq;
     let qseq_aln = if r.rev {
@@ -38,8 +36,8 @@ pub fn jump_split(
     } else {
         qseq
     };
-    jump_split_left(mi, opt, qlen, qseq_aln, r);
-    jump_split_right(mi, opt, qlen, qseq_aln, r);
+    jump_split_left(mi, opt, qlen, qseq_aln, r, ts_strand);
+    jump_split_right(mi, opt, qlen, qseq_aln, r, ts_strand);
 }
 
 fn aligned_qs(qlen: i32, r: &AlignReg) -> i32 {
@@ -58,11 +56,18 @@ fn aligned_qe(qlen: i32, r: &AlignReg) -> i32 {
     }
 }
 
-fn jump_split_left(mi: &MmIdx, opt: &MapOpt, qlen: i32, qseq: &[u8], r: &mut AlignReg) {
-    let Some(db) = mi.junc_db.as_ref() else {
+fn jump_split_left(
+    mi: &MmIdx,
+    opt: &MapOpt,
+    qlen: i32,
+    qseq: &[u8],
+    r: &mut AlignReg,
+    ts_strand: i32,
+) {
+    let Some(db) = mi.jump_db.as_ref() else {
         return;
     };
-    let Some(juncs) = db.juncs.get(r.rid as usize) else {
+    let Some(jumps) = db.jumps.get(r.rid as usize) else {
         return;
     };
     let clip = aligned_qs(qlen, r).max(0);
@@ -77,14 +82,14 @@ fn jump_split_left(mi: &MmIdx, opt: &MapOpt, qlen: i32, qseq: &[u8], r: &mut Ali
     if extra_ref.cigar.0.is_empty() || (extra_ref.cigar.0[0] & 0xf) != 0 {
         return;
     }
-    let trans_strand = extra_ref.trans_strand;
-    let mut candidates = Vec::new();
-    for j in juncs {
-        if !strand_compatible(trans_strand, j) {
+    let mut anno = Vec::new();
+    let mut misc = Vec::new();
+    for j in jumps_in_range(jumps, r.rs - extt, r.rs + ext) {
+        if !ts_strand_compatible(ts_strand, j.strand) {
             continue;
         }
-        let off = j.en;
-        let off2 = j.st;
+        let off = j.off;
+        let off2 = j.off2;
         if off < r.rs - extt || off > r.rs + ext {
             continue;
         }
@@ -98,14 +103,14 @@ fn jump_split_left(mi: &MmIdx, opt: &MapOpt, qlen: i32, qseq: &[u8], r: &mut Ali
         let Some(mm) = left_candidate_mismatches(mi, r, qseq, clip, ext, tl1, off, off2) else {
             continue;
         };
-        candidates.push(JumpCandidate {
-            st: j.st,
-            en: j.en,
-            off,
-            off2,
-            mm,
-        });
+        let cand = JumpCandidate { off, off2, mm };
+        if (j.flag & JUNC_ANNO) != 0 {
+            anno.push(cand);
+        } else {
+            misc.push(cand);
+        }
     }
+    let candidates = if !anno.is_empty() { anno } else { misc };
     if candidates.is_empty() {
         return;
     }
@@ -134,9 +139,6 @@ fn jump_split_left(mi: &MmIdx, opt: &MapOpt, qlen: i32, qseq: &[u8], r: &mut Ali
         }
         r.mlen += clip - c.mm;
         r.blen += clip;
-        if extra.trans_strand == 0 {
-            extra.trans_strand = c.stand_in_strand(juncs);
-        }
         let score_delta = (clip - c.mm) * opt.a - c.mm * opt.b;
         extra.dp_max += score_delta;
         extra.dp_max0 += score_delta;
@@ -158,11 +160,18 @@ fn jump_split_left(mi: &MmIdx, opt: &MapOpt, qlen: i32, qseq: &[u8], r: &mut Ali
     }
 }
 
-fn jump_split_right(mi: &MmIdx, opt: &MapOpt, qlen: i32, qseq: &[u8], r: &mut AlignReg) {
-    let Some(db) = mi.junc_db.as_ref() else {
+fn jump_split_right(
+    mi: &MmIdx,
+    opt: &MapOpt,
+    qlen: i32,
+    qseq: &[u8],
+    r: &mut AlignReg,
+    ts_strand: i32,
+) {
+    let Some(db) = mi.jump_db.as_ref() else {
         return;
     };
-    let Some(juncs) = db.juncs.get(r.rid as usize) else {
+    let Some(jumps) = db.jumps.get(r.rid as usize) else {
         return;
     };
     let aqe = aligned_qe(qlen, r);
@@ -181,14 +190,14 @@ fn jump_split_right(mi: &MmIdx, opt: &MapOpt, qlen: i32, qseq: &[u8], r: &mut Al
     if (last & 0xf) != 0 {
         return;
     }
-    let trans_strand = extra_ref.trans_strand;
-    let mut candidates = Vec::new();
-    for j in juncs {
-        if !strand_compatible(trans_strand, j) {
+    let mut anno = Vec::new();
+    let mut misc = Vec::new();
+    for j in jumps_in_range(jumps, r.re - ext, r.re + extt) {
+        if !ts_strand_compatible(ts_strand, j.strand) {
             continue;
         }
-        let off = j.st;
-        let off2 = j.en;
+        let off = j.off;
+        let off2 = j.off2;
         if off < r.re - ext || off > r.re + extt {
             continue;
         }
@@ -203,14 +212,14 @@ fn jump_split_right(mi: &MmIdx, opt: &MapOpt, qlen: i32, qseq: &[u8], r: &mut Al
         else {
             continue;
         };
-        candidates.push(JumpCandidate {
-            st: j.st,
-            en: j.en,
-            off,
-            off2,
-            mm,
-        });
+        let cand = JumpCandidate { off, off2, mm };
+        if (j.flag & JUNC_ANNO) != 0 {
+            anno.push(cand);
+        } else {
+            misc.push(cand);
+        }
     }
+    let candidates = if !anno.is_empty() { anno } else { misc };
     if candidates.is_empty() {
         return;
     }
@@ -237,9 +246,6 @@ fn jump_split_right(mi: &MmIdx, opt: &MapOpt, qlen: i32, qseq: &[u8], r: &mut Al
         }
         r.mlen += clip - c.mm;
         r.blen += clip;
-        if extra.trans_strand == 0 {
-            extra.trans_strand = c.stand_in_strand(juncs);
-        }
         let score_delta = (clip - c.mm) * opt.a - c.mm * opt.b;
         extra.dp_max += score_delta;
         extra.dp_max0 += score_delta;
@@ -259,16 +265,6 @@ fn jump_split_right(mi: &MmIdx, opt: &MapOpt, qlen: i32, qseq: &[u8], r: &mut Al
                 r.qe -= l;
             }
         }
-    }
-}
-
-impl JumpCandidate {
-    fn stand_in_strand(self, juncs: &[JuncIntv]) -> u8 {
-        juncs
-            .iter()
-            .find(|j| j.st == self.st && j.en == self.en)
-            .map(|j| j.strand as u8)
-            .unwrap_or(0)
     }
 }
 
@@ -307,8 +303,21 @@ fn jump_check_right(mi: &MmIdx, qlen: i32, r: &AlignReg, ext: i32) -> bool {
     clen > ext && clip < seq.len as i32 - r.re
 }
 
-fn strand_compatible(trans_strand: u8, j: &JuncIntv) -> bool {
-    !(trans_strand == 1 && j.strand == 2 || trans_strand == 2 && j.strand == 1)
+fn ts_strand_compatible(ts_strand: i32, strand: i16) -> bool {
+    match ts_strand {
+        x if x > 0 => strand >= 0,
+        x if x < 0 => strand <= 0,
+        _ => true,
+    }
+}
+
+fn jumps_in_range(jumps: &[JumpEdge], st: i32, en: i32) -> &[JumpEdge] {
+    if jumps.is_empty() {
+        return &[];
+    }
+    let start = jumps.partition_point(|j| j.off < st);
+    let end = jumps.partition_point(|j| j.off <= en);
+    &jumps[start..end]
 }
 
 fn left_candidate_mismatches(
@@ -404,8 +413,23 @@ fn count_mismatch(a: &[u8], b: &[u8]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::junc::{JuncDb, JuncIntv};
+    use crate::junc::{JumpDb, JumpEdge, JUNC_ANNO};
     use crate::types::{AlignExtra, Cigar};
+
+    fn anno_jump_db(edges: &[(i32, i32, i16)]) -> JumpDb {
+        let mut jumps = Vec::new();
+        for &(off, off2, strand) in edges {
+            jumps.push(JumpEdge {
+                off,
+                off2,
+                cnt: 1,
+                strand,
+                flag: JUNC_ANNO,
+            });
+        }
+        jumps.sort_by_key(|j| (j.off, j.off2));
+        JumpDb { jumps: vec![jumps] }
+    }
 
     #[test]
     fn test_jump_split_left_extends_annotated_junction() {
@@ -418,13 +442,7 @@ mod tests {
             Some(&["chr1"]),
         )
         .unwrap();
-        mi.junc_db = Some(JuncDb {
-            juncs: vec![vec![JuncIntv {
-                st: 30,
-                en: 38,
-                strand: 1,
-            }]],
-        });
+        mi.jump_db = Some(anno_jump_db(&[(38, 30, 1)]));
 
         let mut r = AlignReg::default();
         r.rid = 0;
@@ -463,13 +481,7 @@ mod tests {
             Some(&["chr1"]),
         )
         .unwrap();
-        mi.junc_db = Some(JuncDb {
-            juncs: vec![vec![JuncIntv {
-                st: 30,
-                en: 38,
-                strand: 1,
-            }]],
-        });
+        mi.jump_db = Some(anno_jump_db(&[(38, 30, 1)]));
 
         let mut r = AlignReg::default();
         r.rid = 0;
@@ -510,13 +522,7 @@ mod tests {
             Some(&["chr1"]),
         )
         .unwrap();
-        mi.junc_db = Some(JuncDb {
-            juncs: vec![vec![JuncIntv {
-                st: 30,
-                en: 38,
-                strand: 1,
-            }]],
-        });
+        mi.jump_db = Some(anno_jump_db(&[(30, 38, 1)]));
 
         let mut r = AlignReg::default();
         r.rid = 0;
@@ -555,20 +561,7 @@ mod tests {
             Some(&["chr1"]),
         )
         .unwrap();
-        mi.junc_db = Some(JuncDb {
-            juncs: vec![vec![
-                JuncIntv {
-                    st: 30,
-                    en: 38,
-                    strand: 1,
-                },
-                JuncIntv {
-                    st: 29,
-                    en: 39,
-                    strand: 1,
-                },
-            ]],
-        });
+        mi.jump_db = Some(anno_jump_db(&[(38, 30, 1), (39, 29, 1)]));
 
         let mut r = AlignReg::default();
         r.rid = 0;

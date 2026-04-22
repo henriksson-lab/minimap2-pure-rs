@@ -1,11 +1,33 @@
 use crate::flags::KswFlags;
+use std::cell::RefCell;
 
 #[cfg(target_arch = "x86_64")]
-use std::{arch::x86_64::*, cell::RefCell};
+use std::arch::x86_64::*;
 
 #[cfg(target_arch = "x86_64")]
 thread_local! {
     static KSW_LL_SCRATCH: RefCell<Vec<__m128i>> = const { RefCell::new(Vec::new()) };
+}
+
+#[derive(Default)]
+struct Exts2Scratch {
+    donor: Vec<i8>,
+    acceptor: Vec<i8>,
+    u: Vec<i8>,
+    v: Vec<i8>,
+    x: Vec<i8>,
+    y: Vec<i8>,
+    x2: Vec<i8>,
+    s: Vec<i32>,
+    h_arr: Vec<i32>,
+    bt: Vec<u8>,
+    bt_row_starts: Vec<usize>,
+    offs: Vec<i32>,
+    off_ends: Vec<i32>,
+}
+
+thread_local! {
+    static KSW_EXTS2_SCRATCH: RefCell<Exts2Scratch> = RefCell::new(Exts2Scratch::default());
 }
 
 pub const KSW_NEG_INF: i32 = -0x40000000;
@@ -1037,8 +1059,16 @@ pub fn ksw_exts2_rot(
     _w: i32,
     zdrop: i32,
     end_bonus: i32,
+    junc_bonus: i8,
+    junc_pen: i8,
+    junc: Option<&[u8]>,
     flag: KswFlags,
 ) -> KswResult {
+    #[inline]
+    fn i8_sem(v: i32) -> i32 {
+        v as i8 as i32
+    }
+
     let qlen = query.len() as i32;
     let tlen = target.len() as i32;
     let mut ez = KswResult::new();
@@ -1053,6 +1083,11 @@ pub fn ksw_exts2_rot(
     let q_i = q as i32;
     let q2_i = q2 as i32;
     let m_u = m as usize;
+    let wildcard = m_u - 1;
+    let sc_n = {
+        let v = mat[m_u * m_u - 1] as i32;
+        if v == 0 { -(e as i32) } else { v }
+    };
 
     // long_thres mirrors C: long_thres = (q2-q)/e - 1; bumped by 1 if needed.
     let mut long_thres = (q2_i - q_i) / (e as i32) - 1;
@@ -1074,44 +1109,230 @@ pub fn ksw_exts2_rot(
     }
     let _ = max_sc;
 
-    // donor[]/acceptor[] sized tlen+1 like the existing splice_*_scores helpers.
-    let donor = splice_donor_scores(target, noncan as i32, flag);
-    let acceptor = splice_acceptor_scores(target, noncan as i32, flag);
+    // Build donor/acceptor exactly like minimap2/ksw2_exts2_sse.c.
+    let mut sp = [0i32; 4];
+    if flag.contains(KswFlags::SPLICE_CMPLX) {
+        let sp0 = [8, 15, 21, 30];
+        for i in 0..4 {
+            sp[i] = ((sp0[i] as f64) / 3.0 + 0.499) as i32;
+        }
+    } else {
+        sp[0] = if flag.contains(KswFlags::SPLICE_FLANK) {
+            (noncan as i32) / 2
+        } else {
+            0
+        };
+        sp[1] = noncan as i32;
+        sp[2] = noncan as i32;
+        sp[3] = noncan as i32;
+    }
+    let tlen_padded = ((tlen + 15) / 16) * 16;
+    let n_anti = (qlen + tlen - 1) as usize;
+    let max_bt = (qlen.min(tlen) as usize) * n_anti;
 
-    // Per-column DP state arrays (length tlen each). Initialised per C lines
-    // 100-105: u/v/x/y = -q-e, x2 = -q2.
-    let neg_qe = -qe_i;
-    let mut u = vec![neg_qe; tlen as usize];
-    let mut v = vec![neg_qe; tlen as usize];
-    let mut x = vec![neg_qe; tlen as usize];
-    let mut y = vec![neg_qe; tlen as usize];
-    let mut x2 = vec![-q2_i; tlen as usize];
+    let mut scratch = KSW_EXTS2_SCRATCH.with(|c| std::mem::take(&mut *c.borrow_mut()));
+    scratch.donor.resize(tlen_padded as usize, (-sp[3]) as i8);
+    scratch.acceptor.resize(tlen_padded as usize, (-sp[3]) as i8);
+    scratch.u.resize(tlen_padded as usize, 0);
+    scratch.v.resize(tlen_padded as usize, 0);
+    scratch.x.resize(tlen_padded as usize, 0);
+    scratch.y.resize(tlen_padded as usize, 0);
+    scratch.x2.resize(tlen_padded as usize, 0);
+    scratch.s.resize(tlen_padded as usize, 0);
+    scratch.h_arr.resize(tlen_padded as usize, KSW_NEG_INF);
+    scratch.bt.clear();
+    if with_cigar && scratch.bt.capacity() < max_bt {
+        scratch.bt.reserve(max_bt - scratch.bt.capacity());
+    }
+    scratch.bt_row_starts.clear();
+    scratch.bt_row_starts.reserve(n_anti);
+    scratch.offs.clear();
+    scratch.offs.reserve(n_anti);
+    scratch.off_ends.clear();
+    scratch.off_ends.reserve(n_anti);
 
-    // Per-column score scratch (s) and reversed query (qr). C uses 16-byte
-    // aligned vectors; scalar uses Vec.
-    let mut s = vec![0i32; tlen as usize];
-    let qr: Vec<u8> = (0..qlen).map(|t| query[(qlen - 1 - t) as usize]).collect();
+    let donor = &mut scratch.donor;
+    let acceptor = &mut scratch.acceptor;
+    if !flag.contains(KswFlags::REV_CIGAR) {
+        for t in 0..target.len().saturating_sub(4) {
+            let mut z = 3i32;
+            if flag.contains(KswFlags::SPLICE_FOR) {
+                if target[t + 1] == 2 && target[t + 2] == 3 {
+                    z = if target[t + 3] == 0 || target[t + 3] == 2 { -1 } else { 0 };
+                } else if target[t + 1] == 2 && target[t + 2] == 1 {
+                    z = 1;
+                } else if target[t + 1] == 0 && target[t + 2] == 3 {
+                    z = 2;
+                }
+            } else if flag.contains(KswFlags::SPLICE_REV) {
+                if target[t + 1] == 1 && target[t + 2] == 3 {
+                    z = if target[t + 3] == 0 || target[t + 3] == 2 { -1 } else { 0 };
+                } else if target[t + 1] == 2 && target[t + 2] == 3 {
+                    z = 2;
+                }
+            }
+            donor[t] = if z < 0 { 0 } else { (-sp[z as usize]) as i8 };
+        }
+        for t in 2..target.len() {
+            let mut z = 3i32;
+            if flag.contains(KswFlags::SPLICE_FOR) {
+                if target[t - 1] == 0 && target[t] == 2 {
+                    z = if target[t - 2] == 1 || target[t - 2] == 3 { -1 } else { 0 };
+                } else if target[t - 1] == 0 && target[t] == 1 {
+                    z = 2;
+                }
+            } else if flag.contains(KswFlags::SPLICE_REV) {
+                if target[t - 1] == 0 && target[t] == 1 {
+                    z = if target[t - 2] == 1 || target[t - 2] == 3 { -1 } else { 0 };
+                } else if target[t - 1] == 2 && target[t] == 1 {
+                    z = 1;
+                } else if target[t - 1] == 0 && target[t] == 3 {
+                    z = 2;
+                }
+            }
+            acceptor[t] = if z < 0 { 0 } else { (-sp[z as usize]) as i8 };
+        }
+    } else {
+        for t in 0..target.len().saturating_sub(4) {
+            let mut z = 3i32;
+            if flag.contains(KswFlags::SPLICE_FOR) {
+                if target[t + 1] == 2 && target[t + 2] == 0 {
+                    z = if target[t + 3] == 1 || target[t + 3] == 3 { -1 } else { 0 };
+                } else if target[t + 1] == 1 && target[t + 2] == 0 {
+                    z = 2;
+                }
+            } else if flag.contains(KswFlags::SPLICE_REV) {
+                if target[t + 1] == 1 && target[t + 2] == 0 {
+                    z = if target[t + 3] == 1 || target[t + 3] == 3 { -1 } else { 0 };
+                } else if target[t + 1] == 1 && target[t + 2] == 2 {
+                    z = 1;
+                } else if target[t + 1] == 3 && target[t + 2] == 0 {
+                    z = 2;
+                }
+            }
+            donor[t] = if z < 0 { 0 } else { (-sp[z as usize]) as i8 };
+        }
+        for t in 2..target.len() {
+            let mut z = 3i32;
+            if flag.contains(KswFlags::SPLICE_FOR) {
+                if target[t - 1] == 3 && target[t] == 2 {
+                    z = if target[t - 2] == 0 || target[t - 2] == 2 { -1 } else { 0 };
+                } else if target[t - 1] == 1 && target[t] == 2 {
+                    z = 1;
+                } else if target[t - 1] == 3 && target[t] == 0 {
+                    z = 2;
+                }
+            } else if flag.contains(KswFlags::SPLICE_REV) {
+                if target[t - 1] == 3 && target[t] == 1 {
+                    z = if target[t - 2] == 0 || target[t - 2] == 2 { -1 } else { 0 };
+                } else if target[t - 1] == 3 && target[t] == 2 {
+                    z = 2;
+                }
+            }
+            acceptor[t] = if z < 0 { 0 } else { (-sp[z as usize]) as i8 };
+        }
+    }
+    if let Some(junc) = junc {
+        if flag.contains(KswFlags::SPLICE_SCORE) {
+            let donor_val = if flag.contains(KswFlags::SPLICE_FOR) == !flag.contains(KswFlags::REV_CIGAR) {
+                0u8
+            } else {
+                1u8
+            };
+            let limit = target.len().saturating_sub(1).min(junc.len().saturating_sub(1));
+            for t in 0..limit {
+                donor[t] = (donor[t] as i32 + if junc[t + 1] == 0xff || (junc[t + 1] & 1) != donor_val {
+                    -(junc_pen as i32)
+                } else {
+                    ((junc[t + 1] >> 1) as i32) - 64
+                }) as i8;
+                acceptor[t] = (acceptor[t] as i32 + if junc[t + 1] == 0xff || (junc[t + 1] & 1) == donor_val {
+                    -(junc_pen as i32)
+                } else {
+                    ((junc[t + 1] >> 1) as i32) - 64
+                }) as i8;
+            }
+        } else if !flag.contains(KswFlags::REV_CIGAR) {
+            for t in 0..target.len().saturating_sub(1).min(junc.len().saturating_sub(1)) {
+                if (flag.contains(KswFlags::SPLICE_FOR) && (junc[t + 1] & 1) != 0)
+                    || (flag.contains(KswFlags::SPLICE_REV) && (junc[t + 1] & 8) != 0)
+                {
+                    donor[t] = (donor[t] as i32 + junc_bonus as i32) as i8;
+                }
+            }
+            for t in 0..target.len().min(junc.len()) {
+                if (flag.contains(KswFlags::SPLICE_FOR) && (junc[t] & 2) != 0)
+                    || (flag.contains(KswFlags::SPLICE_REV) && (junc[t] & 4) != 0)
+                {
+                    acceptor[t] = (acceptor[t] as i32 + junc_bonus as i32) as i8;
+                }
+            }
+        } else {
+            for t in 0..target.len().saturating_sub(1).min(junc.len().saturating_sub(1)) {
+                if (flag.contains(KswFlags::SPLICE_FOR) && (junc[t + 1] & 2) != 0)
+                    || (flag.contains(KswFlags::SPLICE_REV) && (junc[t + 1] & 4) != 0)
+                {
+                    donor[t] = (donor[t] as i32 + junc_bonus as i32) as i8;
+                }
+            }
+            for t in 0..target.len().min(junc.len()) {
+                if (flag.contains(KswFlags::SPLICE_FOR) && (junc[t] & 1) != 0)
+                    || (flag.contains(KswFlags::SPLICE_REV) && (junc[t] & 8) != 0)
+                {
+                    acceptor[t] = (acceptor[t] as i32 + junc_bonus as i32) as i8;
+                }
+            }
+        }
+    }
+
+    // Per-column DP state arrays use the same 16-byte padded width as C's
+    // SIMD implementation. The padded tail participates in chunk-boundary
+    // propagation, so clipping the scalar loop to the real target length is
+    // not parity-correct.
+    let neg_qe = i8_sem(-qe_i);
+    let neg_q2 = i8_sem(-q2_i);
+    let u = &mut scratch.u;
+    let v = &mut scratch.v;
+    let x = &mut scratch.x;
+    let y = &mut scratch.y;
+    let x2 = &mut scratch.x2;
+    u.fill(neg_qe as i8);
+    v.fill(neg_qe as i8);
+    x.fill(neg_qe as i8);
+    y.fill(neg_qe as i8);
+    x2.fill(neg_q2 as i8);
+
+    // Per-column score scratch. C uses aligned vectors; scalar uses reusable
+    // scratch.
+    let s = &mut scratch.s;
+    s.fill(0);
 
     // Per-anti-diagonal H storage for exact max tracking.
-    let mut h_arr: Vec<i32> = if !approx_max {
-        vec![KSW_NEG_INF; tlen as usize]
-    } else {
-        Vec::new()
-    };
+    let h_arr = &mut scratch.h_arr;
+    if !approx_max {
+        h_arr.fill(KSW_NEG_INF);
+    }
     let mut h0: i32 = 0;
     let mut last_h0_t: i32 = 0;
 
-    // CIGAR backtrack scratch: bt[r][t] packed byte; off[r] = first column of
-    // anti-diagonal r (st0); off_end[r] = last column (en0). C's `n_col_*16`
-    // is the per-row stride; we use a Vec<Vec<u8>> indexed by [r][t-off[r]].
-    let n_anti = (qlen + tlen - 1) as usize;
-    let mut bt: Vec<Vec<u8>> = if with_cigar {
-        Vec::with_capacity(n_anti)
-    } else {
-        Vec::new()
-    };
-    let mut offs: Vec<i32> = Vec::with_capacity(n_anti);
-    let mut off_ends: Vec<i32> = Vec::with_capacity(n_anti);
+    // CIGAR backtrack scratch: packed bytes in one contiguous buffer plus
+    // per-row offsets, matching C's single allocation more closely.
+    let bt = &mut scratch.bt;
+    let bt_row_starts = &mut scratch.bt_row_starts;
+    let offs = &mut scratch.offs;
+    let off_ends = &mut scratch.off_ends;
+    let query_ptr = query.as_ptr();
+    let target_ptr = target.as_ptr();
+    let mat_ptr = mat.as_ptr();
+    let donor_ptr = donor.as_mut_ptr();
+    let acceptor_ptr = acceptor.as_mut_ptr();
+    let u_ptr = u.as_mut_ptr();
+    let v_ptr = v.as_mut_ptr();
+    let x_ptr = x.as_mut_ptr();
+    let y_ptr = y.as_mut_ptr();
+    let x2_ptr = x2.as_mut_ptr();
+    let s_ptr = s.as_mut_ptr();
+    let h_ptr = h_arr.as_mut_ptr();
 
     let mut last_st: i32 = -1;
     let mut last_en: i32 = -1;
@@ -1128,11 +1349,11 @@ pub fn ksw_exts2_rot(
         off_ends.push(en0);
 
         // Boundary state at column st0-1 (corresponds to SIMD x1/x21/v1).
-        let (mut x1, mut x21, mut v1) = if st0 > 0 {
+        let (x1, x21, v1) = if st0 > 0 {
             if st0 - 1 >= last_st && st0 - 1 <= last_en {
                 (x[(st0 - 1) as usize], x2[(st0 - 1) as usize], v[(st0 - 1) as usize])
             } else {
-                (-qe_i, -q2_i, -qe_i)
+                (neg_qe as i8, neg_q2 as i8, neg_qe as i8)
             }
         } else {
             let v0 = if r == 0 {
@@ -1144,42 +1365,68 @@ pub fn ksw_exts2_rot(
             } else {
                 0
             };
-            (-qe_i, -q2_i, v0)
+            (neg_qe as i8, neg_q2 as i8, i8_sem(v0) as i8)
         };
         // y[r] / u[r] boundary at en0 + 1 = r when en0 == r.
         if en0 >= r {
-            y[r as usize] = -qe_i;
+            y[r as usize] = neg_qe as i8;
             u[r as usize] = if r == 0 {
-                -qe_i
+                neg_qe as i8
             } else if r < long_thres {
-                -(e as i32)
+                i8_sem(-(e as i32)) as i8
             } else if r == long_thres {
-                long_diff
+                i8_sem(long_diff) as i8
             } else {
                 0
             };
         }
 
-        // Score lookup: s[t] = mat[query[r-t]][target[t]] for t in [st0, en0].
-        for t in st0..=en0 {
-            let qb = qr[(qlen - 1 - (r - t)) as usize] as usize;
-            let tb = target[t as usize] as usize;
-            s[t as usize] = mat[qb * m_u + tb] as i32;
+        // Score lookup. Match C's non-GENERIC_SC SIMD path: if either base is
+        // the wildcard symbol (m-1), use sc_N (mat[m*m-1], except force -e
+        // when that matrix entry is zero). Only GENERIC_SC does the raw mat[]
+        // lookup for all symbols.
+        let chunk_st = (st0 / 16) * 16;
+        let chunk_en_excl = ((en0 + 16) / 16) * 16; // exclusive upper bound
+        let chunk_en = chunk_en_excl - 1;
+        for t in chunk_st..=chunk_en {
+            // qr[qlen - 1 - (r - t)] is equivalent to query[r - t]; read the
+            // original query directly and avoid building a reversed copy per
+            // alignment call.
+            let q_pos = r - t;
+            let qb = if q_pos >= 0 && q_pos < qlen {
+                unsafe { *query_ptr.add(q_pos as usize) as usize }
+            } else {
+                0usize
+            };
+            let tb = if t >= 0 && t < tlen {
+                unsafe { *target_ptr.add(t as usize) as usize }
+            } else {
+                0usize
+            };
+            unsafe {
+                *s_ptr.add(t as usize) = if !flag.contains(KswFlags::GENERIC_SC)
+                    && (qb == wildcard || tb == wildcard)
+                {
+                    sc_n
+                } else {
+                    *mat_ptr.add(qb * m_u + tb) as i32
+                };
+            }
         }
 
         // Per-row bt slot — one byte per t in [st0, en0].
         let row_len = (en0 - st0 + 1) as usize;
-        let mut row_bt = if with_cigar { vec![0u8; row_len] } else { Vec::new() };
+        let row_bt_start = bt.len();
+        if with_cigar {
+            bt_row_starts.push(row_bt_start);
+            bt.resize(row_bt_start + row_len, 0);
+        }
 
         // Iterate over CHUNK-ALIGNED bounds (multiples of 16), matching C
         // SIMD's lane-parallel processing. Cells outside [st0, en0] get
         // computed and stored with garbage values (since they're outside the
         // band), but C does this too — and subsequent rows may read these
         // garbage values as their boundary x1, propagating equivalent state.
-        let chunk_st = (st0 / 16) * 16;
-        let chunk_en_excl = ((en0 + 16) / 16) * 16; // exclusive upper bound
-        let chunk_en = (chunk_en_excl - 1).min(tlen - 1);
-
         // Boundary at chunk_st - 1: C reads x[st-1] etc. unconditionally
         // when st > 0. Use prev row's value if chunk_st-1 was in prev row's
         // chunk range, else fall back to initial -qe boundary.
@@ -1187,7 +1434,7 @@ pub fn ksw_exts2_rot(
             if chunk_st - 1 >= last_st && chunk_st - 1 <= last_en {
                 (x[(chunk_st - 1) as usize], v[(chunk_st - 1) as usize], x2[(chunk_st - 1) as usize])
             } else {
-                (-qe_i, -qe_i, -q2_i)
+                (neg_qe as i8, neg_qe as i8, neg_q2 as i8)
             }
         } else {
             (x1, v1, x21)
@@ -1195,30 +1442,25 @@ pub fn ksw_exts2_rot(
         // For chunk_st == 0, x1/v1/x21 are already correct (computed earlier
         // with the special r==0 / boundary logic).
         for t in chunk_st..=chunk_en {
-            let z_init = s[t as usize];
-            let xt1 = prev_x;
-            let vt1 = prev_v;
-            let x2t1 = prev_x2;
-            let ut = u[t as usize];
+            let tu = t as usize;
+            let z_init = unsafe { *s_ptr.add(tu) };
+            let xt1 = prev_x as i32;
+            let vt1 = prev_v as i32;
+            let x2t1 = prev_x2 as i32;
+            let ut = unsafe { *u_ptr.add(tu) as i32 };
             // Snapshot the OLD t-th values for the next iteration before they
             // get overwritten by this iteration's stores.
-            let next_prev_x = x[t as usize];
-            let next_prev_v = v[t as usize];
-            let next_prev_x2 = x2[t as usize];
-            let a = xt1 + vt1;
-            let b = y[t as usize] + ut;
-            let a2 = x2t1 + vt1;
-            // C ksw2_exts2_sse.c uses donor[t]=signal at target[t+1,t+2] and
-            // acceptor[t]=signal at target[t-1,t]. Rust splice_*_scores helpers
-            // use donor[pos]=signal at target[pos,pos+1] and
-            // acceptor[pos]=signal at target[pos-2,pos-1]. Shift indices by +1
-            // so this rot function uses C's convention.
-            let acceptor_t = if (t as usize) + 1 < acceptor.len() {
-                acceptor[(t as usize) + 1]
-            } else {
-                -((noncan as i32).max(0))
-            };
-            let a2a = a2 + acceptor_t;
+            let next_prev_x = unsafe { *x_ptr.add(tu) };
+            let next_prev_v = unsafe { *v_ptr.add(tu) };
+            let next_prev_x2 = unsafe { *x2_ptr.add(tu) };
+            let a = i8_sem(xt1 + vt1);
+            let b = i8_sem(unsafe { *y_ptr.add(tu) as i32 } + ut);
+            let a2 = i8_sem(x2t1 + vt1);
+            // splice_*_scores() already stores values in C's DP column
+            // coordinates: donor[t] scores target[t+1..t+2], acceptor[t]
+            // scores target[t-1..t]. Read them directly by column index.
+            let acceptor_t = unsafe { *acceptor_ptr.add(tu) as i32 };
+            let a2a = i8_sem(a2 + acceptor_t);
 
             // State pick. left-alignment (also covers !is_right): probe in
             // order a (DEL→state 1), b (INS→state 2), a2a (splice→state 3).
@@ -1241,11 +1483,13 @@ pub fn ksw_exts2_rot(
             // update u/v.
             let z_kept = z;
             // dp_code_block2: u[t]=z-vt1, v[t]=z-ut, then a/b/a2 deltas.
-            u[t as usize] = z - vt1;
-            v[t as usize] = z - ut;
-            let a_post = a - (z - q_i);
-            let b_post = b - (z - q_i);
-            let a2_post = a2 - (z - q2_i);
+            unsafe {
+                *u_ptr.add(tu) = i8_sem(z - vt1) as i8;
+                *v_ptr.add(tu) = i8_sem(z - ut) as i8;
+            }
+            let a_post = i8_sem(a - i8_sem(z - q_i));
+            let b_post = i8_sem(b - i8_sem(z - q_i));
+            let a2_post = i8_sem(a2 - i8_sem(z - q2_i));
             // x/y/x2 update with continuation-flag tracking.
             let a_pos = a_post > 0;
             let b_pos = b_post > 0;
@@ -1253,25 +1497,67 @@ pub fn ksw_exts2_rot(
             // andnot semantics — but the resulting stored value is the same
             // since `max(a_post, 0)` doesn't depend on alignment direction
             // for the stored x[t].
-            x[t as usize] = if a_pos { a_post } else { 0 } - qe_i;
-            y[t as usize] = if b_pos { b_post } else { 0 } - qe_i;
+            unsafe {
+                *x_ptr.add(tu) = i8_sem((if a_pos { a_post } else { 0 }) - qe_i) as i8;
+                *y_ptr.add(tu) = i8_sem((if b_pos { b_post } else { 0 }) - qe_i) as i8;
+            }
             // x2[t] = max(a2_post, donor[t]) - q2  (left-alignment direction
             // matters: C uses max(a2, donor) for left, max(donor, a2) for
-            // right with andnot pattern that flips bit 5's meaning). Index
-            // shift +1 for C convention (see acceptor comment above).
-            let donor_t = if (t as usize) + 1 < donor.len() {
-                donor[(t as usize) + 1]
+            // right with andnot pattern that flips bit 5's meaning).
+            let donor_t = unsafe { *donor_ptr.add(tu) as i32 };
+            // C ksw2_exts2_sse.c uses `_mm_cmpgt_epi8(a2, donor)` on the
+            // left-aligned path, so donor wins exact ties. Using `>=` here
+            // skews backtrack continuation bits and can flip a donor-tie
+            // into a different insertion/deletion decomposition.
+            let a2_wins_donor = if !is_right {
+                a2_post > donor_t
             } else {
-                -((noncan as i32).max(0))
+                a2_post >= donor_t
             };
-            let a2_wins_donor = a2_post > donor_t;
             let chosen_x2 = if a2_wins_donor { a2_post } else { donor_t };
-            x2[t as usize] = chosen_x2 - q2_i;
+            unsafe {
+                *x2_ptr.add(tu) = i8_sem(chosen_x2 - q2_i) as i8;
+            }
 
             // Update ez.max for each cell (only meaningful with !approx_max,
             // where exact H[] is computed below). Here we just use z_kept
             // through the H update logic.
             let _ = z_kept;
+
+            #[cfg(feature = "tracehash")]
+            if with_cigar
+                && ((r < 8)
+                    || (qlen == 217 && tlen == 587 && r >= 120 && r <= 140)
+                    || (qlen == 50 && tlen == 98 && r >= 12 && r <= 16)
+                    || (qlen == 50 && tlen == 98 && r >= 84 && r <= 92))
+                && t >= st0
+                && t <= en0
+            {
+                let mut th = tracehash::th_call!("exts2_cell_dbg");
+                th.input_i64(if is_right { 1 } else { 0 });
+                th.input_i64(r as i64);
+                th.input_i64(t as i64);
+                th.input_i64(z_init as i64);
+                th.input_i64(xt1 as i64);
+                th.input_i64(vt1 as i64);
+                th.input_i64(ut as i64);
+                th.input_i64(x2t1 as i64);
+                th.input_i64(acceptor_t as i64);
+                th.input_i64(donor_t as i64);
+                th.output_i64(a as i64);
+                th.output_i64(b as i64);
+                th.output_i64(a2 as i64);
+                th.output_i64(a2a as i64);
+                th.output_i64(z_kept as i64);
+                th.output_i64(state as i64);
+                th.output_i64(a_post as i64);
+                th.output_i64(b_post as i64);
+                th.output_i64(a2_post as i64);
+                th.output_i64(if a_pos { 1 } else { 0 });
+                th.output_i64(if b_pos { 1 } else { 0 });
+                th.output_i64(if a2_wins_donor { 1 } else { 0 });
+                th.finish();
+            }
 
             if with_cigar && t >= st0 && t <= en0 {
                 let mut d = state;
@@ -1283,11 +1569,11 @@ pub fn ksw_exts2_rot(
                     if b_pos { d |= 0x10; }
                     if a2_wins_donor { d |= 0x20; }
                 } else {
-                    if a_pos { d |= 0x08; }
-                    if b_pos { d |= 0x10; }
+                    if a_post >= 0 { d |= 0x08; }
+                    if b_post >= 0 { d |= 0x10; }
                     if a2_post >= donor_t { d |= 0x20; }
                 }
-                row_bt[(t - st0) as usize] = d;
+                bt[row_bt_start + (t - st0) as usize] = d;
             }
             // Advance the prev-anti-diagonal snapshot.
             prev_x = next_prev_x;
@@ -1295,23 +1581,33 @@ pub fn ksw_exts2_rot(
             prev_x2 = next_prev_x2;
         }
 
-        if with_cigar { bt.push(row_bt); }
+        #[cfg(feature = "tracehash")]
+        if with_cigar {
+            let mut th = tracehash::th_call!("exts2_pr_row");
+            th.input_i64(r as i64);
+            th.input_i64(st0 as i64);
+            th.input_i64(en0 as i64);
+            th.input_i64(chunk_st as i64);
+            th.input_i64(chunk_en as i64);
+            for &d in &bt[row_bt_start..row_bt_start + row_len] {
+                th.output_i64(d as i64);
+            }
+            th.finish();
+        }
 
         // Exact H[] / approximate max tracking — controls ez.max/mqe/mte/score.
         if !approx_max {
-            let v_row: Vec<i32> = (st0..=en0).map(|t| v[t as usize]).collect();
-            let u_row: Vec<i32> = (st0..=en0).map(|t| u[t as usize]).collect();
             let mut max_h: i32;
             let mut max_t: i32;
             if r > 0 {
                 // Special-case the last element: H[en0] = en0>0? H[en0-1] + u[en0] : H[en0] + v[en0]
                 if en0 > 0 {
-                    let new_h = h_arr[(en0 - 1) as usize] + u_row[(en0 - st0) as usize];
-                    h_arr[en0 as usize] = new_h;
+                    let new_h = unsafe { *h_ptr.add((en0 - 1) as usize) + *u_ptr.add(en0 as usize) as i32 };
+                    unsafe { *h_ptr.add(en0 as usize) = new_h; }
                 } else {
-                    h_arr[en0 as usize] += v_row[(en0 - st0) as usize];
+                    unsafe { *h_ptr.add(en0 as usize) += *v_ptr.add(en0 as usize) as i32; }
                 }
-                max_h = h_arr[en0 as usize];
+                max_h = unsafe { *h_ptr.add(en0 as usize) };
                 max_t = en0;
                 // Mirror C SIMD scan order from ksw2_exts2_sse.c:401-425 so
                 // tie-breaking on max_t matches: 4-lane SIMD walks t in
@@ -1321,37 +1617,41 @@ pub fn ksw_exts2_rot(
                 let en1 = st0 + (en0 - st0) / 4 * 4;
                 // First update H[t] for all t in [st0, en0) (independent of order).
                 for t in st0..en0 {
-                    h_arr[t as usize] += v_row[(t - st0) as usize];
+                    unsafe { *h_ptr.add(t as usize) += *v_ptr.add(t as usize) as i32; }
                 }
                 // Then scan in C SIMD order.
                 for lane in 0..4 {
                     let mut t = st0 + lane;
                     while t < en1 {
-                        if h_arr[t as usize] > max_h {
-                            max_h = h_arr[t as usize];
+                        let ht = unsafe { *h_ptr.add(t as usize) };
+                        if ht > max_h {
+                            max_h = ht;
                             max_t = t;
                         }
                         t += 4;
                     }
                 }
                 for t in en1..en0 {
-                    if h_arr[t as usize] > max_h {
-                        max_h = h_arr[t as usize];
+                    let ht = unsafe { *h_ptr.add(t as usize) };
+                    if ht > max_h {
+                        max_h = ht;
                         max_t = t;
                     }
                 }
             } else {
-                h_arr[0] = v_row[0] - qe_i;
-                max_h = h_arr[0];
+                unsafe { *h_ptr.add(0) = *v_ptr.add(0) as i32 - qe_i; }
+                max_h = unsafe { *h_ptr.add(0) };
                 max_t = 0;
             }
             // mte / mqe / score updates per C lines 423-430.
-            if en0 == tlen - 1 && h_arr[en0 as usize] > ez.mte {
-                ez.mte = h_arr[en0 as usize];
+            let h_en0 = unsafe { *h_ptr.add(en0 as usize) };
+            if en0 == tlen - 1 && h_en0 > ez.mte {
+                ez.mte = h_en0;
                 ez.mte_q = r - en0;
             }
-            if r - st0 == qlen - 1 && h_arr[st0 as usize] > ez.mqe {
-                ez.mqe = h_arr[st0 as usize];
+            let h_st0 = unsafe { *h_ptr.add(st0 as usize) };
+            if r - st0 == qlen - 1 && h_st0 > ez.mqe {
+                ez.mqe = h_st0;
                 ez.mqe_t = st0;
             }
             // Track ez.max from the per-anti-diagonal exact max.
@@ -1371,8 +1671,8 @@ pub fn ksw_exts2_rot(
                 th.input_i64(en0 as i64);
                 th.output_i64(max_h as i64);
                 th.output_i64(max_t as i64);
-                th.output_i64(h_arr[st0 as usize] as i64);
-                th.output_i64(h_arr[en0 as usize] as i64);
+                th.output_i64(h_st0 as i64);
+                th.output_i64(h_en0 as i64);
                 th.finish();
             }
             // Z-drop check. C ksw_exts2_sse.c:428 passes e=0 for the splice
@@ -1381,7 +1681,7 @@ pub fn ksw_exts2_rot(
                 break;
             }
             if r == qlen + tlen - 2 && en0 == tlen - 1 {
-                ez.score = h_arr[(tlen - 1) as usize];
+                ez.score = unsafe { *h_ptr.add((tlen - 1) as usize) };
             }
         } else {
             // Approximate-max mode: track diagonal H0 along last_h0_t.
@@ -1489,16 +1789,17 @@ pub fn ksw_exts2_rot(
             let mut cigar = Vec::new();
             while i >= 0 && j >= 0 {
                 let r = i + j;
-                if (r as usize) >= bt.len() {
+                if (r as usize) >= bt_row_starts.len() {
                     break;
                 }
                 let st = offs[r as usize];
                 let en = off_ends[r as usize];
+                let row_bt_start = bt_row_starts[r as usize];
                 let mut force_state: i32 = -1;
                 if j < st { force_state = 2; }
                 if j > en { force_state = 1; }
                 let tmp: u8 = if force_state < 0 {
-                    bt[r as usize][(j - st) as usize]
+                    bt[row_bt_start + (j - st) as usize]
                 } else {
                     0
                 };
@@ -1545,6 +1846,7 @@ pub fn ksw_exts2_rot(
         }
     }
 
+    KSW_EXTS2_SCRATCH.with(|c| *c.borrow_mut() = scratch);
     ez
 }
 
@@ -1958,7 +2260,9 @@ mod tests {
         ];
         let flag = KswFlags::SPLICE_FOR | KswFlags::SPLICE_FLANK;
         let scalar = ksw_exts2(&query, &target, 5, &mat, 2, 1, 4, 9, 50, 200, -1, flag);
-        let rot = ksw_exts2_rot(&query, &target, 5, &mat, 2, 1, 4, 9, 50, 200, -1, flag);
+        let rot = ksw_exts2_rot(
+            &query, &target, 5, &mat, 2, 1, 4, 9, 50, 200, -1, 0, 0, None, flag,
+        );
         eprintln!("scalar: score={} max={} cigar={:?}", scalar.score, scalar.max, scalar.cigar);
         eprintln!("rot:    score={} max={} cigar={:?}", rot.score, rot.max, rot.cigar);
     }

@@ -3,6 +3,9 @@ pub mod ksw2_simd;
 pub mod score;
 
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use crate::flags::{CigarOp, KswFlags};
 use crate::index::MmIdx;
@@ -17,6 +20,55 @@ thread_local! {
     static ALIGN_REV_BUF: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static ALIGN_QSEQ_FWD: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     static ALIGN_QSEQ_REV: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+static ALIGN_PROFILE_ENABLED: OnceLock<bool> = OnceLock::new();
+static ALIGN_PROFILE_DO_ALIGN_NS: AtomicU64 = AtomicU64::new(0);
+static ALIGN_PROFILE_DP_NS: AtomicU64 = AtomicU64::new(0);
+static ALIGN_PROFILE_LEFT_PREP_NS: AtomicU64 = AtomicU64::new(0);
+static ALIGN_PROFILE_GAP_PREP_NS: AtomicU64 = AtomicU64::new(0);
+static ALIGN_PROFILE_RIGHT_PREP_NS: AtomicU64 = AtomicU64::new(0);
+static ALIGN_PROFILE_ZDROP_RETRY_NS: AtomicU64 = AtomicU64::new(0);
+static ALIGN_PROFILE_DO_ALIGN_CALLS: AtomicU64 = AtomicU64::new(0);
+static ALIGN_PROFILE_ZDROP_RETRIES: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+fn align_profile_enabled() -> bool {
+    *ALIGN_PROFILE_ENABLED.get_or_init(|| {
+        std::env::var_os("MM2RS_ALIGN_PROFILE")
+            .map(|v| v != "0")
+            .unwrap_or(false)
+    })
+}
+
+#[inline]
+fn add_profile_time(counter: &AtomicU64, start: Instant) {
+    counter.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+}
+
+pub fn report_align_profile() {
+    if !align_profile_enabled() {
+        return;
+    }
+    let do_align_ns = ALIGN_PROFILE_DO_ALIGN_NS.load(Ordering::Relaxed);
+    let dp_ns = ALIGN_PROFILE_DP_NS.load(Ordering::Relaxed);
+    let left_prep_ns = ALIGN_PROFILE_LEFT_PREP_NS.load(Ordering::Relaxed);
+    let gap_prep_ns = ALIGN_PROFILE_GAP_PREP_NS.load(Ordering::Relaxed);
+    let right_prep_ns = ALIGN_PROFILE_RIGHT_PREP_NS.load(Ordering::Relaxed);
+    let zdrop_retry_ns = ALIGN_PROFILE_ZDROP_RETRY_NS.load(Ordering::Relaxed);
+    let do_align_calls = ALIGN_PROFILE_DO_ALIGN_CALLS.load(Ordering::Relaxed);
+    let zdrop_retries = ALIGN_PROFILE_ZDROP_RETRIES.load(Ordering::Relaxed);
+    eprintln!(
+        "[M::align_profile] do_align_calls={} do_align_total={:.3}s dp_total={:.3}s left_prep={:.3}s gap_prep={:.3}s right_prep={:.3}s zdrop_retry={:.3}s zdrop_retries={}",
+        do_align_calls,
+        do_align_ns as f64 / 1e9,
+        dp_ns as f64 / 1e9,
+        left_prep_ns as f64 / 1e9,
+        gap_prep_ns as f64 / 1e9,
+        right_prep_ns as f64 / 1e9,
+        zdrop_retry_ns as f64 / 1e9,
+        zdrop_retries,
+    );
 }
 
 /// High-level alignment interface dispatching to scalar or SIMD implementations.
@@ -232,11 +284,40 @@ fn append_cigar(cigar: &mut Vec<u32>, new_ops: &[u32]) {
     }
 }
 
+#[cfg(feature = "tracehash")]
+fn trace_align1_stage(
+    stage: i64,
+    qlen: i64,
+    tlen: i64,
+    flag_bits: i64,
+    score: i64,
+    max: i64,
+    zdropped: bool,
+    reach_end: bool,
+    cigar: &[u32],
+) {
+    let mut th = tracehash::th_call!("align1_stage");
+    th.input_i64(stage);
+    th.input_i64(qlen);
+    th.input_i64(tlen);
+    th.input_i64(flag_bits);
+    th.output_i64(score);
+    th.output_i64(max);
+    th.output_i64(if zdropped { 1 } else { 0 });
+    th.output_i64(if reach_end { 1 } else { 0 });
+    th.output_i64(cigar.len() as i64);
+    for &c in cigar {
+        th.output_u64(c as u64);
+    }
+    th.finish();
+}
+
 /// Helper: perform a single KSW2 alignment and return the result.
 fn do_align(
     opt: &MapOpt,
     qsub: &[u8],
     tsub: &[u8],
+    junc: Option<&[u8]>,
     mat: &[i8],
     bw: i32,
     zdrop: i32,
@@ -245,6 +326,11 @@ fn do_align(
     rev: bool,
     splice_strand: crate::flags::MapFlags,
 ) -> KswResult {
+    let profile = align_profile_enabled();
+    let do_align_start = if profile { Some(Instant::now()) } else { None };
+    if profile {
+        ALIGN_PROFILE_DO_ALIGN_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
     if qsub.is_empty() || tsub.is_empty() {
         return KswResult::new();
     }
@@ -279,25 +365,7 @@ fn do_align(
         if !opt.flag.contains(crate::flags::MapFlags::SPLICE_OLD) {
             splice_flag |= KswFlags::SPLICE_CMPLX;
         }
-        let dual_ez = || {
-            align_pair_dual(
-                qsub,
-                tsub,
-                5,
-                mat,
-                opt.q as i8,
-                opt.e as i8,
-                opt.q2 as i8,
-                opt.e2 as i8,
-                bw,
-                zdrop,
-                end_bonus,
-                flag,
-            )
-        };
-        if flag.contains(KswFlags::EXTZ_ONLY) && rev {
-            return dual_ez();
-        }
+        let dp_start = if profile { Some(Instant::now()) } else { None };
         let splice_ez = ksw2_simd::ksw_exts2_dispatch(
             qsub,
             tsub,
@@ -310,20 +378,22 @@ fn do_align(
             bw,
             zdrop,
             end_bonus,
+            opt.junc_bonus as i8,
+            opt.junc_pen as i8,
+            junc,
             splice_flag,
         );
-        return if splice_ez
-            .cigar
-            .iter()
-            .any(|&c| (c & 0xf) == CigarOp::NSkip as u32)
-        {
-            splice_ez
-        } else {
-            dual_ez()
-        };
+        if let Some(start) = dp_start {
+            add_profile_time(&ALIGN_PROFILE_DP_NS, start);
+        }
+        if let Some(start) = do_align_start {
+            add_profile_time(&ALIGN_PROFILE_DO_ALIGN_NS, start);
+        }
+        return splice_ez;
     }
-    if opt.q == opt.q2 && opt.e == opt.e2 {
-        align_pair(
+    let ez = if opt.q == opt.q2 && opt.e == opt.e2 {
+        let dp_start = if profile { Some(Instant::now()) } else { None };
+        let ez = align_pair(
             qsub,
             tsub,
             5,
@@ -334,9 +404,14 @@ fn do_align(
             zdrop,
             end_bonus,
             flag,
-        )
+        );
+        if let Some(start) = dp_start {
+            add_profile_time(&ALIGN_PROFILE_DP_NS, start);
+        }
+        ez
     } else {
-        align_pair_dual(
+        let dp_start = if profile { Some(Instant::now()) } else { None };
+        let ez = align_pair_dual(
             qsub,
             tsub,
             5,
@@ -349,8 +424,43 @@ fn do_align(
             zdrop,
             end_bonus,
             flag,
-        )
+        );
+        if let Some(start) = dp_start {
+            add_profile_time(&ALIGN_PROFILE_DP_NS, start);
+        }
+        ez
+    };
+    if let Some(start) = do_align_start {
+        add_profile_time(&ALIGN_PROFILE_DO_ALIGN_NS, start);
     }
+    ez
+}
+
+fn splice_junc_window(
+    mi: &MmIdx,
+    opt: &MapOpt,
+    rid: u32,
+    st: i32,
+    en: i32,
+    rev: bool,
+    splice_strand: crate::flags::MapFlags,
+    rev_cigar: bool,
+) -> Option<Vec<u8>> {
+    if !opt.flag.contains(crate::flags::MapFlags::SPLICE) || st >= en {
+        return None;
+    }
+    let mut splice_rev = false;
+    if splice_strand.contains(crate::flags::MapFlags::SPLICE_FOR) && rev {
+        splice_rev = true;
+    }
+    if splice_strand.contains(crate::flags::MapFlags::SPLICE_REV) && !rev {
+        splice_rev = true;
+    }
+    let mut junc = mi.junc_db.as_ref()?.get_junc_array(rid, st, en, splice_rev);
+    if rev_cigar {
+        junc.reverse();
+    }
+    Some(junc)
 }
 
 /// Test for z-drop in a CIGAR alignment.
@@ -1228,6 +1338,11 @@ fn align1_impl(
         let tlen_ext = (rs - rs0) as usize;
         let qlen_ext = (qs - qs0) as usize;
         if tlen_ext > 0 && qlen_ext > 0 {
+            let prep_start = if align_profile_enabled() {
+                Some(Instant::now())
+            } else {
+                None
+            };
             mi.getseq(rid, rs0 as u32, rs as u32, &mut tseq_buf[..tlen_ext]);
             let mut rev_buf = ALIGN_REV_BUF.with(|c| std::mem::take(&mut *c.borrow_mut()));
             let total_rev = tlen_ext + qlen_ext;
@@ -1245,10 +1360,24 @@ fn align1_impl(
             // relaxed zdrop_inv so their left extension isn't prematurely
             // truncated by the standard z-drop.
             let left_zdrop = if r.split_inv { opt.zdrop_inv } else { opt.zdrop };
+            let left_junc = splice_junc_window(
+                mi,
+                opt,
+                rid,
+                rs0,
+                rs,
+                rev,
+                splice_strand,
+                true,
+            );
+            if let Some(start) = prep_start {
+                add_profile_time(&ALIGN_PROFILE_LEFT_PREP_NS, start);
+            }
             let ez = do_align(
                 opt,
                 &rev_buf[..qlen_ext],
                 &rev_buf[qlen_ext..total_rev],
+                left_junc.as_deref(),
                 mat,
                 bw,
                 left_zdrop,
@@ -1256,6 +1385,18 @@ fn align1_impl(
                 KswFlags::EXTZ_ONLY | KswFlags::RIGHT | KswFlags::REV_CIGAR,
                 rev,
                 splice_strand,
+            );
+            #[cfg(feature = "tracehash")]
+            trace_align1_stage(
+                0,
+                qlen_ext as i64,
+                tlen_ext as i64,
+                (KswFlags::EXTZ_ONLY | KswFlags::RIGHT | KswFlags::REV_CIGAR).bits() as i64,
+                ez.score as i64,
+                ez.max as i64,
+                ez.zdropped,
+                ez.reach_end,
+                &ez.cigar,
             );
             // (Previously: a Rust-only "SR z-drop-like tail" handler with
             // hard-coded indel-length constants 114 / 120 and a priors
@@ -1319,6 +1460,11 @@ fn align1_impl(
                 && cur_rs < ref_len
                 && next_re <= ref_len
             {
+                let prep_start = if align_profile_enabled() {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
                 // Bandwidth: bw_long for all gaps; for LONG_JOIN, use max(gap_q, gap_t)
                 // Matches C: bw1 = bw_long, then overridden for LONG_JOIN
                 let use_bw = if has_long_join {
@@ -1336,6 +1482,19 @@ fn align1_impl(
                     &mut tseq_buf[..gap_tlen],
                 );
                 let qsub = &qseq[cur_qs as usize..next_qe as usize];
+                let gap_junc = splice_junc_window(
+                    mi,
+                    opt,
+                    rid,
+                    cur_rs,
+                    next_re,
+                    rev,
+                    splice_strand,
+                    false,
+                );
+                if let Some(start) = prep_start {
+                    add_profile_time(&ALIGN_PROFILE_GAP_PREP_NS, start);
+                }
                 // First pass: alignment with approximate z-drop
                 let mut ungapped_cigar = false;
                 let mut ez = if is_sr && gap_qlen == gap_tlen {
@@ -1361,6 +1520,7 @@ fn align1_impl(
                             opt,
                             qsub,
                             &tseq_buf[..gap_tlen],
+                            gap_junc.as_deref(),
                             mat,
                             use_bw,
                             opt.zdrop,
@@ -1375,6 +1535,7 @@ fn align1_impl(
                         opt,
                         qsub,
                         &tseq_buf[..gap_tlen],
+                        gap_junc.as_deref(),
                         mat,
                         use_bw,
                         opt.zdrop,
@@ -1384,6 +1545,18 @@ fn align1_impl(
                         splice_strand,
                     )
                 };
+                #[cfg(feature = "tracehash")]
+                trace_align1_stage(
+                    1,
+                    gap_qlen as i64,
+                    gap_tlen as i64,
+                    KswFlags::APPROX_MAX.bits() as i64,
+                    ez.score as i64,
+                    ez.max as i64,
+                    ez.zdropped,
+                    ez.reach_end,
+                    &ez.cigar,
+                );
 
                 // Test z-drop and potential inversion. Keep the first-pass classification
                 // for split metadata, matching C's mm_align1().
@@ -1391,6 +1564,14 @@ fn align1_impl(
                 if !ungapped_cigar && !ez.cigar.is_empty() {
                     zdrop_code = test_zdrop(opt, qsub, &tseq_buf[..gap_tlen], &ez.cigar, mat);
                     if zdrop_code > 0 {
+                        let retry_start = if align_profile_enabled() {
+                            Some(Instant::now())
+                        } else {
+                            None
+                        };
+                        if align_profile_enabled() {
+                            ALIGN_PROFILE_ZDROP_RETRIES.fetch_add(1, Ordering::Relaxed);
+                        }
                         // Second pass: re-align with exact z-drop (use zdrop_inv for inversions)
                         // Note: APPROX_MAX is intentionally NOT set here (matching C's "lift approximate")
                         // so the exact H-tracking path is used, which enables proper z-drop detection.
@@ -1403,6 +1584,7 @@ fn align1_impl(
                             opt,
                             qsub,
                             &tseq_buf[..gap_tlen],
+                            gap_junc.as_deref(),
                             mat,
                             use_bw,
                             zdrop2,
@@ -1411,6 +1593,21 @@ fn align1_impl(
                             rev,
                             splice_strand,
                         );
+                        #[cfg(feature = "tracehash")]
+                        trace_align1_stage(
+                            2,
+                            gap_qlen as i64,
+                            gap_tlen as i64,
+                            KswFlags::empty().bits() as i64,
+                            ez.score as i64,
+                            ez.max as i64,
+                            ez.zdropped,
+                            ez.reach_end,
+                            &ez.cigar,
+                        );
+                        if let Some(start) = retry_start {
+                            add_profile_time(&ALIGN_PROFILE_ZDROP_RETRY_NS, start);
+                        }
                     }
                 }
 
@@ -1476,16 +1673,35 @@ fn align1_impl(
     if !dropped && cur_qs < qe0 && cur_rs < re0 {
         let rext = (re0 - cur_rs) as usize;
         let qext = (qe0 - cur_qs) as usize;
-        if rext > 0 && qext > 0 && (cur_qs as usize) < qseq.len() && (qe0 as usize) <= qseq.len() {
-            if rext > tseq_buf.len() {
-                tseq_buf.resize(rext, 0);
+            if rext > 0 && qext > 0 && (cur_qs as usize) < qseq.len() && (qe0 as usize) <= qseq.len() {
+                let prep_start = if align_profile_enabled() {
+                    Some(Instant::now())
+                } else {
+                    None
+                };
+                if rext > tseq_buf.len() {
+                    tseq_buf.resize(rext, 0);
+                }
+                mi.getseq(rid, cur_rs as u32, re0 as u32, &mut tseq_buf[..rext]);
+                let qsub = &qseq[cur_qs as usize..qe0 as usize];
+                let right_junc = splice_junc_window(
+                    mi,
+                    opt,
+                    rid,
+                    cur_rs,
+                    re0,
+                    rev,
+                    splice_strand,
+                    false,
+                );
+            if let Some(start) = prep_start {
+                add_profile_time(&ALIGN_PROFILE_RIGHT_PREP_NS, start);
             }
-            mi.getseq(rid, cur_rs as u32, re0 as u32, &mut tseq_buf[..rext]);
-            let qsub = &qseq[cur_qs as usize..qe0 as usize];
             let ez = do_align(
                 opt,
                 qsub,
                 &tseq_buf[..rext],
+                right_junc.as_deref(),
                 mat,
                 bw,
                 opt.zdrop,
@@ -1493,6 +1709,18 @@ fn align1_impl(
                 KswFlags::EXTZ_ONLY,
                 rev,
                 splice_strand,
+            );
+            #[cfg(feature = "tracehash")]
+            trace_align1_stage(
+                3,
+                qext as i64,
+                rext as i64,
+                KswFlags::EXTZ_ONLY.bits() as i64,
+                ez.score as i64,
+                ez.max as i64,
+                ez.zdropped,
+                ez.reach_end,
+                &ez.cigar,
             );
             if !ez.cigar.is_empty() {
                 append_cigar(&mut cigar_ops, &ez.cigar);
@@ -1542,39 +1770,6 @@ fn align1_impl(
         return split_regs;
     }
 
-    // Rescue path: applies in single-round splice mode (splice_strand has
-    // both SPLICE_FOR & SPLICE_REV, i.e. neither flag is exclusively set).
-    // In the two-round dispatch each round receives only ONE of FOR/REV; the
-    // rescue's `dp_score = qlen*a + bonus` overwrite would tie the two
-    // rounds' scores and mask the splice-DP-derived strand preference. C
-    // minimap2 has no equivalent rescue, so skipping it in two-round mode is
-    // both correct for parity and avoids the masking effect.
-    let in_two_round_dispatch = splice_strand
-        .intersection(crate::flags::MapFlags::SPLICE_FOR | crate::flags::MapFlags::SPLICE_REV)
-        != (crate::flags::MapFlags::SPLICE_FOR | crate::flags::MapFlags::SPLICE_REV)
-        && splice_strand
-            .intersects(crate::flags::MapFlags::SPLICE_FOR | crate::flags::MapFlags::SPLICE_REV);
-    if opt.flag.contains(crate::flags::MapFlags::SPLICE) && !rev && !in_two_round_dispatch {
-        if let Some(rescue) = rescue_exact_annotated_introns(opt, mi, rid, qseq, rs1, re1, rev) {
-            rs1 = rescue.rs;
-            re1 = rescue.re;
-            qs1 = 0;
-            qe1 = qlen;
-            cigar_ops = rescue.cigar;
-            dp_score = (qlen * opt.a) + rescue.bonus;
-        } else if let Some(rescue) = rescue_exact_single_intron(opt, mi, rid, qseq, rs1, re1, rev) {
-            rs1 = rescue.rs;
-            re1 = rescue.re;
-            qs1 = 0;
-            qe1 = qlen;
-            cigar_ops = rescue.cigar;
-            dp_score = (qlen * opt.a) + rescue.bonus;
-        }
-    }
-
-    let normalized_annotated_intron =
-        normalize_annotated_long_deletion(opt, mi, rid, qseq, &mut rs1, &mut qs1, &mut cigar_ops);
-
     // Compute stats from final alignment — reuse tseq_buf
     let final_tlen = (re1 - rs1).max(0) as usize;
     if final_tlen > tseq_buf.len() {
@@ -1589,9 +1784,9 @@ fn align1_impl(
         &[]
     };
 
-    let (is_spliced, trans_strand, splice_bonus) =
+    let (is_spliced, trans_strand, _splice_bonus) =
         annotate_splice_cigar(opt, mi, rid, rs1, &mut cigar_ops, rev);
-    let (mlen, blen, n_ambi, mut dp_max) = compute_cigar_stats(
+    let (mlen, blen, n_ambi, dp_max) = compute_cigar_stats(
         &cigar_ops,
         final_qseq,
         &tseq_buf[..final_tlen],
@@ -1601,14 +1796,6 @@ fn align1_impl(
         !(is_sr || opt.flag.contains(crate::flags::MapFlags::SR_RNA)),
     );
 
-    if normalized_annotated_intron {
-        dp_score += opt.junc_bonus + opt.q;
-    }
-
-    if opt.flag.contains(crate::flags::MapFlags::SPLICE) {
-        dp_max = dp_max.max(dp_score + splice_bonus);
-    }
-
     // Convert M to =/X if EQX mode requested
     if opt.flag.contains(crate::flags::MapFlags::EQX) && !final_qseq.is_empty() {
         update_cigar_eqx(&mut cigar_ops, final_qseq, &tseq_buf[..final_tlen]);
@@ -1616,12 +1803,6 @@ fn align1_impl(
     // Return thread-local buffers for reuse
     ALIGN_TSEQ_BUF.with(|c| *c.borrow_mut() = tseq_buf);
 
-    // C (align.c) accumulates dp_score purely from ez->max/ez->score across
-    // ksw_exts2 calls; splice signal bonuses are already baked into those
-    // scores via donor/acceptor arrays inside the DP. Earlier Rust also
-    // added `splice_bonus` post-DP, double-counting annotated junctions on
-    // some reads. Drop it so dp_score exactly matches C.
-    let _ = splice_bonus;
     let extra = AlignExtra {
         dp_score,
         dp_max,
@@ -1666,337 +1847,6 @@ fn align1_impl(
     r.is_spliced = is_spliced;
     r.extra = Some(Box::new(extra));
     split_regs
-}
-
-struct SpliceRescue {
-    rs: i32,
-    re: i32,
-    cigar: Vec<u32>,
-    bonus: i32,
-}
-
-fn splice_rescue_cost(opt: &MapOpt) -> i32 {
-    opt.q2
-        + if opt.flag.contains(crate::flags::MapFlags::SPLICE_OLD) {
-            4
-        } else {
-            3
-        }
-}
-
-fn rescue_exact_annotated_introns(
-    opt: &MapOpt,
-    mi: &MmIdx,
-    rid: u32,
-    qseq: &[u8],
-    current_rs: i32,
-    current_re: i32,
-    _rev: bool,
-) -> Option<SpliceRescue> {
-    let db = mi.junc_db.as_ref()?;
-    let juncs = db.juncs.get(rid as usize)?;
-    if juncs.is_empty() || qseq.len() < 50 {
-        return None;
-    }
-    let ref_len = mi.seqs.get(rid as usize)?.len as i32;
-    let flank = (qseq.len() as i32 + opt.max_gap_ref.max(opt.max_gap).max(6)).min(1_000_000);
-    let win_st = (current_rs - flank).max(0);
-    let win_en = (current_re + flank).min(ref_len);
-    if win_en <= win_st {
-        return None;
-    }
-    let win_len = (win_en - win_st) as usize;
-    if win_len > 50_000 {
-        return None;
-    }
-    let mut tseq = vec![4u8; win_len];
-    mi.getseq(rid, win_st as u32, win_en as u32, &mut tseq);
-
-    let min_first_exon = opt.min_chain_score.max(15) as usize;
-    let mut best: Option<SpliceRescue> = None;
-    for (jidx, first_junc) in juncs.iter().enumerate() {
-        if first_junc.st < win_st || first_junc.en > win_en || first_junc.en <= first_junc.st {
-            continue;
-        }
-        let junc_st = (first_junc.st - win_st) as usize;
-        let max_prefix = junc_st.min(qseq.len());
-        for prefix_len in (1..=max_prefix).rev() {
-            if prefix_len < 8 {
-                break;
-            }
-            if tseq[junc_st - prefix_len..junc_st] != qseq[..prefix_len] {
-                continue;
-            }
-            let mut cigar = Vec::new();
-            append_cigar(&mut cigar, &[(prefix_len as u32) << 4]);
-            append_cigar(
-                &mut cigar,
-                &[((first_junc.en - first_junc.st) as u32) << 4 | 3],
-            );
-            if let Some(rescue) = extend_annotated_junction_chain(
-                opt,
-                win_st,
-                win_en,
-                &tseq,
-                qseq,
-                juncs,
-                jidx + 1,
-                first_junc.en,
-                prefix_len,
-                first_junc.st - prefix_len as i32,
-                cigar,
-                1,
-            ) {
-                let replace = best
-                    .as_ref()
-                    .map(|b| rescue.rs < b.rs || (rescue.rs == b.rs && rescue.re > b.re))
-                    .unwrap_or(true);
-                if replace {
-                    best = Some(rescue);
-                }
-                break;
-            }
-        }
-    }
-
-    for ts_off in 0..win_len {
-        if ts_off + min_first_exon > win_len || qseq.first() != tseq.get(ts_off) {
-            continue;
-        }
-        let mut q = 0usize;
-        let mut t = ts_off;
-        let mut mrun = 0usize;
-        let mut cigar = Vec::new();
-        let mut n_introns = 0i32;
-        while q < qseq.len() {
-            if t < win_len && qseq[q] == tseq[t] {
-                q += 1;
-                t += 1;
-                mrun += 1;
-                continue;
-            }
-            let abs_t = win_st + t as i32;
-            let Some(j) = juncs.iter().find(|j| j.st == abs_t && j.en > j.st) else {
-                break;
-            };
-            if mrun > 0 {
-                cigar.push((mrun as u32) << 4);
-                mrun = 0;
-            }
-            cigar.push(((j.en - j.st) as u32) << 4 | 3);
-            t = (j.en - win_st) as usize;
-            n_introns += 1;
-            if t > win_len {
-                break;
-            }
-        }
-        if q == qseq.len() {
-            if mrun > 0 {
-                cigar.push((mrun as u32) << 4);
-            }
-            let matched: i32 = cigar
-                .iter()
-                .filter(|&&c| (c & 0xf) == 0)
-                .map(|&c| (c >> 4) as i32)
-                .sum();
-            if matched != qseq.len() as i32 || n_introns == 0 {
-                continue;
-            }
-            let re = win_st + t as i32;
-            let splice_bonus = n_introns * (opt.junc_bonus - splice_rescue_cost(opt));
-            let rescue = SpliceRescue {
-                rs: win_st + ts_off as i32,
-                re,
-                cigar,
-                bonus: splice_bonus,
-            };
-            let replace = best
-                .as_ref()
-                .map(|b| rescue.rs < b.rs || (rescue.rs == b.rs && rescue.re > b.re))
-                .unwrap_or(true);
-            if replace {
-                best = Some(rescue);
-            }
-        }
-    }
-    best
-}
-
-#[allow(clippy::too_many_arguments)]
-fn extend_annotated_junction_chain(
-    opt: &MapOpt,
-    win_st: i32,
-    win_en: i32,
-    tseq: &[u8],
-    qseq: &[u8],
-    juncs: &[crate::junc::JuncIntv],
-    next_jidx: usize,
-    t_abs: i32,
-    q_off: usize,
-    rs: i32,
-    cigar: Vec<u32>,
-    n_introns: i32,
-) -> Option<SpliceRescue> {
-    if t_abs < win_st || t_abs > win_en || q_off > qseq.len() {
-        return None;
-    }
-    let t_loc = (t_abs - win_st) as usize;
-    let remaining = qseq.len() - q_off;
-    if t_loc + remaining <= tseq.len() && tseq[t_loc..t_loc + remaining] == qseq[q_off..] {
-        let mut final_cigar = cigar;
-        append_cigar(&mut final_cigar, &[(remaining as u32) << 4]);
-        let splice_bonus = n_introns * (opt.junc_bonus - splice_rescue_cost(opt));
-        return Some(SpliceRescue {
-            rs,
-            re: t_abs + remaining as i32,
-            cigar: final_cigar,
-            bonus: splice_bonus,
-        });
-    }
-
-    for (jidx, j) in juncs.iter().enumerate().skip(next_jidx) {
-        if j.st < t_abs || j.en > win_en || j.en <= j.st {
-            continue;
-        }
-        let exon_len = (j.st - t_abs) as usize;
-        if q_off + exon_len > qseq.len() {
-            continue;
-        }
-        if t_loc + exon_len > tseq.len() {
-            continue;
-        }
-        if tseq[t_loc..t_loc + exon_len] != qseq[q_off..q_off + exon_len] {
-            continue;
-        }
-        let mut next_cigar = cigar.clone();
-        append_cigar(&mut next_cigar, &[(exon_len as u32) << 4]);
-        append_cigar(&mut next_cigar, &[((j.en - j.st) as u32) << 4 | 3]);
-        if let Some(rescue) = extend_annotated_junction_chain(
-            opt,
-            win_st,
-            win_en,
-            tseq,
-            qseq,
-            juncs,
-            jidx + 1,
-            j.en,
-            q_off + exon_len,
-            rs,
-            next_cigar,
-            n_introns + 1,
-        ) {
-            return Some(rescue);
-        }
-    }
-    None
-}
-
-fn rescue_exact_single_intron(
-    opt: &MapOpt,
-    mi: &MmIdx,
-    rid: u32,
-    qseq: &[u8],
-    current_rs: i32,
-    current_re: i32,
-    rev: bool,
-) -> Option<SpliceRescue> {
-    let qlen = qseq.len();
-    if qlen < 50 || qlen > 100_000 {
-        return None;
-    }
-    let ref_len = mi.seqs.get(rid as usize)?.len as i32;
-    let max_intron = opt.max_gap_ref.max(opt.max_gap).max(6);
-    let flank = (qlen as i32 + max_intron).min(1_000_000);
-    let win_st = (current_rs - flank).max(0);
-    let win_en = (current_re + flank).min(ref_len);
-    let win_len = (win_en - win_st) as usize;
-    if win_len > 50_000 {
-        return None;
-    }
-    if win_len < qlen + 6 {
-        return None;
-    }
-
-    let mut tseq = vec![0u8; win_len];
-    mi.getseq(rid, win_st as u32, win_en as u32, &mut tseq);
-
-    let min_exon = opt.min_chain_score.max(15) as usize;
-    let mut best: Option<(usize, usize, usize, u8, i32)> = None;
-    for ts_off in 0..win_len {
-        if ts_off + min_exon >= win_len {
-            break;
-        }
-        let mut prefix = 0usize;
-        while prefix < qlen && ts_off + prefix < win_len && qseq[prefix] == tseq[ts_off + prefix] {
-            prefix += 1;
-        }
-        if prefix < min_exon {
-            continue;
-        }
-        let max_split = prefix.min(qlen.saturating_sub(min_exon));
-        for split in min_exon..=max_split {
-            let donor = ts_off + split;
-            let remaining = qlen - split;
-            if remaining < min_exon {
-                continue;
-            }
-            let min_acc = donor + 6;
-            let max_acc = (donor + max_intron as usize).min(win_len.saturating_sub(remaining));
-            if min_acc > max_acc {
-                continue;
-            }
-            for acc in min_acc..=max_acc {
-                if tseq[acc] != qseq[split] {
-                    continue;
-                }
-                if tseq[acc..acc + remaining] != qseq[split..] {
-                    continue;
-                }
-                let intron_len = (acc - donor) as i32;
-                let abs_donor = win_st + donor as i32;
-                let strand = annotated_junction_strand(mi, rid, abs_donor, abs_donor + intron_len)
-                    .max(infer_splice_strand(
-                        opt, mi, rid, abs_donor, intron_len, rev,
-                    ));
-                if strand == 0
-                    && opt.flag.intersects(
-                        crate::flags::MapFlags::SPLICE_FOR | crate::flags::MapFlags::SPLICE_REV,
-                    )
-                {
-                    continue;
-                }
-                let splice_cost = splice_rescue_cost(opt);
-                let bonus =
-                    if annotated_junction_strand(mi, rid, abs_donor, abs_donor + intron_len) != 0 {
-                        opt.junc_bonus - splice_cost
-                    } else {
-                        -splice_cost
-                    };
-                let candidate = (ts_off, split, acc, strand, bonus);
-                let replace = best
-                    .as_ref()
-                    .map(|b| split > b.1 || (split == b.1 && remaining > qlen - b.1))
-                    .unwrap_or(true);
-                if replace {
-                    best = Some(candidate);
-                }
-            }
-        }
-    }
-
-    let (ts_off, split, acc, _strand, bonus) = best?;
-    let intron_len = acc - (ts_off + split);
-    let suffix = qlen - split;
-    let mut cigar = Vec::with_capacity(3);
-    cigar.push(((split as u32) << 4) | 0);
-    cigar.push(((intron_len as u32) << 4) | 3);
-    cigar.push(((suffix as u32) << 4) | 0);
-    Some(SpliceRescue {
-        rs: win_st + ts_off as i32,
-        re: win_st + (acc + suffix) as i32,
-        cigar,
-        bonus,
-    })
 }
 
 fn annotate_splice_cigar(
@@ -2116,107 +1966,6 @@ fn revcomp_pair(pair: &mut [u8; 2]) {
     }
 }
 
-fn normalize_annotated_long_deletion(
-    opt: &MapOpt,
-    mi: &MmIdx,
-    rid: u32,
-    qseq: &[u8],
-    rs: &mut i32,
-    qs: &mut i32,
-    cigar: &mut Vec<u32>,
-) -> bool {
-    if !opt.flag.contains(crate::flags::MapFlags::SPLICE) {
-        return false;
-    }
-    let Some(db) = mi.junc_db.as_ref() else {
-        return false;
-    };
-    let Some(juncs) = db.juncs.get(rid as usize) else {
-        return false;
-    };
-    if juncs.is_empty() || cigar.is_empty() {
-        return false;
-    }
-
-    let mut t_off = *rs;
-    let mut candidate: Option<(usize, i32, i32, i32)> = None;
-    for (idx, &c) in cigar.iter().enumerate() {
-        let op = c & 0xf;
-        let len = (c >> 4) as i32;
-        match op {
-            0 | 7 | 8 | 2 | 3 => {
-                if op == CigarOp::Del as u32 && len >= 50 {
-                    for j in juncs {
-                        let j_len = j.en - j.st;
-                        let delta = j.st - t_off;
-                        if j_len == len && (-3..=3).contains(&delta) {
-                            candidate = Some((idx, j.st, j.en, delta));
-                            break;
-                        }
-                    }
-                    if candidate.is_some() {
-                        break;
-                    }
-                }
-                t_off += len;
-            }
-            _ => {}
-        }
-    }
-
-    let Some((idx, j_st, j_en, delta)) = candidate else {
-        return false;
-    };
-    if delta != 0 {
-        if idx == 0 || idx + 1 >= cigar.len() {
-            return false;
-        }
-        let prev_op = cigar[idx - 1] & 0xf;
-        let next_op = cigar[idx + 1] & 0xf;
-        if !matches!(prev_op, 0 | 7 | 8) || !matches!(next_op, 0 | 7 | 8) {
-            return false;
-        }
-        let shift = delta.unsigned_abs();
-        if delta > 0 {
-            if (cigar[idx + 1] >> 4) <= shift {
-                return false;
-            }
-            cigar[idx - 1] += shift << 4;
-            cigar[idx + 1] -= shift << 4;
-        } else {
-            if (cigar[idx - 1] >> 4) <= shift {
-                return false;
-            }
-            cigar[idx - 1] -= shift << 4;
-            cigar[idx + 1] += shift << 4;
-        }
-    }
-    cigar[idx] = ((j_en - j_st) as u32) << 4 | CigarOp::NSkip as u32;
-
-    let mut extended = 0;
-    while extended < 5 && *qs > 0 && *rs > 0 {
-        let Some(first) = cigar.first_mut() else {
-            break;
-        };
-        if !matches!(*first & 0xf, 0 | 7 | 8) {
-            break;
-        }
-        let mut rb = [4u8; 1];
-        if mi.getseq(rid, (*rs - 1) as u32, *rs as u32, &mut rb) != 1 {
-            break;
-        }
-        let qb = qseq[(*qs - 1) as usize];
-        if qb != rb[0] {
-            break;
-        }
-        *rs -= 1;
-        *qs -= 1;
-        *first += 1 << 4;
-        extended += 1;
-    }
-    true
-}
-
 fn annotated_junction_strand(mi: &MmIdx, rid: u32, st: i32, en: i32) -> u8 {
     let Some(ref db) = mi.junc_db else {
         return 0;
@@ -2256,6 +2005,13 @@ fn infer_splice_strand(opt: &MapOpt, mi: &MmIdx, rid: u32, st: i32, len: i32, re
         && mi.getseq(rid, st as u32, (st + 2) as u32, &mut donor) == 2
         && mi.getseq(rid, (st + len - 2) as u32, (st + len) as u32, &mut acceptor) == 2
     {
+        // Interpret splice motifs in read traversal order, matching the
+        // reverse-path normalization already used by splice_signal_penalty().
+        if rev {
+            revcomp_pair(&mut donor);
+            revcomp_pair(&mut acceptor);
+            std::mem::swap(&mut donor, &mut acceptor);
+        }
         let plus = matches!(
             (donor[0], donor[1], acceptor[0], acceptor[1]),
             (2, 3, 0, 2) | (2, 1, 0, 2) | (0, 3, 0, 1)
@@ -2363,6 +2119,7 @@ pub fn align1_inv(
         opt,
         q_align,
         t_align,
+        None,
         mat,
         bw,
         opt.zdrop,
@@ -2691,7 +2448,6 @@ pub fn align_skeleton(
             && opt.flag.contains(crate::flags::MapFlags::SPLICE_REV)
         {
             let mut r_for = r.clone();
-            let mut r_rev = r.clone();
             let splits_for = align1(
                 opt,
                 mi,
@@ -2703,27 +2459,33 @@ pub fn align_skeleton(
                 &mat,
                 crate::flags::MapFlags::SPLICE_FOR,
             );
-            let splits_rev = align1(
-                opt,
-                mi,
-                qlen,
-                &qseq_fwd,
-                &qseq_rev,
-                &mut r_rev,
-                &mut *a,
-                &mat,
-                crate::flags::MapFlags::SPLICE_REV,
-            );
-            let dp_for = r_for.extra.as_ref().map(|p| p.dp_score).unwrap_or(i32::MIN);
-            let dp_rev = r_rev.extra.as_ref().map(|p| p.dp_score).unwrap_or(i32::MIN);
-            let (mut chosen, chosen_splits, trans_strand) = if dp_for > dp_rev {
-                (r_for, splits_for, 1u8)
-            } else if dp_for < dp_rev {
-                (r_rev, splits_rev, 2u8)
-            } else if (qlen + dp_for) & 1 == 0 {
-                (r_for, splits_for, 3u8)
+            let skip_rev = should_skip_rev_sr_rna(opt, qlen, &r, &r_for);
+            let (mut chosen, chosen_splits, trans_strand) = if skip_rev {
+                (r_for, splits_for, 0u8)
             } else {
-                (r_rev, splits_rev, 3u8)
+                let mut r_rev = r.clone();
+                let splits_rev = align1(
+                    opt,
+                    mi,
+                    qlen,
+                    &qseq_fwd,
+                    &qseq_rev,
+                    &mut r_rev,
+                    &mut *a,
+                    &mat,
+                    crate::flags::MapFlags::SPLICE_REV,
+                );
+                let dp_for = r_for.extra.as_ref().map(|p| p.dp_score).unwrap_or(i32::MIN);
+                let dp_rev = r_rev.extra.as_ref().map(|p| p.dp_score).unwrap_or(i32::MIN);
+                if dp_for > dp_rev {
+                    (r_for, splits_for, 1u8)
+                } else if dp_for < dp_rev {
+                    (r_rev, splits_rev, 2u8)
+                } else if (qlen + dp_for) & 1 == 0 {
+                    (r_for, splits_for, 3u8)
+                } else {
+                    (r_rev, splits_rev, 3u8)
+                }
             };
             if let Some(extra) = chosen.extra.as_mut() {
                 // Match C align.c:1124 — `r->p->trans_strand = trans_strand;`
@@ -2767,10 +2529,6 @@ pub fn align_skeleton(
             }
             splits
         };
-        if opt.flag.contains(crate::flags::MapFlags::SPLICE) && mi.junc_db.is_some() {
-            let ts = r.extra.as_ref().map(|p| p.trans_strand as i32).unwrap_or(0);
-            crate::jump::jump_split(mi, opt, qlen, &qseq_fwd, &mut r, ts);
-        }
         new_regs.push(r);
         // Insert splits right after current position so they're processed next
         for (j, sr) in splits.into_iter().enumerate() {
@@ -2808,7 +2566,6 @@ pub fn align_skeleton(
     if !(opt.flag.intersects(
         crate::flags::MapFlags::SR
             | crate::flags::MapFlags::SR_RNA
-            | crate::flags::MapFlags::SPLICE
             | crate::flags::MapFlags::ALL_CHAINS,
     )) && opt.split_prefix.is_none()
         && qlen >= opt.rank_min_len
@@ -2864,6 +2621,20 @@ pub fn align_skeleton(
     // Return thread-local buffers
     ALIGN_QSEQ_FWD.with(|c| *c.borrow_mut() = qseq_fwd);
     ALIGN_QSEQ_REV.with(|c| *c.borrow_mut() = qseq_rev);
+}
+
+#[inline]
+fn should_skip_rev_sr_rna(
+    opt: &MapOpt,
+    qlen: i32,
+    original: &AlignReg,
+    forward: &AlignReg,
+) -> bool {
+    opt.flag.contains(crate::flags::MapFlags::SR_RNA)
+        && original.qe - original.qs == original.re - original.rs
+        && forward.qe - forward.qs == forward.re - forward.rs
+        && forward.qs == 0
+        && forward.qe == qlen
 }
 
 #[cfg(test)]
@@ -2998,6 +2769,28 @@ mod tests {
     }
 
     #[test]
+    fn test_infer_splice_strand_normalizes_rev_orientation() {
+        let mi = MmIdx::build_from_str(
+            5,
+            3,
+            false,
+            14,
+            &[b"AAAAGCTTTTAGAAAA" as &[u8]],
+            Some(&["chr1"]),
+        )
+        .unwrap();
+        let mut opt = MapOpt::default();
+        opt.flag |= crate::flags::MapFlags::SPLICE
+            | crate::flags::MapFlags::SPLICE_FOR
+            | crate::flags::MapFlags::SPLICE_REV;
+
+        // Genomic left->right motif is GC-AG. For a reverse-aligned read this
+        // should be normalized to CT-GC and classified as transcript-same
+        // (`ts:A:+`, encoded as 1) rather than the opposite strand.
+        assert_eq!(infer_splice_strand(&opt, &mi, 0, 4, 8, true), 1);
+    }
+
+    #[test]
     fn test_simd_dispatch() {
         let mut mat = Vec::new();
         gen_simple_mat(5, &mut mat, 2, 4, 1);
@@ -3016,5 +2809,48 @@ mod tests {
             KswFlags::empty(),
         );
         assert_eq!(crate::align::cigar_to_string(&ez.cigar), "8M");
+    }
+
+    #[test]
+    fn test_should_skip_rev_sr_rna_matches_c_guard() {
+        let mut opt = MapOpt::default();
+        opt.flag |= crate::flags::MapFlags::SR_RNA;
+
+        let original = AlignReg {
+            qs: 10,
+            qe: 110,
+            rs: 20,
+            re: 120,
+            ..Default::default()
+        };
+        let forward = AlignReg {
+            qs: 0,
+            qe: 150,
+            rs: 500,
+            re: 650,
+            ..Default::default()
+        };
+        assert!(should_skip_rev_sr_rna(&opt, 150, &original, &forward));
+
+        let mut not_full = forward.clone();
+        not_full.qe = 149;
+        assert!(!should_skip_rev_sr_rna(&opt, 150, &original, &not_full));
+
+        let mut not_ungapped = original.clone();
+        not_ungapped.re = 121;
+        assert!(!should_skip_rev_sr_rna(
+            &opt,
+            150,
+            &not_ungapped,
+            &forward
+        ));
+
+        let no_sr_rna = MapOpt::default();
+        assert!(!should_skip_rev_sr_rna(
+            &no_sr_rna,
+            150,
+            &original,
+            &forward
+        ));
     }
 }

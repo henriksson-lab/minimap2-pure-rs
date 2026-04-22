@@ -473,7 +473,7 @@ fn update_dp_max_inner(qlen: i32, regs: &mut [AlignReg], frac: f32, a: i32, b: i
         return;
     }
     let mi = max_i as usize;
-    if (regs[mi].qe - regs[mi].qs) < (qlen as f64 * frac as f64) as i32 {
+    if ((regs[mi].qe - regs[mi].qs) as f64) < qlen as f64 * frac as f64 {
         return;
     }
     if (max2 as f64) < max as f64 * frac as f64 {
@@ -674,6 +674,16 @@ pub fn set_mapq(
             th.input_i64(r.n_sub as i64);
             th.input_i64(r.inv as i64);
             th.input_i64(r.is_spliced as i64);
+            th.input_i64(r.score0 as i64);
+            th.input_i64(r.mlen as i64);
+            th.input_i64(r.blen as i64);
+            let (dp_max, dp_max2) = if let Some(ref p) = r.extra {
+                (p.dp_max, p.dp_max2)
+            } else {
+                (0, 0)
+            };
+            th.input_i64(dp_max as i64);
+            th.input_i64(dp_max2 as i64);
         }
         th
     };
