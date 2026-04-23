@@ -2,9 +2,7 @@
 
 A pure Rust reimplementation of [minimap2](https://github.com/lh3/minimap2) v2.30 (commit `de3c6ec`), the versatile sequence alignment program for long and short reads.
 
-It is not yet validated as a drop-in replacement for every minimap2 workflow; see [Validation scope](#validation-scope).
-
-** More issues found in an audit 2026-04-18. Not ready for production **
+* 2026-04-23: This code is now ready to be tested on real data, but stay vigilant to possible bugs. Compare with original minimap on your data before considering for serious use. Up to 4x faster than original code, which is suspicious. More testing needed to verify this claim
 
 
 ## This is an LLM-mediated faithful (hopefully) translation, not the original code!
@@ -24,7 +22,6 @@ But:
 
 * **This approach should still be considered experimental**. The LLM technology is immature and has sharp corners. But there are opportunities to reap, and the genie is not going back into the bottle. This translation is as much aimed to learn how to improve the technology and get feedback on the results.
 * Translations are not endorsed by the original authors unless otherwise noted. **Do not send bug reports to the original developers**. Use our Github issues page instead.
-* **Do not trust the benchmarks on this page**. They are used to help evaluate the translation. If you want improved performance, you generally have to use this code as a library, and use the additional tricks it offers. We generally accept performance losses in order to reduce our dependency issues
 * **Check the original Github pages for information about the package**. This README is kept sparse on purpose. It is not meant to be the primary source of information
 * **If you are the author of the original code and wish to move to Rust, you can obtain ownership of this repository and crate**. Until then, our commitment is to offer an as-faithful-as-possible translation of a snapshot of your code. If we find serious bugs, we will report them to you. Otherwise we will just replicate them, to ensure comparability across studies that claim to use package XYZ v.666. Think of this like a fancy Ubuntu .deb-package of your software - that is how we treat it
 
@@ -399,110 +396,6 @@ such as exact PAF, normalized PAF core fields, normalized SAM core fields, or
 SAM headers plus core fields.
 
 ## Performance
-
-### Whole-genome HiFi benchmark (hg38, `map-hifi`, 8 threads)
-
-Real hg38 primary assembly (3.1 GB FASTA, 194 contigs) × **20,370 unique
-HG002 HiFi reads** (374 MB FASTQ, mean 9.6 kb, downloaded from GIAB CCS 10kb
-SMRT cell `m54238_180628_014238`). 3 interleaved rounds per scenario, warm
-page cache, same NFS mount. Both binaries built with matched aggressive
-optimization (`-O3 -march=native -flto` for C, `opt-level=3` + LTO +
-`codegen-units=1` + `-C target-cpu=native` for Rust), both invoked with
-`-t 8`. Median wall time:
-
-| Scenario | C (2.30-r1290) | Rust (2.30-rs) | Δ |
-|----------|---------------:|---------------:|------:|
-| Index build + write (FASTA → `.mmi`) | 48.87 s | **42.09 s** | **-14 %** |
-| Load `.mmi` + map 20,370 reads | 20.29 s | **16.26 s** | **-20 %** |
-
-Stage breakdown of the load+map scenario (from tool-internal checkpoints):
-
-| Stage | C | Rust | Δ |
-|-------|--:|-----:|------:|
-| `.mmi` load | 12.8 s | **10.3 s** | -19 % |
-| Mapping (20,370 reads done) | 7.6 s | **5.3 s** | **-30 %** |
-
-**Where Rust is actually faster:**
-
-- **Index build (-14 %)** comes from the three-stage reader / sketcher /
-  dispatcher pipeline + `par_iter_mut` bucket post-process running with less
-  scheduling overhead than C's `kt_pipeline` + `kt_for` (Rust averages 175 %
-  CPU vs C's 148 % on 8 threads during indexing).
-- **`.mmi` load (-19 %)** comes from bulk-byte reads and hashbrown
-  deserialization vs C's khash.
-- **Mapping (-30 %)** on diverse real reads, with Rust at 234 % CPU vs C's
-  179 %. An earlier, less realistic benchmark that replicated 679 reads
-  30× showed the stages essentially tied — the homogeneous data was hiding
-  the real picture by saturating cache in both tools. Diverse reads exercise
-  branch prediction, cache, and parallelism more realistically.
-
-**Output parity on real data:** byte-identical PAF on both the diverse
-20,370-read file (24,978 lines) and the 843-line 679-read file. Known parity
-items now include: FASTQ truncation rejection, singleton-in-hash `.mmi`
-layout, `chn_pen_gap` / `chn_pen_skip` f64-intermediate rounding, and stable
-x-only radix sort of chain anchors before the RMQ re-chain rescue path
-(matching `radix_sort_128x` semantics vs Rust's `(x, y)` default `Ord`).
-The last three were caught by the tracehash integration — see the notes on
-optional parity tracing under `--features tracehash`.
-
-Rust `.mmi` files are **byte-size-identical to C's** (3.50 GB) and
-cross-readable: C minimap2 loads Rust-produced indexes and produces its own
-native PAF output from them.
-
-**Benchmark fairness caveats:**
-
-- Reads are all from one SMRT cell. Broader cross-library diversity would be
-  needed for production claims.
-- NFS and CPU frequency scaling add timing noise; interleaved C/Rust rounds
-  mitigate drift but do not eliminate it.
-
-### Fixture benchmarks
-
-```bash
-scripts/benchmark_speed.py --threads 1 --reps 7 --warmups 1
-scripts/benchmark_speed.py --threads 1,4,8 --reps 3 --warmups 1 --case chr11
-```
-
-Both binaries built with matched aggressive optimization: C with
-`-O3 -march=native -flto`, Rust with `--release`, `-C target-cpu=native`,
-LTO, and `codegen-units = 1`. Ratios below are Rust wall time divided by C
-minimap2 wall time; values below `1.00x` mean Rust was faster.
-
-| Case | Threads | C median | Rust median | Rust/C median |
-|------|---------|----------|-------------|---------------|
-| MT default PAF | 1 | 0.0163s | 0.0224s | 1.37x |
-| MT default PAF+cg | 1 | 0.0289s | 0.0383s | 1.32x |
-| MT map-hifi PAF+cg | 1 | 0.0306s | 0.0409s | 1.34x |
-| MT map-hifi SAM | 1 | 0.0343s | 0.0415s | 1.21x |
-| chr11 single HiFi PAF+cg | 1 | 0.0560s | 0.0612s | 1.09x |
-| chr11 single HiFi PAF+cg | 4 | 0.0633s | 0.0654s | 1.03x |
-| chr11 single HiFi PAF+cg | 8 | 0.0631s | 0.0684s | 1.08x |
-| chr11 x200 HiFi PAF+cg | 1 | 3.8396s | 3.7036s | **0.96x** |
-| chr11 x200 HiFi SAM | 1 | 4.0683s | 3.8622s | **0.95x** |
-| chr11 x200 HiFi PAF+cg | 4 | 1.1511s | 1.1629s | 1.01x |
-| chr11 x200 HiFi SAM | 4 | 1.1373s | 1.0781s | **0.95x** |
-| chr11 x200 HiFi PAF+cg | 8 | 0.6473s | 0.6168s | **0.95x** |
-| chr11 x200 HiFi SAM | 8 | 0.6566s | 0.6442s | **0.98x** |
-
-The MT cases are upstream mitochondrial smoke fixtures (~20–40 ms total)
-and are too small for performance claims; startup (rayon thread-pool init,
-allocator setup, argv parsing) dominates and shows Rust's constant
-overhead. The `chr11 single` cases (~60 ms) are still partly startup-bound.
-The `chr11 x200` cases (3–4 s single-threaded) are where per-read
-throughput dominates and Rust matches or slightly beats C on matched
-compile flags. Broad performance claims should be based on real-data
-manifests — see the whole-genome HiFi benchmark above.
-
-For real-data benchmarking, copy `scripts/benchmark_manifest.example.tsv`, fill
-in local FASTA/FASTQ paths, and run:
-
-```bash
-scripts/benchmark_speed.py --threads 1,8 --reps 5 --warmups 1 \
-  --manifest scripts/benchmark_manifest.local.tsv --no-fixtures
-```
-
-A useful manifest should include at least HiFi reads, ONT reads, paired short
-reads, assembly contigs, and one splice/RNA case when splice performance matters.
 
 ### Yeast direct-RNA splice benchmarks
 
