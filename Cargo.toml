@@ -27,7 +27,7 @@ env_logger = "0.11"
 thiserror = "2"
 flate2 = "1"
 memchr = "2"
-tracehash-rs = { path = "/data/henriksson/github/claude/tracehash", optional = true, default-features = false, features = ["derive"] }
+tracehash-rs = { version = "0.2.0", optional = true, default-features = false, features = ["derive"] }
 
 [features]
 default = []
