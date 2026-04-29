@@ -2421,7 +2421,7 @@ pub fn align_skeleton(
     // (not regs[] order) so lower-`as` regions settle first. Critical: without
     // sorting by `as` first, later regions overwrite anchors before earlier
     // regions have been copied.
-    {
+    let n_a = {
         let n = regs.len();
         let mut aux: Vec<(i32, usize)> = (0..n).map(|i| (regs[i].as_, i)).collect();
         aux.sort_by_key(|&(a_, _)| a_);
@@ -2435,7 +2435,8 @@ pub fn align_skeleton(
             regs[i].as_ = as_cur;
             as_cur += cnt as i32;
         }
-    }
+        as_cur as usize
+    };
 
     // Align each region, collecting any split regions.
     let mut work: Vec<AlignReg> = regs.drain(..).collect();
@@ -2455,7 +2456,7 @@ pub fn align_skeleton(
                 &qseq_fwd,
                 &qseq_rev,
                 &mut r_for,
-                &mut *a,
+                &mut a[..n_a],
                 &mat,
                 crate::flags::MapFlags::SPLICE_FOR,
             );
@@ -2471,7 +2472,7 @@ pub fn align_skeleton(
                     &qseq_fwd,
                     &qseq_rev,
                     &mut r_rev,
-                    &mut *a,
+                    &mut a[..n_a],
                     &mat,
                     crate::flags::MapFlags::SPLICE_REV,
                 );
@@ -2514,7 +2515,7 @@ pub fn align_skeleton(
                 &qseq_fwd,
                 &qseq_rev,
                 &mut r,
-                &mut *a,
+                &mut a[..n_a],
                 &mat,
                 splice_strand,
             );

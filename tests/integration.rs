@@ -1088,6 +1088,35 @@ fn test_chr11_cigar_vs_c() {
     );
 }
 
+/// Regression for Zenodo record 19703025 / HG002 ONT mapping against hg38.
+///
+/// This read exposed a parity bug where Rust scanned stale anchors past
+/// minimap2's squeezed `n_a` boundary and selected a shorter right-extension
+/// window for a secondary chr18 alignment.
+#[test]
+fn test_zenodo_19703025_ont_hg38_a6933_vs_c() {
+    if !Path::new("minimap2/minimap2").exists() {
+        return;
+    }
+    let reference = "/tmp/hg38.fa.gz";
+    let query = ".tmp/zenodo19703025/ONT-a6933.fa";
+    if !Path::new(reference).exists() || !Path::new(query).exists() {
+        return;
+    }
+
+    let args = ["-c", "-x", "lr:hq", "-t", "1", reference, query];
+    let c_lines = non_header_lines(&command_stdout("minimap2/minimap2", &args));
+    let rust_lines = non_header_lines(&command_stdout(rust_bin(), &args));
+
+    assert_eq!(
+        c_lines,
+        rust_lines,
+        "Zenodo 19703025 ONT/hg38 single-read PAF output differs\nC:\n{}\nRust:\n{}",
+        c_lines.join("\n"),
+        rust_lines.join("\n")
+    );
+}
+
 #[test]
 fn test_cli_fixture_parity_matrix() {
     if !Path::new("minimap2/minimap2").exists()
