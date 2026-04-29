@@ -8,6 +8,26 @@ homepage = "https://github.com/henriksson-lab/minimap2-pure-rs"
 repository = "https://github.com/henriksson-lab/minimap2-pure-rs"
 categories = ["command-line-utilities", "science"]
 keywords = ["bioinformatics", "alignment", "genomics", "minimap2", "sequencing"]
+exclude = [
+    ".cargo/**",
+    ".codex",
+    ".codex/**",
+    ".gitignore",
+    ".tmp/**",
+    ".tmp-rustc/**",
+    ".tracehash/**",
+    "1750",
+    "CLAUDE.md",
+    "Cargo.toml.orig",
+    "Makefile",
+    "TODO.md",
+    "data/conformance/**",
+    "minimap2/**",
+    "perf.data",
+    "perf.data.old",
+    "target-prof/**",
+    "target-trace/**",
+]
 
 [[bin]]
 name = "minimap2-pure-rs"
