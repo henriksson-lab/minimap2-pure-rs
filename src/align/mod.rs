@@ -812,7 +812,8 @@ fn fix_bad_ends_splice(
             let log_gap = (last_gap as f64).ln();
             let q_span_a = ((a[last_idx].y >> 32) & 0xff) as f64;
             if q_span_a < log_gap + ext_shift {
-                let score = seed_ext_score(opt, mi, mat, qlen, qseq_fwd, qseq_rev, &a[last_idx]) as f64;
+                let score =
+                    seed_ext_score(opt, mi, mat, qlen, qseq_fwd, qseq_rev, &a[last_idx]) as f64;
                 if mat00 > 0.0 && score / mat00 < log_gap + ext_shift {
                     cnt1 -= 1;
                 }
@@ -1092,7 +1093,11 @@ fn align1(
         th.output_i64(r.score as i64);
         th.output_i64(r.extra.as_ref().map(|p| p.dp_max as i64).unwrap_or(-1));
         th.output_i64(r.extra.as_ref().map(|p| p.dp_score as i64).unwrap_or(-1));
-        let n_cig = r.extra.as_ref().map(|p| p.cigar.0.len() as i64).unwrap_or(0);
+        let n_cig = r
+            .extra
+            .as_ref()
+            .map(|p| p.cigar.0.len() as i64)
+            .unwrap_or(0);
         th.output_i64(n_cig);
         if let Some(ref p) = r.extra {
             for c in &p.cigar.0 {
@@ -1359,17 +1364,12 @@ fn align1_impl(
             // Match C align.c:794 —  inversion-split children get the
             // relaxed zdrop_inv so their left extension isn't prematurely
             // truncated by the standard z-drop.
-            let left_zdrop = if r.split_inv { opt.zdrop_inv } else { opt.zdrop };
-            let left_junc = splice_junc_window(
-                mi,
-                opt,
-                rid,
-                rs0,
-                rs,
-                rev,
-                splice_strand,
-                true,
-            );
+            let left_zdrop = if r.split_inv {
+                opt.zdrop_inv
+            } else {
+                opt.zdrop
+            };
+            let left_junc = splice_junc_window(mi, opt, rid, rs0, rs, rev, splice_strand, true);
             if let Some(start) = prep_start {
                 add_profile_time(&ALIGN_PROFILE_LEFT_PREP_NS, start);
             }
@@ -1482,16 +1482,8 @@ fn align1_impl(
                     &mut tseq_buf[..gap_tlen],
                 );
                 let qsub = &qseq[cur_qs as usize..next_qe as usize];
-                let gap_junc = splice_junc_window(
-                    mi,
-                    opt,
-                    rid,
-                    cur_rs,
-                    next_re,
-                    rev,
-                    splice_strand,
-                    false,
-                );
+                let gap_junc =
+                    splice_junc_window(mi, opt, rid, cur_rs, next_re, rev, splice_strand, false);
                 if let Some(start) = prep_start {
                     add_profile_time(&ALIGN_PROFILE_GAP_PREP_NS, start);
                 }
@@ -1673,27 +1665,19 @@ fn align1_impl(
     if !dropped && cur_qs < qe0 && cur_rs < re0 {
         let rext = (re0 - cur_rs) as usize;
         let qext = (qe0 - cur_qs) as usize;
-            if rext > 0 && qext > 0 && (cur_qs as usize) < qseq.len() && (qe0 as usize) <= qseq.len() {
-                let prep_start = if align_profile_enabled() {
-                    Some(Instant::now())
-                } else {
-                    None
-                };
-                if rext > tseq_buf.len() {
-                    tseq_buf.resize(rext, 0);
-                }
-                mi.getseq(rid, cur_rs as u32, re0 as u32, &mut tseq_buf[..rext]);
-                let qsub = &qseq[cur_qs as usize..qe0 as usize];
-                let right_junc = splice_junc_window(
-                    mi,
-                    opt,
-                    rid,
-                    cur_rs,
-                    re0,
-                    rev,
-                    splice_strand,
-                    false,
-                );
+        if rext > 0 && qext > 0 && (cur_qs as usize) < qseq.len() && (qe0 as usize) <= qseq.len() {
+            let prep_start = if align_profile_enabled() {
+                Some(Instant::now())
+            } else {
+                None
+            };
+            if rext > tseq_buf.len() {
+                tseq_buf.resize(rext, 0);
+            }
+            mi.getseq(rid, cur_rs as u32, re0 as u32, &mut tseq_buf[..rext]);
+            let qsub = &qseq[cur_qs as usize..qe0 as usize];
+            let right_junc =
+                splice_junc_window(mi, opt, rid, cur_rs, re0, rev, splice_strand, false);
             if let Some(start) = prep_start {
                 add_profile_time(&ALIGN_PROFILE_RIGHT_PREP_NS, start);
             }
@@ -1905,12 +1889,8 @@ fn annotate_splice_cigar(
             }
             3 => {
                 is_spliced = true;
-                let strand = flip_for_read_strand(annotated_junction_strand(
-                    mi,
-                    rid,
-                    t_off,
-                    t_off + len,
-                ));
+                let strand =
+                    flip_for_read_strand(annotated_junction_strand(mi, rid, t_off, t_off + len));
                 if strand == 1 || strand == 2 {
                     trans_strand = strand;
                     bonus += opt.junc_bonus;
@@ -2839,19 +2819,11 @@ mod tests {
 
         let mut not_ungapped = original.clone();
         not_ungapped.re = 121;
-        assert!(!should_skip_rev_sr_rna(
-            &opt,
-            150,
-            &not_ungapped,
-            &forward
-        ));
+        assert!(!should_skip_rev_sr_rna(&opt, 150, &not_ungapped, &forward));
 
         let no_sr_rna = MapOpt::default();
         assert!(!should_skip_rev_sr_rna(
-            &no_sr_rna,
-            150,
-            &original,
-            &forward
+            &no_sr_rna, 150, &original, &forward
         ));
     }
 }

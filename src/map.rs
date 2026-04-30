@@ -146,10 +146,8 @@ pub fn map_query(mi: &MmIdx, opt: &MapOpt, qname: &str, qseq: &[u8]) -> MapResul
     // once at assignment. Rust's `f32 * 0.01` would infer 0.01 as f32 and
     // round twice, producing a one-ULP drift (caught by tracehash on
     // mg_lchain_dp inputs).
-    let chn_pen_gap =
-        (opt.chain_gap_scale as f64 * 0.01 * mi.k as f64) as f32;
-    let chn_pen_skip =
-        (opt.chain_skip_scale as f64 * 0.01 * mi.k as f64) as f32;
+    let chn_pen_gap = (opt.chain_gap_scale as f64 * 0.01 * mi.k as f64) as f32;
+    let chn_pen_skip = (opt.chain_skip_scale as f64 * 0.01 * mi.k as f64) as f32;
 
     let max_chain_gap_qry = if is_sr {
         qlen.max(opt.max_gap)
@@ -557,10 +555,8 @@ fn chain_fragment(
         opt.max_gap
     };
     // See note at first call site: match C's double-precision intermediate.
-    let chn_pen_gap =
-        (opt.chain_gap_scale as f64 * 0.01 * mi.k as f64) as f32;
-    let chn_pen_skip =
-        (opt.chain_skip_scale as f64 * 0.01 * mi.k as f64) as f32;
+    let chn_pen_gap = (opt.chain_gap_scale as f64 * 0.01 * mi.k as f64) as f32;
+    let chn_pen_skip = (opt.chain_skip_scale as f64 * 0.01 * mi.k as f64) as f32;
 
     let mut seed_result = seed::collect_matches(
         mi,

@@ -174,8 +174,7 @@ pub fn write_sam_record_with_comment(
 
     // Match C format.c:587,628 — secondary records (FLAG 0x100) emit '*'
     // for SEQ and QUAL unless --secondary-seq is set.
-    let skip_secondary_seq =
-        (sam_flag & 0x100) != 0 && !flag.contains(MapFlags::SECONDARY_SEQ);
+    let skip_secondary_seq = (sam_flag & 0x100) != 0 && !flag.contains(MapFlags::SECONDARY_SEQ);
 
     // SEQ
     if flag.contains(MapFlags::NO_QUAL) || qseq.is_empty() || skip_secondary_seq {

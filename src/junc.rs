@@ -107,7 +107,12 @@ fn parse_comma_i32s(s: &str) -> Vec<i32> {
         .collect()
 }
 
-fn read_bed_intervals(mi: &mut MmIdx, path: &str, read_junc: bool, min_sc: i32) -> io::Result<Vec<Vec<JuncIntv>>> {
+fn read_bed_intervals(
+    mi: &mut MmIdx,
+    path: &str,
+    read_junc: bool,
+    min_sc: i32,
+) -> io::Result<Vec<Vec<JuncIntv>>> {
     let reader = open_maybe_gzip(path)?;
     let mut per_ref = vec![Vec::new(); mi.seqs.len()];
 
@@ -140,7 +145,10 @@ fn read_bed_intervals(mi: &mut MmIdx, path: &str, read_junc: bool, min_sc: i32) 
             continue;
         }
         if min_sc >= 0 {
-            let score = fields.get(4).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+            let score = fields
+                .get(4)
+                .and_then(|s| s.parse::<i32>().ok())
+                .unwrap_or(0);
             if score < min_sc {
                 continue;
             }

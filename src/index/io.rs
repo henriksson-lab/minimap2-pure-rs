@@ -1,8 +1,8 @@
 use super::MmIdx;
 use crate::flags::IdxFlags;
-use crate::junc::{JumpDb, JumpEdge};
 #[cfg(test)]
 use crate::junc::JUNC_ANNO;
+use crate::junc::{JumpDb, JumpEdge};
 use crate::types::{IdxSeq, MM_IDX_MAGIC};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 

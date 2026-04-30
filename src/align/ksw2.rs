@@ -1086,7 +1086,11 @@ pub fn ksw_exts2_rot(
     let wildcard = m_u - 1;
     let sc_n = {
         let v = mat[m_u * m_u - 1] as i32;
-        if v == 0 { -(e as i32) } else { v }
+        if v == 0 {
+            -(e as i32)
+        } else {
+            v
+        }
     };
 
     // long_thres mirrors C: long_thres = (q2-q)/e - 1; bumped by 1 if needed.
@@ -1101,8 +1105,12 @@ pub fn ksw_exts2_rot(
     let mut min_sc = mat[1] as i32;
     for k in 1..(m_u * m_u) {
         let v = mat[k] as i32;
-        if v > max_sc { max_sc = v; }
-        if v < min_sc { min_sc = v; }
+        if v > max_sc {
+            max_sc = v;
+        }
+        if v < min_sc {
+            min_sc = v;
+        }
     }
     if -min_sc > 2 * (q_i + e as i32) {
         return ez;
@@ -1132,7 +1140,9 @@ pub fn ksw_exts2_rot(
 
     let mut scratch = KSW_EXTS2_SCRATCH.with(|c| std::mem::take(&mut *c.borrow_mut()));
     scratch.donor.resize(tlen_padded as usize, (-sp[3]) as i8);
-    scratch.acceptor.resize(tlen_padded as usize, (-sp[3]) as i8);
+    scratch
+        .acceptor
+        .resize(tlen_padded as usize, (-sp[3]) as i8);
     scratch.u.resize(tlen_padded as usize, 0);
     scratch.v.resize(tlen_padded as usize, 0);
     scratch.x.resize(tlen_padded as usize, 0);
@@ -1158,7 +1168,11 @@ pub fn ksw_exts2_rot(
             let mut z = 3i32;
             if flag.contains(KswFlags::SPLICE_FOR) {
                 if target[t + 1] == 2 && target[t + 2] == 3 {
-                    z = if target[t + 3] == 0 || target[t + 3] == 2 { -1 } else { 0 };
+                    z = if target[t + 3] == 0 || target[t + 3] == 2 {
+                        -1
+                    } else {
+                        0
+                    };
                 } else if target[t + 1] == 2 && target[t + 2] == 1 {
                     z = 1;
                 } else if target[t + 1] == 0 && target[t + 2] == 3 {
@@ -1166,7 +1180,11 @@ pub fn ksw_exts2_rot(
                 }
             } else if flag.contains(KswFlags::SPLICE_REV) {
                 if target[t + 1] == 1 && target[t + 2] == 3 {
-                    z = if target[t + 3] == 0 || target[t + 3] == 2 { -1 } else { 0 };
+                    z = if target[t + 3] == 0 || target[t + 3] == 2 {
+                        -1
+                    } else {
+                        0
+                    };
                 } else if target[t + 1] == 2 && target[t + 2] == 3 {
                     z = 2;
                 }
@@ -1177,13 +1195,21 @@ pub fn ksw_exts2_rot(
             let mut z = 3i32;
             if flag.contains(KswFlags::SPLICE_FOR) {
                 if target[t - 1] == 0 && target[t] == 2 {
-                    z = if target[t - 2] == 1 || target[t - 2] == 3 { -1 } else { 0 };
+                    z = if target[t - 2] == 1 || target[t - 2] == 3 {
+                        -1
+                    } else {
+                        0
+                    };
                 } else if target[t - 1] == 0 && target[t] == 1 {
                     z = 2;
                 }
             } else if flag.contains(KswFlags::SPLICE_REV) {
                 if target[t - 1] == 0 && target[t] == 1 {
-                    z = if target[t - 2] == 1 || target[t - 2] == 3 { -1 } else { 0 };
+                    z = if target[t - 2] == 1 || target[t - 2] == 3 {
+                        -1
+                    } else {
+                        0
+                    };
                 } else if target[t - 1] == 2 && target[t] == 1 {
                     z = 1;
                 } else if target[t - 1] == 0 && target[t] == 3 {
@@ -1197,13 +1223,21 @@ pub fn ksw_exts2_rot(
             let mut z = 3i32;
             if flag.contains(KswFlags::SPLICE_FOR) {
                 if target[t + 1] == 2 && target[t + 2] == 0 {
-                    z = if target[t + 3] == 1 || target[t + 3] == 3 { -1 } else { 0 };
+                    z = if target[t + 3] == 1 || target[t + 3] == 3 {
+                        -1
+                    } else {
+                        0
+                    };
                 } else if target[t + 1] == 1 && target[t + 2] == 0 {
                     z = 2;
                 }
             } else if flag.contains(KswFlags::SPLICE_REV) {
                 if target[t + 1] == 1 && target[t + 2] == 0 {
-                    z = if target[t + 3] == 1 || target[t + 3] == 3 { -1 } else { 0 };
+                    z = if target[t + 3] == 1 || target[t + 3] == 3 {
+                        -1
+                    } else {
+                        0
+                    };
                 } else if target[t + 1] == 1 && target[t + 2] == 2 {
                     z = 1;
                 } else if target[t + 1] == 3 && target[t + 2] == 0 {
@@ -1216,7 +1250,11 @@ pub fn ksw_exts2_rot(
             let mut z = 3i32;
             if flag.contains(KswFlags::SPLICE_FOR) {
                 if target[t - 1] == 3 && target[t] == 2 {
-                    z = if target[t - 2] == 0 || target[t - 2] == 2 { -1 } else { 0 };
+                    z = if target[t - 2] == 0 || target[t - 2] == 2 {
+                        -1
+                    } else {
+                        0
+                    };
                 } else if target[t - 1] == 1 && target[t] == 2 {
                     z = 1;
                 } else if target[t - 1] == 3 && target[t] == 0 {
@@ -1224,7 +1262,11 @@ pub fn ksw_exts2_rot(
                 }
             } else if flag.contains(KswFlags::SPLICE_REV) {
                 if target[t - 1] == 3 && target[t] == 1 {
-                    z = if target[t - 2] == 0 || target[t - 2] == 2 { -1 } else { 0 };
+                    z = if target[t - 2] == 0 || target[t - 2] == 2 {
+                        -1
+                    } else {
+                        0
+                    };
                 } else if target[t - 1] == 3 && target[t] == 2 {
                     z = 2;
                 }
@@ -1234,26 +1276,36 @@ pub fn ksw_exts2_rot(
     }
     if let Some(junc) = junc {
         if flag.contains(KswFlags::SPLICE_SCORE) {
-            let donor_val = if flag.contains(KswFlags::SPLICE_FOR) == !flag.contains(KswFlags::REV_CIGAR) {
-                0u8
-            } else {
-                1u8
-            };
-            let limit = target.len().saturating_sub(1).min(junc.len().saturating_sub(1));
+            let donor_val =
+                if flag.contains(KswFlags::SPLICE_FOR) == !flag.contains(KswFlags::REV_CIGAR) {
+                    0u8
+                } else {
+                    1u8
+                };
+            let limit = target
+                .len()
+                .saturating_sub(1)
+                .min(junc.len().saturating_sub(1));
             for t in 0..limit {
-                donor[t] = (donor[t] as i32 + if junc[t + 1] == 0xff || (junc[t + 1] & 1) != donor_val {
-                    -(junc_pen as i32)
-                } else {
-                    ((junc[t + 1] >> 1) as i32) - 64
-                }) as i8;
-                acceptor[t] = (acceptor[t] as i32 + if junc[t + 1] == 0xff || (junc[t + 1] & 1) == donor_val {
-                    -(junc_pen as i32)
-                } else {
-                    ((junc[t + 1] >> 1) as i32) - 64
-                }) as i8;
+                donor[t] = (donor[t] as i32
+                    + if junc[t + 1] == 0xff || (junc[t + 1] & 1) != donor_val {
+                        -(junc_pen as i32)
+                    } else {
+                        ((junc[t + 1] >> 1) as i32) - 64
+                    }) as i8;
+                acceptor[t] = (acceptor[t] as i32
+                    + if junc[t + 1] == 0xff || (junc[t + 1] & 1) == donor_val {
+                        -(junc_pen as i32)
+                    } else {
+                        ((junc[t + 1] >> 1) as i32) - 64
+                    }) as i8;
             }
         } else if !flag.contains(KswFlags::REV_CIGAR) {
-            for t in 0..target.len().saturating_sub(1).min(junc.len().saturating_sub(1)) {
+            for t in 0..target
+                .len()
+                .saturating_sub(1)
+                .min(junc.len().saturating_sub(1))
+            {
                 if (flag.contains(KswFlags::SPLICE_FOR) && (junc[t + 1] & 1) != 0)
                     || (flag.contains(KswFlags::SPLICE_REV) && (junc[t + 1] & 8) != 0)
                 {
@@ -1268,7 +1320,11 @@ pub fn ksw_exts2_rot(
                 }
             }
         } else {
-            for t in 0..target.len().saturating_sub(1).min(junc.len().saturating_sub(1)) {
+            for t in 0..target
+                .len()
+                .saturating_sub(1)
+                .min(junc.len().saturating_sub(1))
+            {
                 if (flag.contains(KswFlags::SPLICE_FOR) && (junc[t + 1] & 2) != 0)
                     || (flag.contains(KswFlags::SPLICE_REV) && (junc[t + 1] & 4) != 0)
                 {
@@ -1341,8 +1397,12 @@ pub fn ksw_exts2_rot(
         // Determine anti-diagonal column range [st0, en0]. C lines 219-228.
         let mut st = 0i32;
         let mut en = tlen - 1;
-        if st < r - qlen + 1 { st = r - qlen + 1; }
-        if en > r { en = r; }
+        if st < r - qlen + 1 {
+            st = r - qlen + 1;
+        }
+        if en > r {
+            en = r;
+        }
         let st0 = st;
         let en0 = en;
         offs.push(st0);
@@ -1351,7 +1411,11 @@ pub fn ksw_exts2_rot(
         // Boundary state at column st0-1 (corresponds to SIMD x1/x21/v1).
         let (x1, x21, v1) = if st0 > 0 {
             if st0 - 1 >= last_st && st0 - 1 <= last_en {
-                (x[(st0 - 1) as usize], x2[(st0 - 1) as usize], v[(st0 - 1) as usize])
+                (
+                    x[(st0 - 1) as usize],
+                    x2[(st0 - 1) as usize],
+                    v[(st0 - 1) as usize],
+                )
             } else {
                 (neg_qe as i8, neg_q2 as i8, neg_qe as i8)
             }
@@ -1404,13 +1468,12 @@ pub fn ksw_exts2_rot(
                 0usize
             };
             unsafe {
-                *s_ptr.add(t as usize) = if !flag.contains(KswFlags::GENERIC_SC)
-                    && (qb == wildcard || tb == wildcard)
-                {
-                    sc_n
-                } else {
-                    *mat_ptr.add(qb * m_u + tb) as i32
-                };
+                *s_ptr.add(t as usize) =
+                    if !flag.contains(KswFlags::GENERIC_SC) && (qb == wildcard || tb == wildcard) {
+                        sc_n
+                    } else {
+                        *mat_ptr.add(qb * m_u + tb) as i32
+                    };
             }
         }
 
@@ -1432,7 +1495,11 @@ pub fn ksw_exts2_rot(
         // chunk range, else fall back to initial -qe boundary.
         let (mut prev_x, mut prev_v, mut prev_x2) = if chunk_st > 0 {
             if chunk_st - 1 >= last_st && chunk_st - 1 <= last_en {
-                (x[(chunk_st - 1) as usize], v[(chunk_st - 1) as usize], x2[(chunk_st - 1) as usize])
+                (
+                    x[(chunk_st - 1) as usize],
+                    v[(chunk_st - 1) as usize],
+                    x2[(chunk_st - 1) as usize],
+                )
             } else {
                 (neg_qe as i8, neg_qe as i8, neg_q2 as i8)
             }
@@ -1469,15 +1536,33 @@ pub fn ksw_exts2_rot(
             let mut z = z_init;
             let mut state: u8 = 0;
             if !is_right {
-                if a > z { z = a; state = 1; }
-                if b > z { z = b; state = 2; }
-                if a2a > z { z = a2a; state = 3; }
+                if a > z {
+                    z = a;
+                    state = 1;
+                }
+                if b > z {
+                    z = b;
+                    state = 2;
+                }
+                if a2a > z {
+                    z = a2a;
+                    state = 3;
+                }
             } else {
                 // RIGHT-alignment: ties prefer gap states. Matches C lines
                 // 350-355: blendv with `z > X ? d : new_state`.
-                if !(z > a) { z = a; state = 1; }
-                if !(z > b) { z = b; state = 2; }
-                if !(z > a2a) { z = a2a; state = 3; }
+                if !(z > a) {
+                    z = a;
+                    state = 1;
+                }
+                if !(z > b) {
+                    z = b;
+                    state = 2;
+                }
+                if !(z > a2a) {
+                    z = a2a;
+                    state = 3;
+                }
             }
             // Save the un-clamped match score before the post-block2 deltas
             // update u/v.
@@ -1565,13 +1650,25 @@ pub fn ksw_exts2_rot(
                 // 327/330/340): bit set iff respective gap path was active
                 // (>0 for x/y, > donor[t] for x2).
                 if !is_right {
-                    if a_pos { d |= 0x08; }
-                    if b_pos { d |= 0x10; }
-                    if a2_wins_donor { d |= 0x20; }
+                    if a_pos {
+                        d |= 0x08;
+                    }
+                    if b_pos {
+                        d |= 0x10;
+                    }
+                    if a2_wins_donor {
+                        d |= 0x20;
+                    }
                 } else {
-                    if a_post >= 0 { d |= 0x08; }
-                    if b_post >= 0 { d |= 0x10; }
-                    if a2_post >= donor_t { d |= 0x20; }
+                    if a_post >= 0 {
+                        d |= 0x08;
+                    }
+                    if b_post >= 0 {
+                        d |= 0x10;
+                    }
+                    if a2_post >= donor_t {
+                        d |= 0x20;
+                    }
                 }
                 bt[row_bt_start + (t - st0) as usize] = d;
             }
@@ -1602,10 +1699,15 @@ pub fn ksw_exts2_rot(
             if r > 0 {
                 // Special-case the last element: H[en0] = en0>0? H[en0-1] + u[en0] : H[en0] + v[en0]
                 if en0 > 0 {
-                    let new_h = unsafe { *h_ptr.add((en0 - 1) as usize) + *u_ptr.add(en0 as usize) as i32 };
-                    unsafe { *h_ptr.add(en0 as usize) = new_h; }
+                    let new_h =
+                        unsafe { *h_ptr.add((en0 - 1) as usize) + *u_ptr.add(en0 as usize) as i32 };
+                    unsafe {
+                        *h_ptr.add(en0 as usize) = new_h;
+                    }
                 } else {
-                    unsafe { *h_ptr.add(en0 as usize) += *v_ptr.add(en0 as usize) as i32; }
+                    unsafe {
+                        *h_ptr.add(en0 as usize) += *v_ptr.add(en0 as usize) as i32;
+                    }
                 }
                 max_h = unsafe { *h_ptr.add(en0 as usize) };
                 max_t = en0;
@@ -1617,7 +1719,9 @@ pub fn ksw_exts2_rot(
                 let en1 = st0 + (en0 - st0) / 4 * 4;
                 // First update H[t] for all t in [st0, en0) (independent of order).
                 for t in st0..en0 {
-                    unsafe { *h_ptr.add(t as usize) += *v_ptr.add(t as usize) as i32; }
+                    unsafe {
+                        *h_ptr.add(t as usize) += *v_ptr.add(t as usize) as i32;
+                    }
                 }
                 // Then scan in C SIMD order.
                 for lane in 0..4 {
@@ -1639,7 +1743,9 @@ pub fn ksw_exts2_rot(
                     }
                 }
             } else {
-                unsafe { *h_ptr.add(0) = *v_ptr.add(0) as i32 - qe_i; }
+                unsafe {
+                    *h_ptr.add(0) = *v_ptr.add(0) as i32 - qe_i;
+                }
                 max_h = unsafe { *h_ptr.add(0) };
                 max_t = 0;
             }
@@ -1796,8 +1902,12 @@ pub fn ksw_exts2_rot(
                 let en = off_ends[r as usize];
                 let row_bt_start = bt_row_starts[r as usize];
                 let mut force_state: i32 = -1;
-                if j < st { force_state = 2; }
-                if j > en { force_state = 1; }
+                if j < st {
+                    force_state = 2;
+                }
+                if j > en {
+                    force_state = 1;
+                }
                 let tmp: u8 = if force_state < 0 {
                     bt[row_bt_start + (j - st) as usize]
                 } else {
@@ -1822,18 +1932,38 @@ pub fn ksw_exts2_rot(
                 //   state 3 → N_SKIP if min_intron > 0, else DEL, --j
                 //   state 2 → INS, --i (consume query)
                 match state {
-                    0 => { push_cigar_fn(&mut cigar, 0, 1); i -= 1; j -= 1; }
-                    1 => { push_cigar_fn(&mut cigar, 2, 1); j -= 1; }
-                    3 if long_thres > 0 => { push_cigar_fn(&mut cigar, 3, 1); j -= 1; }
-                    3 => { push_cigar_fn(&mut cigar, 2, 1); j -= 1; }
-                    _ => { push_cigar_fn(&mut cigar, 1, 1); i -= 1; }
+                    0 => {
+                        push_cigar_fn(&mut cigar, 0, 1);
+                        i -= 1;
+                        j -= 1;
+                    }
+                    1 => {
+                        push_cigar_fn(&mut cigar, 2, 1);
+                        j -= 1;
+                    }
+                    3 if long_thres > 0 => {
+                        push_cigar_fn(&mut cigar, 3, 1);
+                        j -= 1;
+                    }
+                    3 => {
+                        push_cigar_fn(&mut cigar, 2, 1);
+                        j -= 1;
+                    }
+                    _ => {
+                        push_cigar_fn(&mut cigar, 1, 1);
+                        i -= 1;
+                    }
                 }
             }
             // Trailing leftovers (C ksw2.h:156-157). C checks `i >=
             // min_intron_len` where i is residual target; we name j our
             // target. Pushed length is j + 1 columns.
             if j >= 0 {
-                let op = if long_thres > 0 && j >= long_thres { 3 } else { 2 };
+                let op = if long_thres > 0 && j >= long_thres {
+                    3
+                } else {
+                    2
+                };
                 push_cigar_fn(&mut cigar, op, j + 1);
             }
             if i >= 0 {
@@ -1850,14 +1980,7 @@ pub fn ksw_exts2_rot(
     ez
 }
 
-fn ksw_apply_zdrop_rot(
-    ez: &mut KswResult,
-    h: i32,
-    r: i32,
-    t: i32,
-    zdrop: i32,
-    e: i8,
-) -> bool {
+fn ksw_apply_zdrop_rot(ez: &mut KswResult, h: i32, r: i32, t: i32, zdrop: i32, e: i8) -> bool {
     if h > ez.max {
         ez.max = h;
         ez.max_t = t;
@@ -2263,8 +2386,14 @@ mod tests {
         let rot = ksw_exts2_rot(
             &query, &target, 5, &mat, 2, 1, 4, 9, 50, 200, -1, 0, 0, None, flag,
         );
-        eprintln!("scalar: score={} max={} cigar={:?}", scalar.score, scalar.max, scalar.cigar);
-        eprintln!("rot:    score={} max={} cigar={:?}", rot.score, rot.max, rot.cigar);
+        eprintln!(
+            "scalar: score={} max={} cigar={:?}",
+            scalar.score, scalar.max, scalar.cigar
+        );
+        eprintln!(
+            "rot:    score={} max={} cigar={:?}",
+            rot.score, rot.max, rot.cigar
+        );
     }
 
     #[test]
@@ -2307,21 +2436,46 @@ mod tests {
             0, 1, 2, 3, // ACGT
         ];
         let ez_for = ksw_exts2(
-            &query, &target, 5, &mat,
-            2, 1, 4, 9, 50, 200, -1,
+            &query,
+            &target,
+            5,
+            &mat,
+            2,
+            1,
+            4,
+            9,
+            50,
+            200,
+            -1,
             KswFlags::SPLICE_FOR | KswFlags::SPLICE_CMPLX,
         );
         let ez_rev = ksw_exts2(
-            &query, &target, 5, &mat,
-            2, 1, 4, 9, 50, 200, -1,
+            &query,
+            &target,
+            5,
+            &mat,
+            2,
+            1,
+            4,
+            9,
+            50,
+            200,
+            -1,
             KswFlags::SPLICE_REV | KswFlags::SPLICE_CMPLX,
         );
-        eprintln!("FOR score={} max={} cigar={:?}", ez_for.score, ez_for.max, ez_for.cigar);
-        eprintln!("REV score={} max={} cigar={:?}", ez_rev.score, ez_rev.max, ez_rev.cigar);
+        eprintln!(
+            "FOR score={} max={} cigar={:?}",
+            ez_for.score, ez_for.max, ez_for.cigar
+        );
+        eprintln!(
+            "REV score={} max={} cigar={:?}",
+            ez_rev.score, ez_rev.max, ez_rev.cigar
+        );
         assert!(
             ez_for.score > ez_rev.score,
             "FOR should outscore REV on canonical GT-AG intron, got FOR={} REV={}",
-            ez_for.score, ez_rev.score
+            ez_for.score,
+            ez_rev.score
         );
     }
 }

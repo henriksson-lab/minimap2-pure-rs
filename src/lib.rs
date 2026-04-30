@@ -44,6 +44,7 @@ pub mod align;
 pub mod aligner;
 pub mod bseq;
 pub mod chain;
+pub mod cli;
 pub mod esterr;
 pub mod flags;
 pub mod format;
