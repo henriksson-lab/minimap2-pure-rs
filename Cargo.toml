@@ -1,6 +1,6 @@
 [package]
 name = "minimap2-pure-rs"
-version = "0.5.1"
+version = "0.1.0"
 edition = "2021"
 description = "Pure Rust reimplementation of minimap2 sequence aligner"
 license = "MIT"
@@ -21,10 +21,12 @@ exclude = [
     "Cargo.toml.orig",
     "Makefile",
     "TODO.md",
-    "data/conformance/**",
+    "ccc_mapping.toml",
+    "data/**",
     "minimap2/**",
     "perf.data",
     "perf.data.old",
+    "scripts/**",
     "target-prof/**",
     "target-trace/**",
 ]
