@@ -2,7 +2,7 @@
 
 A pure Rust reimplementation of [minimap2](https://github.com/lh3/minimap2) v2.30 (commit `de3c6ec`), the versatile sequence alignment program for long and short reads.
 
-* 2026-04-23: This code is now ready to be tested on real data, but stay vigilant to possible bugs. Compare with original minimap on your data before considering for serious use. Up to 4x faster than original code, which is suspicious. More testing needed to verify this claim
+* 2026-05-15: This code is now ready to be tested on real data, but stay vigilant to possible bugs. About 10-20% faster than original code on a large genome, possibly faster on smaller genomes.
 
 
 ## This is an LLM-mediated faithful (hopefully) translation, not the original code!
@@ -397,36 +397,35 @@ SAM headers plus core fields.
 
 ## Performance
 
-### Yeast direct-RNA splice benchmarks
+### HiFi end-to-end benchmark vs C minimap2
 
-The splice/RNA path now has exact PAF parity against vendored C minimap2 on the
-bundled larger yeast direct-RNA regression datasets and on one full raw run.
-These runs were all executed with `-t 1` for both binaries.
+Comparison against vendored C minimap2 (`2.30-r1290`) using identical inputs,
+preset, and thread count. Query: 720 MB real HG002 HiFi reads (~30x coverage
+subset). Reference: hg38, with each tool loading its own prebuilt `.mmi`
+index. Run with `-x map-hifi -t 8` on a 40-core box. Page cache was
+pre-warmed; reported numbers are the second of two back-to-back runs.
+Output written to disk.
 
-Quick checked loop on the bundled RNA fixtures:
+**PAF only (mapping, no alignment)**
 
-```bash
-scripts/benchmark_yeast_splice.py --reads 5000 --reps 1 --warmups 0 --check-output --metric cpu
-scripts/benchmark_yeast_splice.py --reads 50000 --reps 1 --warmups 0 --check-output --metric cpu
-```
+| | Wall | Peak RSS | Records |
+|---|-----:|---------:|--------:|
+| C minimap2 | 21.67 s | 6.10 GiB | 25,290 |
+| Rust       | **17.08 s** | **5.98 GiB** | 25,290 |
+| Rust / C   | **0.79x** | **0.98x** | — |
 
-Standalone full raw comparison:
+**PAF + CIGAR (`-c`, full alignment)**
 
-```bash
-scripts/run_raw_rna_full_compare.sh
-```
+| | Wall | Peak RSS | Records |
+|---|-----:|---------:|--------:|
+| C minimap2 | 94.67 s | 9.58 GiB | 90,790 |
+| Rust       | **87.04 s** | **7.22 GiB** | 90,790 |
+| Rust / C   | **0.92x** | **0.75x** | — |
 
-Validated results from those runs:
-
-| Dataset | Output parity | C wall | Rust wall | C CPU | Rust CPU | Rust/C CPU |
-|---------|---------------|-------:|----------:|------:|---------:|-----------:|
-| `rna.5000.fq` | exact PAF match | 13.981 s | **3.399 s** | 13.976 s | **5.185 s** | **0.37x** |
-| `rna.50000.fq` | exact PAF match | 92.018 s | **20.750 s** | 91.889 s | **22.675 s** | **0.25x** |
-| `SRR30335018_1.fastq.gz` | exact PAF match | 1429.71 s | **302.81 s** | 1427.28 s | **301.92 s** | **0.21x** |
-
-For these splice benchmarks, values below `1.00x` mean Rust used less CPU time
-than the local vendored C build. On this machine and these tested RNA inputs,
-Rust was substantially faster while still matching C output exactly.
+Record counts and PAF file sizes are identical in both modes. CIGAR-mode wall
+time has ~5-10 s run-to-run variance, so treat the wall times as roughly
+equal there; the durable difference is RSS — Rust uses ~25% less peak memory
+when emitting CIGAR.
 
 Key factors: SSE4.1+AVX2 SIMD extension alignment, SSE2 low-level local
 alignment (`ksw_ll_i16`), bounds-check elimination in hot loops, thread-local
@@ -446,6 +445,17 @@ system allocator and avoids the extra dependency.
 
 MIT
 
-## Acknowledgments
+## Citing
 
-Based on [minimap2](https://github.com/lh3/minimap2) by Heng Li.
+This project is a translation of [minimap2](https://github.com/lh3/minimap2) by
+Heng Li. If you use it in published work, please cite the original minimap2
+papers:
+
+> Li, H. (2018). Minimap2: pairwise alignment for nucleotide sequences.
+> *Bioinformatics*, 34(18), 3094–3100.
+> [doi:10.1093/bioinformatics/bty191](https://doi.org/10.1093/bioinformatics/bty191)
+
+> Li, H. (2021). New strategies to improve minimap2 alignment accuracy.
+> *Bioinformatics*, 37(23), 4572–4574.
+> [doi:10.1093/bioinformatics/btab705](https://doi.org/10.1093/bioinformatics/btab705)
+
