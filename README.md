@@ -433,6 +433,15 @@ alignment (`ksw_ll_i16`), bounds-check elimination in hot loops, thread-local
 buffer reuse to minimize allocations, and const-generic kernel specialization.
 See [OPTIMIZATION.md](OPTIMIZATION.md) for details.
 
+### Allocator note
+
+Swapping the global allocator to [`mimalloc`](https://crates.io/crates/mimalloc)
+in the binary makes no measurable difference on the chr11 HiFi workload (1, 4,
+and 8 threads, x200 and x800 input sizes) -- within roughly +/-2% of the system
+glibc allocator on every configuration. Thread-local buffer reuse in the hot
+path already keeps allocation pressure low, so the default build uses the
+system allocator and avoids the extra dependency.
+
 ## License
 
 MIT
