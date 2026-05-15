@@ -46,8 +46,18 @@ fn chain_bk_end(max_drop: i32, z: &[Mm128], f: &[i32], p: &[i64], t: &mut [i32],
 /// Backtrack chains from DP arrays. Matches mg_chain_backtrack() from lchain.c.
 ///
 /// Returns (u, v) where:
-/// - u[i] = score<<32 | n_anchors for chain i
+/// - `u[i]` = `score<<32 | n_anchors` for chain `i`
 /// - v contains anchor indices in chain order
+///
+/// # Parameters
+/// * `n` - number of anchors (length of `f` and `p`)
+/// * `f` - per-anchor optimal DP score ending at that anchor
+/// * `p` - predecessor index for each anchor (`-1` = chain head)
+/// * `v_out` - output buffer for selected anchor indices in chain order
+/// * `t` - scratch flag array (size `n`); used and reset internally
+/// * `min_cnt` - minimum anchors required to keep a chain
+/// * `min_sc` - minimum chain score to keep a chain
+/// * `max_drop` - max score drop tolerated during chain end backtracking (z-drop)
 pub fn chain_backtrack(
     n: i64,
     f: &[i32],
@@ -140,6 +150,11 @@ pub fn chain_backtrack(
 
 /// Compact the anchor array so chains are stored contiguously, sorted by target position.
 /// Matches compact_a() from lchain.c.
+///
+/// # Parameters
+/// * `u` - chain descriptors `score<<32 | n_anchors`; reordered in place by target position
+/// * `v` - anchor indices in backtrack order (reverse-of-chain) for each chain
+/// * `a` - source anchor array indexed by `v[]`
 pub fn compact_a(u: &mut Vec<u64>, v: &[i32], a: &[Mm128]) -> Vec<Mm128> {
     let n_u = u.len();
     // Write chains to b[] (reversing within each chain since backtrack gives reverse order)

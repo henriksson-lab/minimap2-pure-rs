@@ -6,9 +6,18 @@ use crate::hit;
 use crate::sort::radix_sort_u64;
 use crate::types::AlignReg;
 
-/// Paired-end pairing: find the best concordant pair and update MAPQ.
+/// Paired-end pairing: find the best concordant pair and update MAPQ on both ends.
 ///
-/// Matches mm_pair() from pe.c.
+/// Matches `mm_pair()` from pe.c. Operates on two segments only (`regs.len() == 2`).
+///
+/// # Parameters
+/// * `max_gap_ref` - maximum reference gap between the two ends to count as concordant
+/// * `pe_bonus` - DP-score bonus applied to the concordant-pair threshold
+/// * `sub_diff` - score margin used to count near-best alternate pairs
+/// * `match_sc` - match score from `MapOpt::a` (drives MAPQ scaling)
+/// * `qlens` - per-segment query lengths
+/// * `n_regs` - per-segment count of regions to consider (typically `regs[s].len()`)
+/// * `regs` - per-segment region lists; updated in place (`proper_frag`, `mapq`, `sam_pri`)
 pub fn pair(
     max_gap_ref: i32,
     pe_bonus: i32,
@@ -247,8 +256,22 @@ fn set_pe_thru(qlens: &[i32], n_regs: &[usize], regs: &mut [Vec<AlignReg>]) {
     }
 }
 
-/// Select secondary hits for multi-segment mode.
-/// Matches mm_select_sub_multi() from pe.c.
+/// Filter secondary hits for multi-segment (paired-end) mode. Matches `mm_select_sub_multi()`.
+///
+/// Uses three different score ratios depending on whether the secondary is
+/// near the primary, on the opposite side of a segment boundary, or unpaired.
+///
+/// # Parameters
+/// * `pri_ratio` - default secondary/primary score ratio
+/// * `pri1` - score ratio for same-strand, same-rid, within-`max_dist` secondaries
+/// * `pri2` - score ratio for secondaries that don't share both-segment span with the primary
+/// * `max_gap_ref` - max reference distance counted as "near" for the `pri1` rule
+/// * `min_diff` - additive score margin keeping near-best secondaries
+/// * `best_n` - maximum number of secondaries to keep
+/// * `n_segs` - number of read segments (2 for paired-end)
+/// * `qlens` - per-segment query lengths (segment boundary at `qlens[0]`)
+/// * `n_regs` - in/out region count; updated to `regs.len()` after truncation
+/// * `regs` - regions to filter in place
 pub fn select_sub_multi(
     pri_ratio: f32,
     pri1: f32,

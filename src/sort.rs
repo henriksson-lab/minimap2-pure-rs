@@ -2,6 +2,9 @@ use crate::types::Mm128;
 
 /// Radix sort for Mm128, sorting by the x field.
 /// This matches radix_sort_128x from misc.c.
+///
+/// # Parameters
+/// * `data` - slice sorted in-place by ascending `x` (minimizer hash<<8 | span)
 pub fn radix_sort_mm128(data: &mut [Mm128]) {
     if data.len() <= RS_MIN_SIZE {
         insertion_sort_mm128_x(data);
@@ -86,6 +89,9 @@ fn radix_sort_mm128_x(data: &mut [Mm128], shift: u32) {
 
 /// Radix sort for u64 (8 bytes, LSB first).
 /// This matches radix_sort_64 from misc.c.
+///
+/// # Parameters
+/// * `data` - slice sorted in-place in ascending order
 pub fn radix_sort_u64(data: &mut [u64]) {
     if data.len() < 256 {
         data.sort_unstable();
@@ -113,6 +119,10 @@ pub fn radix_sort_u64(data: &mut [u64]) {
 
 /// Selection algorithm: find the k-th smallest element in an unsorted array.
 /// Matches ks_ksmall_uint32_t. Modifies array in-place.
+///
+/// # Parameters
+/// * `arr` - non-empty slice; partially reordered around the k-th element
+/// * `k` - 0-based rank to select; must be `< arr.len()`
 pub fn ksmall_u32(arr: &mut [u32], k: usize) -> u32 {
     assert!(!arr.is_empty() && k < arr.len());
     let (_, &mut val, _) = arr.select_nth_unstable(k);

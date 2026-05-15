@@ -60,7 +60,14 @@ fn reg_set_coor(r: &mut AlignReg, qlen: i32, a: &[Mm128], is_qstrand: bool) {
     cal_fuzzy_len(r, a);
 }
 
-/// Convert chains to alignment regions. Matches mm_gen_regs().
+/// Convert chains to alignment regions, sorted by mixed score. Matches `mm_gen_regs()`.
+///
+/// # Parameters
+/// * `hash` - per-query hash used as a tie-breaker when scores collide
+/// * `qlen` - query length (used to flip coordinates on reverse-strand regions when `is_qstrand` is false)
+/// * `u` - per-chain `(score<<32 | n_anchors)` packed list from chaining
+/// * `a` - anchor array (`Mm128.x = rev<<63 | rid<<32 | ref_pos`)
+/// * `is_qstrand` - true for `QSTRAND` mode; suppresses the reverse-strand q-coordinate flip
 #[inline(never)]
 pub fn gen_regs(hash: u32, qlen: i32, u: &[u64], a: &[Mm128], is_qstrand: bool) -> Vec<AlignReg> {
     let n_u = u.len();
@@ -132,8 +139,17 @@ pub fn gen_regs(hash: u32, qlen: i32, u: &[u64], a: &[Mm128], is_qstrand: bool) 
     regs
 }
 
-/// Split a region at anchor position `n`. Matches mm_split_reg().
-/// Returns the new second region (the tail), and modifies `r` (the head) in place.
+/// Split a region at anchor position `n`. Matches `mm_split_reg()`.
+///
+/// Returns the new tail region; `r` is shortened in place to the head.
+/// Returns `None` if the split position is out of range.
+///
+/// # Parameters
+/// * `r` - region to split; modified to become the head
+/// * `n` - 0-based anchor index where the split occurs (must be `0 < n < r.cnt`)
+/// * `qlen` - query length (forwarded to `reg_set_coor`)
+/// * `a` - anchor array backing both halves
+/// * `is_qstrand` - true for `QSTRAND` mode
 pub fn split_reg(
     r: &mut AlignReg,
     n: i32,
@@ -172,7 +188,12 @@ pub fn split_reg(
     Some(r2)
 }
 
-/// Mark ALT-contig alignments. Matches mm_mark_alt().
+/// Mark regions on ALT contigs (sets `r.is_alt`). Matches `mm_mark_alt()`.
+///
+/// # Parameters
+/// * `n_alt` - number of ALT contigs; no-op if zero
+/// * `seq_is_alt` - per-reference ALT flag indexed by `rid`
+/// * `regs` - regions to annotate in place
 pub fn mark_alt(n_alt: i32, seq_is_alt: &[bool], regs: &mut [AlignReg]) {
     if n_alt == 0 {
         return;
@@ -196,7 +217,18 @@ fn alt_score(score: i32, alt_diff_frac: f32) -> i32 {
     }
 }
 
-/// Assign parent/secondary relationships. Matches mm_set_parent().
+/// Assign parent/secondary relationships among overlapping regions.
+///
+/// Matches `mm_set_parent()`. Primary regions have `parent == id`; secondaries
+/// point to their parent index.
+///
+/// # Parameters
+/// * `mask_level` - query-overlap fraction above which a region becomes secondary
+/// * `mask_len` - maximum uncovered query bases allowed when masking
+/// * `regs` - regions to annotate in place (parent/subsc/n_sub fields)
+/// * `sub_diff` - DP-score margin below the primary that still counts as a substitute
+/// * `hard_mask_level` - if true, ignore uncovered-length adjustment when masking
+/// * `alt_diff_frac` - fraction by which ALT-contig scores are penalised vs non-ALT primaries
 #[inline(never)]
 pub fn set_parent(
     mask_level: f32,
@@ -339,7 +371,13 @@ pub fn set_parent(
     }
 }
 
-/// Sort hits by DP score (or chain score). Matches mm_hit_sort().
+/// Sort hits by DP score (falling back to chain score) descending. Matches `mm_hit_sort()`.
+///
+/// Drops `cnt == 0` entries unless they carry an inversion flag.
+///
+/// # Parameters
+/// * `regs` - regions to sort in place
+/// * `alt_diff_frac` - ALT-contig score penalty fraction applied during ordering
 pub fn hit_sort(regs: &mut Vec<AlignReg>, alt_diff_frac: f32) {
     let n = regs.len();
     if n <= 1 {
@@ -367,7 +405,12 @@ pub fn hit_sort(regs: &mut Vec<AlignReg>, alt_diff_frac: f32) {
     *regs = new_regs;
 }
 
-/// Set SAM primary flags. Matches mm_set_sam_pri().
+/// Set the SAM primary flag (`sam_pri`) on exactly one primary per query.
+///
+/// Matches `mm_set_sam_pri()`. Returns the count of regions where `id == parent`.
+///
+/// # Parameters
+/// * `regs` - regions to update in place
 pub fn set_sam_pri(regs: &mut [AlignReg]) -> i32 {
     let mut n_pri = 0;
     for r in regs.iter_mut() {
@@ -381,7 +424,13 @@ pub fn set_sam_pri(regs: &mut [AlignReg]) -> i32 {
     n_pri
 }
 
-/// Keep parent/id in sync after filtering. Matches mm_sync_regs().
+/// Keep `parent`/`id` in sync after filtering reorders regions. Matches `mm_sync_regs()`.
+///
+/// Re-numbers `id` to the current position and rewires `parent` indices through
+/// the surviving `id`s, leaving orphaned children as primaries.
+///
+/// # Parameters
+/// * `regs` - regions to renumber in place
 pub fn sync_regs(regs: &mut [AlignReg]) {
     let n = regs.len();
     if n == 0 {
@@ -414,8 +463,16 @@ pub fn sync_regs(regs: &mut [AlignReg]) {
     set_sam_pri(regs);
 }
 
-/// Recalibrate dp_max based on divergence for assembly ranking.
-/// Matches mm_update_dp_max() from align.c.
+/// Recalibrate `extra.dp_max` from observed divergence for assembly-style ranking.
+///
+/// Matches `mm_update_dp_max()` from align.c.
+///
+/// # Parameters
+/// * `qlen` - query length
+/// * `regs` - regions to rescore in place (only those with `extra` populated)
+/// * `frac` - minimum query coverage fraction for the top hit before rescoring
+/// * `a` - match score
+/// * `b` - mismatch penalty
 pub fn update_dp_max(qlen: i32, regs: &mut [AlignReg], frac: f32, a: i32, b: i32) {
     // Cross-language parity probe. Wraps the entire function so a row is
     // emitted even on early returns. The probe captures (inputs | before-dp_max
@@ -532,12 +589,30 @@ fn update_dp_max_inner(qlen: i32, regs: &mut [AlignReg], frac: f32, a: i32, b: i
     }
 }
 
-/// Filter secondary hits. Matches mm_select_sub().
+/// Filter secondary hits, retaining at most `best_n` per primary. Matches `mm_select_sub()`.
+///
+/// # Parameters
+/// * `pri_ratio` - minimum secondary/primary score ratio to keep; `<= 0` disables filtering
+/// * `min_diff` - additive margin allowing slightly weaker secondaries through
+/// * `best_n` - maximum number of secondaries to keep
+/// * `regs` - regions to filter in place
 pub fn select_sub(pri_ratio: f32, min_diff: i32, best_n: i32, regs: &mut Vec<AlignReg>) {
     select_sub_with_strand(pri_ratio, min_diff, best_n, false, 0, regs);
 }
 
-/// Filter secondary hits, optionally retaining opposite-strand chains before est_err filtering.
+/// Filter secondary hits, optionally retaining opposite-strand chains for later `est_err` review.
+///
+/// Same as `select_sub` plus a strand-retention rule that keeps high-scoring
+/// reverse-strand secondaries; these get `strand_retained = true` so
+/// `filter_strand_retained` can drop them if their divergence is too high.
+///
+/// # Parameters
+/// * `pri_ratio` - minimum secondary/primary score ratio
+/// * `min_diff` - additive margin allowing slightly weaker secondaries through
+/// * `best_n` - maximum number of secondaries to keep
+/// * `check_strand` - enable the opposite-strand retention path
+/// * `min_strand_sc` - minimum chain score to qualify for strand retention
+/// * `regs` - regions to filter in place
 pub fn select_sub_with_strand(
     pri_ratio: f32,
     min_diff: i32,
@@ -596,7 +671,11 @@ pub fn select_sub_with_strand(
     }
 }
 
-/// Drop retained opposite-strand chains that are too divergent. Matches mm_filter_strand_retained().
+/// Drop opposite-strand secondaries flagged by `select_sub_with_strand` that
+/// turned out to be too divergent. Matches `mm_filter_strand_retained()`.
+///
+/// # Parameters
+/// * `regs` - regions to filter in place; consults each region's `div`
 pub fn filter_strand_retained(regs: &mut Vec<AlignReg>) {
     let n = regs.len();
     let mut k = 0usize;
@@ -616,7 +695,12 @@ pub fn filter_strand_retained(regs: &mut Vec<AlignReg>) {
     regs.truncate(k);
 }
 
-/// Filter regions by quality. Matches mm_filter_regs().
+/// Drop low-quality regions by chain count, DP score, and clipping ratio. Matches `mm_filter_regs()`.
+///
+/// # Parameters
+/// * `opt` - mapping options (`min_cnt`, `min_chain_score`, `min_dp_max`, `max_clip_ratio`)
+/// * `qlen` - query length (used for clipping ratio test)
+/// * `regs` - regions to filter in place
 pub fn filter_regs(opt: &MapOpt, qlen: i32, regs: &mut Vec<AlignReg>) {
     regs.retain(|r| {
         if !r.inv && !r.seg_split && r.cnt < opt.min_cnt {
@@ -639,7 +723,18 @@ pub fn filter_regs(opt: &MapOpt, qlen: i32, regs: &mut Vec<AlignReg>) {
     });
 }
 
-/// Compute MAPQ scores. Matches mm_set_mapq2().
+/// Compute and assign MAPQ for each primary region. Matches `mm_set_mapq2()`.
+///
+/// MAPQ is clamped to `[0, 60]`. Secondary regions get MAPQ 0. Inversions get
+/// the min of their flanking primaries.
+///
+/// # Parameters
+/// * `regs` - regions to update in place
+/// * `min_chain_sc` - minimum chain score threshold for the suboptimal-score term
+/// * `match_sc` - match score from `MapOpt::a` (drives the score-to-MAPQ scaling)
+/// * `rep_len` - repeat-occupied query length (reduces MAPQ via uniqueness ratio)
+/// * `is_sr` - short-read mode flag (alters mapq formula)
+/// * `is_splice` - splice-aware flag (alters mapq bonus for spliced primaries in SR mode)
 pub fn set_mapq(
     regs: &mut [AlignReg],
     min_chain_sc: i32,

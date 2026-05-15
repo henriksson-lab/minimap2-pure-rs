@@ -28,6 +28,9 @@ impl IdxBucket {
     }
 
     /// Add a minimizer during index construction.
+    ///
+    /// # Parameters
+    /// * `m` - packed minimizer (x = hash<<8 | span, y = rid<<32 | pos<<1 | strand)
     #[inline]
     pub fn add(&mut self, m: Mm128) {
         self.build_buf.push(m);
@@ -37,6 +40,9 @@ impl IdxBucket {
     /// `bucket_bits` is the number of bits used for bucket selection.
     ///
     /// Matches worker_post() from index.c.
+    ///
+    /// # Parameters
+    /// * `bucket_bits` - number of low hash bits used for bucket selection (stripped from key)
     pub fn post_process(&mut self, bucket_bits: i32) {
         if self.build_buf.is_empty() {
             return;
@@ -91,6 +97,9 @@ impl IdxBucket {
     /// Look up a minimizer. Returns (count, slice of positions).
     ///
     /// Matches mm_idx_get() from index.c.
+    ///
+    /// # Parameters
+    /// * `minier_key` - bucket-local key: (hash >> bucket_bits) << 1 (LSB reserved)
     #[inline]
     pub fn get(&self, minier_key: u64) -> (i32, &[u64]) {
         let h = match &self.h {

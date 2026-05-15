@@ -46,6 +46,9 @@ fn add_profile_time(counter: &AtomicU64, start: Instant) {
     counter.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
 }
 
+/// Emit the accumulated alignment profiling counters to stderr if profiling is enabled.
+///
+/// Controlled by the `MM2RS_ALIGN_PROFILE` environment variable.
 pub fn report_align_profile() {
     if !align_profile_enabled() {
         return;
@@ -73,7 +76,19 @@ pub fn report_align_profile() {
 
 /// High-level alignment interface dispatching to scalar or SIMD implementations.
 ///
-/// Single-gap affine alignment.
+/// Single-gap affine alignment (extz2).
+///
+/// # Parameters
+/// * `query` - 4-bit-encoded query bases (ACGTN -> 0..4)
+/// * `target` - 4-bit-encoded target bases (ACGTN -> 0..4)
+/// * `m` - scoring-matrix dimension (5 for ACGTN)
+/// * `mat` - row-major `m*m` scoring matrix indexed by 4-bit codes
+/// * `q` - gap-open penalty (positive; subtracted)
+/// * `e` - gap-extension penalty (positive; subtracted)
+/// * `w` - DP bandwidth; <0 disables banding
+/// * `zdrop` - z-drop threshold; <0 disables
+/// * `end_bonus` - extra score awarded for reaching either end
+/// * `flag` - KSW flags (e.g. EXTZ_ONLY, RIGHT, GENERIC_SC)
 pub fn align_pair(
     query: &[u8],
     target: &[u8],
@@ -90,7 +105,24 @@ pub fn align_pair(
     ksw2_simd::ksw_extz2_dispatch(query, target, m, mat, q, e, w, zdrop, end_bonus, flag)
 }
 
-/// High-level dual-gap affine alignment.
+/// High-level dual-gap affine alignment (extd2).
+///
+/// Used when `(q, e) != (q2, e2)`. The minimum-cost gap path is taken at each
+/// position between the two affine penalties.
+///
+/// # Parameters
+/// * `query` - 4-bit-encoded query bases (ACGTN -> 0..4)
+/// * `target` - 4-bit-encoded target bases (ACGTN -> 0..4)
+/// * `m` - scoring-matrix dimension (5 for ACGTN)
+/// * `mat` - row-major `m*m` scoring matrix indexed by 4-bit codes
+/// * `q` - short-gap open penalty
+/// * `e` - short-gap extension penalty
+/// * `q2` - long-gap open penalty
+/// * `e2` - long-gap extension penalty
+/// * `w` - DP bandwidth; <0 disables banding
+/// * `zdrop` - z-drop threshold; <0 disables
+/// * `end_bonus` - extra score awarded for reaching either end
+/// * `flag` - KSW flags (e.g. EXTZ_ONLY, RIGHT, GENERIC_SC)
 pub fn align_pair_dual(
     query: &[u8],
     target: &[u8],
@@ -111,12 +143,18 @@ pub fn align_pair_dual(
 }
 
 /// Decode a BAM-style CIGAR u32 into (op, len).
+///
+/// # Parameters
+/// * `c` - packed CIGAR element: `len<<4 | op` (BAM encoding)
 #[inline]
 pub fn cigar_decode(c: u32) -> (u32, u32) {
     (c & 0xf, c >> 4)
 }
 
-/// Format a CIGAR array as a string.
+/// Format a CIGAR array as a human-readable string like "12M3I5M".
+///
+/// # Parameters
+/// * `cigar` - slice of BAM-encoded CIGAR elements (`len<<4 | op`)
 pub fn cigar_to_string(cigar: &[u32]) -> String {
     const OPS: &[u8] = b"MIDNSHP=XB";
     let mut s = String::new();
@@ -2013,6 +2051,16 @@ fn infer_splice_strand(opt: &MapOpt, mi: &MmIdx, rid: u32, st: i32, len: i32, re
 /// Attempt inversion realignment between two split regions.
 /// Matches mm_align1_inv() from align.c.
 /// Returns an inversion AlignReg if successful.
+///
+/// # Parameters
+/// * `opt` - mapping options (penalties, bandwidth, z-drop, thresholds)
+/// * `mi` - reference index, used to fetch target subsequences
+/// * `qlen` - full query length in bases
+/// * `qseq_fwd` - 4-bit-encoded forward-strand query
+/// * `qseq_rev` - 4-bit-encoded reverse-complement query
+/// * `r1` - upstream alignment region (must have split bit 1 set)
+/// * `r2` - downstream alignment region (must have split bit 2 set)
+/// * `mat` - row-major scoring matrix indexed by 4-bit ACGTN
 pub fn align1_inv(
     opt: &MapOpt,
     mi: &MmIdx,
@@ -2322,9 +2370,17 @@ fn compute_cigar_stats(
     (mlen, blen, n_ambi, (dp_max + 0.499) as i32)
 }
 
-/// Perform DP alignment for all regions.
+/// Perform DP alignment for all regions, filling CIGAR and extra fields.
 ///
 /// Simplified version of mm_align_skeleton() from align.c.
+///
+/// # Parameters
+/// * `opt` - mapping options (penalties, bandwidth, splice/flags, thresholds)
+/// * `mi` - reference index, used to fetch target subsequences
+/// * `qlen` - full query length in bases
+/// * `qstr` - ASCII query sequence (encoded internally via `SEQ_NT4_TABLE`)
+/// * `regs` - input chains / output aligned regions; drained and refilled in place
+/// * `a` - anchor array referenced by `regs[i].as_` ranges; compacted in place via mm_squeeze_a
 pub fn align_skeleton(
     opt: &MapOpt,
     mi: &MmIdx,

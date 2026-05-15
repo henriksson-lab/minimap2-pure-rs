@@ -10,6 +10,10 @@ const MM2RS_ALT_MAGIC: &[u8; 4] = b"ALT\0";
 const MM2RS_JUMP_MAGIC: &[u8; 4] = b"JJP\0";
 
 /// Write an index to a binary .mmi file. Matches mm_idx_dump().
+///
+/// # Parameters
+/// * `w` - destination writer (wrapped in a 64 KiB BufWriter internally)
+/// * `mi` - index to serialize; little-endian-only on-disk layout
 pub fn idx_dump<W: Write>(w: &mut W, mi: &MmIdx) -> io::Result<()> {
     // Little-endian-only: we cast &[u32]/&[u64] directly to &[u8] to match
     // C's fwrite(ptr, elem_size, count, fp). Rewrite per-element on BE if needed.
@@ -143,6 +147,9 @@ fn u64_slice_as_bytes(s: &[u64]) -> &[u8] {
 }
 
 /// Load an index from a binary .mmi file. Matches mm_idx_load().
+///
+/// # Parameters
+/// * `r` - source reader positioned at start of an .mmi stream
 pub fn idx_load<R: Read>(r: &mut R) -> io::Result<Option<MmIdx>> {
     let mut r = BufReader::new(r);
     // Magic
@@ -311,6 +318,9 @@ fn read_jump_extension<R: Read>(r: &mut R, mi: &mut MmIdx) -> io::Result<()> {
 }
 
 /// Check if a file is a minimap2 index by reading the magic bytes.
+///
+/// # Parameters
+/// * `path` - file path; "-" (stdin) always returns false
 pub fn is_idx_file(path: &str) -> io::Result<bool> {
     if path == "-" {
         return Ok(false);

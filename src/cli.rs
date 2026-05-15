@@ -294,6 +294,11 @@ fn check_cpu_features() -> bool {
     true
 }
 
+/// Run the command-line interface using the provided argv-style iterator and
+/// return a Unix-style exit code (0 on success, 1 on failure).
+///
+/// # Parameters
+/// * `args_in` - the program arguments (including `argv[0]`), each convertible to `OsString`
 pub fn run_cli_from<I, T>(args_in: I) -> i32
 where
     I: IntoIterator<Item = T>,

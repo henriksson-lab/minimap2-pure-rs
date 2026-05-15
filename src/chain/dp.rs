@@ -15,19 +15,19 @@ thread_local! {
 ///
 /// Input anchors must be sorted by (target_id, target_pos).
 ///
-/// # Arguments
-/// * `max_dist_x` - max reference gap
-/// * `max_dist_y` - max query gap
-/// * `bw` - bandwidth (max diagonal deviation)
-/// * `max_skip` - max consecutive skips in DP
-/// * `max_iter` - max predecessors to consider per anchor
-/// * `min_cnt` - min anchors per chain
-/// * `min_sc` - min chain score
-/// * `chn_pen_gap` - gap penalty coefficient
-/// * `chn_pen_skip` - skip penalty coefficient
-/// * `is_cdna` - cDNA mode (allow large gaps)
-/// * `n_seg` - number of query segments
-/// * `a` - sorted anchor array (consumed)
+/// # Parameters
+/// * `max_dist_x` - max query-coordinate gap between two anchors
+/// * `max_dist_y` - max reference-coordinate gap between two anchors
+/// * `bw` - chaining bandwidth (max diagonal deviation)
+/// * `max_skip` - max consecutive score-not-improved skips during DP scan
+/// * `max_iter` - max number of predecessors examined per anchor
+/// * `min_cnt` - minimum anchors required to keep a chain
+/// * `min_sc` - minimum chain score to keep a chain
+/// * `chn_pen_gap` - linear gap penalty coefficient
+/// * `chn_pen_skip` - linear skip (per-minimizer) penalty coefficient
+/// * `is_cdna` - true for cDNA/splice presets; allows long ref gaps
+/// * `n_seg` - number of query segments (>1 for paired/grouped fragments)
+/// * `a` - sorted anchor array; `x = rev<<63 | tid<<32 | tpos`, `y = flags|seg_id<<48|q_span<<32|q_pos`
 #[inline(never)]
 pub fn lchain_dp(
     mut max_dist_x: i32,

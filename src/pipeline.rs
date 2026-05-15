@@ -28,7 +28,13 @@ fn add_rg_tag(line: &mut String, rg_id: Option<&str>) {
     line.push_str(&tag);
 }
 
-/// Map a FASTA/FASTQ file against the index and write PAF output to stdout.
+/// Map a FASTA/FASTQ(.gz) file against the index and write PAF to stdout.
+///
+/// # Parameters
+/// * `mi` - minimap2 index
+/// * `opt` - mapping options (`mini_batch_size` controls input chunking)
+/// * `path` - path to the query file (`-` reads stdin)
+/// * `n_threads` - size of the rayon worker pool used per batch
 pub fn map_file_paf(mi: &MmIdx, opt: &MapOpt, path: &str, n_threads: usize) -> io::Result<()> {
     let mut fp = BseqFile::open(path)?;
     let stdout = io::stdout();
@@ -75,6 +81,17 @@ pub fn map_file_paf(mi: &MmIdx, opt: &MapOpt, path: &str, n_threads: usize) -> i
     Ok(())
 }
 
+/// Map a FASTA/FASTQ file against a split multi-part index and write PAF.
+///
+/// Used when the reference is too large for a single index — each query is
+/// mapped against every part, then results are merged via `split::merge_*`.
+///
+/// # Parameters
+/// * `mi` - merged-view index for output naming and lengths
+/// * `parts` - per-part indices to map against
+/// * `opt` - shared mapping options (per-part copies adjust `mid_occ`/`max_occ`)
+/// * `path` - path to the query file
+/// * `n_threads` - rayon thread-pool size
 pub fn map_file_paf_split(
     mi: &MmIdx,
     parts: &[MmIdx],
@@ -124,7 +141,17 @@ pub fn map_file_paf_split(
     out.flush()
 }
 
-/// Map a FASTA/FASTQ file and write SAM output to stdout.
+/// Map a FASTA/FASTQ(.gz) file against the index and write SAM to stdout.
+///
+/// Emits SAM `@HD`/`@SQ`/`@PG` header first, then one SAM record per region.
+///
+/// # Parameters
+/// * `mi` - minimap2 index
+/// * `opt` - mapping options
+/// * `path` - path to the query file
+/// * `n_threads` - rayon thread-pool size
+/// * `rg` - optional `@RG` header line (e.g. `"@RG\tID:foo\tSM:bar"`); ID propagates as the `RG:Z:` tag
+/// * `args` - original command-line arguments emitted in the `@PG` header
 pub fn map_file_sam(
     mi: &MmIdx,
     opt: &MapOpt,
@@ -213,6 +240,16 @@ pub fn map_file_sam(
     Ok(())
 }
 
+/// Map a FASTA/FASTQ file against a split multi-part index and write SAM.
+///
+/// # Parameters
+/// * `mi` - merged-view index used for SAM headers
+/// * `parts` - per-part indices to map against
+/// * `opt` - shared mapping options
+/// * `path` - path to the query file
+/// * `n_threads` - rayon thread-pool size
+/// * `rg` - optional `@RG` header line
+/// * `args` - original command-line arguments for the `@PG` header
 pub fn map_file_sam_split(
     mi: &MmIdx,
     parts: &[MmIdx],
@@ -347,6 +384,16 @@ fn read_fragment_batch(
     Ok(fragments)
 }
 
+/// Map a FASTA/FASTQ file in fragment mode (multi-segment same-name reads) and write PAF.
+///
+/// Adjacent records sharing a query name are grouped into one fragment so they
+/// can be chained together (used for paired-end and Hi-C-like inputs).
+///
+/// # Parameters
+/// * `mi` - minimap2 index
+/// * `opt` - mapping options
+/// * `path` - path to the query file (must have grouped records by name)
+/// * `n_threads` - rayon thread-pool size
 pub fn map_file_frag_paf(mi: &MmIdx, opt: &MapOpt, path: &str, n_threads: usize) -> io::Result<()> {
     let mut fp = BseqFile::open(path)?;
     let mut pending = None;
@@ -378,6 +425,14 @@ pub fn map_file_frag_paf(mi: &MmIdx, opt: &MapOpt, path: &str, n_threads: usize)
     out.flush()
 }
 
+/// Map a fragment-grouped FASTA/FASTQ file against a split multi-part index and write PAF.
+///
+/// # Parameters
+/// * `mi` - merged-view index for output naming
+/// * `parts` - per-part indices
+/// * `opt` - shared mapping options
+/// * `path` - path to the query file
+/// * `n_threads` - rayon thread-pool size
 pub fn map_file_frag_paf_split(
     mi: &MmIdx,
     parts: &[MmIdx],
@@ -417,6 +472,15 @@ pub fn map_file_frag_paf_split(
     out.flush()
 }
 
+/// Map a fragment-grouped FASTA/FASTQ file and write SAM.
+///
+/// # Parameters
+/// * `mi` - minimap2 index
+/// * `opt` - mapping options
+/// * `path` - path to the query file (records sharing a name are one fragment)
+/// * `n_threads` - rayon thread-pool size
+/// * `rg` - optional `@RG` header line
+/// * `args` - command-line arguments emitted in the `@PG` header
 pub fn map_file_frag_sam(
     mi: &MmIdx,
     opt: &MapOpt,
@@ -460,6 +524,16 @@ pub fn map_file_frag_sam(
     out.flush()
 }
 
+/// Map a fragment-grouped FASTA/FASTQ file against a split multi-part index and write SAM.
+///
+/// # Parameters
+/// * `mi` - merged-view index used for SAM headers
+/// * `parts` - per-part indices
+/// * `opt` - shared mapping options
+/// * `path` - path to the query file
+/// * `n_threads` - rayon thread-pool size
+/// * `rg` - optional `@RG` header line
+/// * `args` - command-line arguments for the `@PG` header
 pub fn map_file_frag_sam_split(
     mi: &MmIdx,
     parts: &[MmIdx],
@@ -817,9 +891,19 @@ fn map_split_fragment_queries(
         .collect()
 }
 
-/// Map interleaved paired-end reads from a single file.
+/// Map interleaved paired-end reads from a single file and write SAM.
 ///
-/// Reads are consumed in pairs (R1, R2, R1, R2, ...).
+/// Records are consumed in pairs (`R1, R2, R1, R2, ...`); `/1`/`/2` suffixes
+/// are stripped from the SAM `QNAME`. Pairs are oriented per `opt.pe_ori`
+/// before mapping and re-oriented on output.
+///
+/// # Parameters
+/// * `mi` - minimap2 index
+/// * `opt` - mapping options (`pe_ori`, `pe_bonus`)
+/// * `path` - path to the interleaved query file
+/// * `n_threads` - rayon thread-pool size
+/// * `rg` - optional `@RG` header line
+/// * `args` - command-line arguments for the `@PG` header
 pub fn map_file_interleaved_pe_sam(
     mi: &MmIdx,
     opt: &MapOpt,
@@ -927,6 +1011,16 @@ pub fn map_file_interleaved_pe_sam(
     Ok(())
 }
 
+/// Interleaved paired-end SAM output against a split multi-part index.
+///
+/// # Parameters
+/// * `mi` - merged-view index used for SAM headers
+/// * `parts` - per-part indices
+/// * `opt` - shared mapping options
+/// * `path` - path to the interleaved query file
+/// * `n_threads` - rayon thread-pool size
+/// * `rg` - optional `@RG` header line
+/// * `args` - command-line arguments for the `@PG` header
 pub fn map_file_interleaved_pe_sam_split(
     mi: &MmIdx,
     parts: &[MmIdx],
@@ -1055,10 +1149,19 @@ fn strip_pe_suffix(name: &str) -> &str {
     name
 }
 
-/// Map paired-end FASTQ files against the index and write SAM output.
+/// Map paired-end FASTQ files (R1, R2) against the index and write SAM.
 ///
-/// Reads pairs from two files simultaneously. Each pair is mapped independently,
-/// then paired to set proper-pair flags and adjust MAPQ.
+/// Reads pairs in lockstep from two files. Each pair is mapped as a fragment,
+/// then `pe::pair` sets the proper-pair flag and adjusts MAPQ on both ends.
+///
+/// # Parameters
+/// * `mi` - minimap2 index
+/// * `opt` - mapping options (`pe_ori`, `pe_bonus`)
+/// * `path1` - path to the R1 file
+/// * `path2` - path to the R2 file
+/// * `n_threads` - rayon thread-pool size
+/// * `rg` - optional `@RG` header line
+/// * `args` - command-line arguments for the `@PG` header
 pub fn map_file_pe_sam(
     mi: &MmIdx,
     opt: &MapOpt,
@@ -1164,6 +1267,17 @@ pub fn map_file_pe_sam(
     Ok(())
 }
 
+/// Paired-end (R1, R2) SAM output against a split multi-part index.
+///
+/// # Parameters
+/// * `mi` - merged-view index used for SAM headers
+/// * `parts` - per-part indices
+/// * `opt` - shared mapping options
+/// * `path1` - path to the R1 file
+/// * `path2` - path to the R2 file
+/// * `n_threads` - rayon thread-pool size
+/// * `rg` - optional `@RG` header line
+/// * `args` - command-line arguments for the `@PG` header
 pub fn map_file_pe_sam_split(
     mi: &MmIdx,
     parts: &[MmIdx],
@@ -1537,7 +1651,14 @@ fn inferred_template_len(
     tlen
 }
 
-/// Map paired-end files, writing PAF output.
+/// Map paired-end FASTQ files (R1, R2) and write PAF (with `/1`/`/2` suffix on names).
+///
+/// # Parameters
+/// * `mi` - minimap2 index
+/// * `opt` - mapping options (`pe_ori` controls per-segment orientation)
+/// * `path1` - path to the R1 file
+/// * `path2` - path to the R2 file
+/// * `n_threads` - rayon thread-pool size
 pub fn map_file_pe_paf(
     mi: &MmIdx,
     opt: &MapOpt,
@@ -1626,6 +1747,15 @@ pub fn map_file_pe_paf(
     Ok(())
 }
 
+/// Paired-end (R1, R2) PAF output against a split multi-part index.
+///
+/// # Parameters
+/// * `mi` - merged-view index for output naming
+/// * `parts` - per-part indices
+/// * `opt` - shared mapping options
+/// * `path1` - path to the R1 file
+/// * `path2` - path to the R2 file
+/// * `n_threads` - rayon thread-pool size
 pub fn map_file_pe_paf_split(
     mi: &MmIdx,
     parts: &[MmIdx],
@@ -1724,6 +1854,16 @@ pub fn map_file_pe_paf_split(
     out.flush()
 }
 
+/// Interleaved paired-end PAF output against a split multi-part index.
+///
+/// Strips `/1`/`/2` from base names and re-adds them on emission.
+///
+/// # Parameters
+/// * `mi` - merged-view index for output naming
+/// * `parts` - per-part indices
+/// * `opt` - shared mapping options
+/// * `path` - path to the interleaved query file
+/// * `n_threads` - rayon thread-pool size
 pub fn map_file_interleaved_pe_paf_split(
     mi: &MmIdx,
     parts: &[MmIdx],

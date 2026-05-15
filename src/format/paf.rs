@@ -3,7 +3,14 @@ use crate::index::MmIdx;
 use crate::types::AlignReg;
 use std::fmt::Write;
 
-/// Compute event identity from alignment: mlen / blen.
+/// Compute "event identity" of an alignment used for the `de:f` PAF tag.
+///
+/// Defined as `mlen / (blen + n_ambi - n_gap + n_gapo)` when CIGAR is present, so
+/// long insertions/deletions count as single events. Falls back to `mlen/blen` when
+/// no CIGAR is attached.
+///
+/// # Parameters
+/// * `r` - mapping region (reads `mlen`, `blen`, and optional CIGAR via `extra`)
 pub fn event_identity(r: &AlignReg) -> f64 {
     if r.blen == 0 {
         return 0.0;
@@ -74,9 +81,21 @@ fn write_tags(s: &mut String, r: &AlignReg) {
     }
 }
 
-/// Format a single PAF record. Matches mm_write_paf4().
+/// Format a single PAF record. Matches `mm_write_paf4()` from `format.c`.
 ///
-/// Returns the PAF line (without trailing newline).
+/// Returns the PAF line without a trailing newline. When `r` is `None`, an unmapped
+/// PAF line (12 columns with `*` strand) is emitted instead.
+///
+/// # Parameters
+/// * `mi` - minimap2 index (used to resolve target name and length)
+/// * `qname` - query name (PAF column 1)
+/// * `qlen` - query length in bases
+/// * `r` - mapping region; `None` produces an unmapped record
+/// * `flag` - mapping flags (gates `FRAG_MODE` segment suffix, `QSTRAND`, `OUT_CG`, `COPY_COMMENT`)
+/// * `rep_len` - repetitive-seed length to emit as `rl:i:` tag; pass a negative value to skip
+/// * `n_seg` - number of segments for this query (paired-end / fragment mode)
+/// * `seg_idx` - segment index of this record (used to append `/1`, `/2`, ... in fragment mode)
+/// * `comment` - optional FASTA/FASTQ comment appended when `COPY_COMMENT` is set
 pub fn write_paf(
     mi: &MmIdx,
     qname: &str,
@@ -164,7 +183,11 @@ pub fn write_paf(
     s
 }
 
-/// Format an unmapped PAF record.
+/// Format a minimal PAF record for an unmapped read (12 columns, strand `*`).
+///
+/// # Parameters
+/// * `qname` - query name
+/// * `qlen` - query length in bases
 pub fn write_paf_unmapped(qname: &str, qlen: i32) -> String {
     format!("{}\t{}\t0\t0\t*\t*\t0\t0\t0\t0\t0\t0", qname, qlen)
 }

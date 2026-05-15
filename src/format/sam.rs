@@ -13,7 +13,13 @@ fn push_ascii_bytes(s: &mut String, bytes: &[u8]) {
     unsafe { s.push_str(std::str::from_utf8_unchecked(bytes)) };
 }
 
-/// Write SAM header. Matches mm_write_sam_hdr().
+/// Build the SAM header text (`@HD`, `@SQ`, optional `@RG`, `@PG`).
+/// Matches `mm_write_sam_hdr()` from `format.c`.
+///
+/// # Parameters
+/// * `mi` - index whose reference sequences become `@SQ` lines
+/// * `rg` - optional read group string in `@RG\tID:...` form (literal `\t` is normalized)
+/// * `args` - original program argv, joined as the `CL:` field on the `@PG` line
 pub fn write_sam_hdr(mi: &MmIdx, rg: Option<&str>, args: &[String]) -> String {
     let mut s = String::with_capacity(4096);
     writeln!(s, "@HD\tVN:1.6\tSO:unsorted\tGO:query").unwrap();
@@ -33,19 +39,37 @@ pub fn write_sam_hdr(mi: &MmIdx, rg: Option<&str>, args: &[String]) -> String {
     s
 }
 
+/// Convert literal backslash-`t` escape sequences in a read-group line into real tab characters.
+///
+/// # Parameters
+/// * `rg` - raw read-group string as provided on the command line (e.g. `@RG\tID:foo\tSM:bar`)
 pub fn normalize_rg_line(rg: &str) -> String {
     rg.replace("\\t", "\t")
 }
 
+/// Extract the `ID:` field from a read-group line (after tab normalization).
+///
+/// # Parameters
+/// * `rg` - read-group line; returns `Some(id)` if an `ID:...` field is present
 pub fn read_group_id(rg: &str) -> Option<String> {
     normalize_rg_line(rg)
         .split('\t')
         .find_map(|field| field.strip_prefix("ID:").map(str::to_owned))
 }
 
-/// Write a single SAM record.
+/// Format a single SAM record (no FASTA/FASTQ comment). Convenience wrapper around
+/// `write_sam_record_with_comment` with `comment=None`. Matches `mm_write_sam3()`.
 ///
-/// Simplified version matching mm_write_sam3() core logic.
+/// # Parameters
+/// * `mi` - index (for `RNAME` lookup)
+/// * `qname` - query name (SAM column 1)
+/// * `qseq` - query sequence (ASCII), used for `SEQ` and to derive `qlen`
+/// * `qual` - base qualities or empty for `*`
+/// * `r` - mapping region; `None` emits an unmapped record
+/// * `_n_regs` - number of regions for this query (reserved for SA-tag logic)
+/// * `_regs` - all regions for this query (used to build the `SA:Z:` tag)
+/// * `flag` - mapping flags (selects soft/hard clip, secondary-seq emission, MD/cs tags, etc.)
+/// * `rep_len` - repetitive-seed length for `rl:i:` tag; negative skips it
 pub fn write_sam_record(
     mi: &MmIdx,
     qname: &str,
@@ -62,6 +86,19 @@ pub fn write_sam_record(
     )
 }
 
+/// Format a single SAM record with optional FASTA/FASTQ comment passthrough.
+///
+/// # Parameters
+/// * `mi` - index (for `RNAME` lookup)
+/// * `qname` - query name (SAM column 1)
+/// * `qseq` - query sequence (ASCII); reverse-complemented in-place for reverse-strand records
+/// * `qual` - base qualities (same length as `qseq`) or empty for `*`
+/// * `r` - mapping region; `None` emits an unmapped record
+/// * `_n_regs` - number of regions (reserved)
+/// * `_regs` - all regions for this query (used to build the `SA:Z:` tag for split alignments)
+/// * `flag` - mapping flags (`SOFTCLIP`, `SECONDARY_SEQ`, `NO_QUAL`, `LONG_CIGAR`, `COPY_COMMENT`, ...)
+/// * `rep_len` - repetitive-seed length for `rl:i:` tag; negative skips it
+/// * `comment` - optional FASTA/FASTQ comment string appended when `COPY_COMMENT` is set
 pub fn write_sam_record_with_comment(
     mi: &MmIdx,
     qname: &str,

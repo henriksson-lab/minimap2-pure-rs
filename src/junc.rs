@@ -44,9 +44,18 @@ pub struct JumpDb {
 }
 
 impl JuncDb {
-    /// Create a junction byte-array for a reference region.
-    /// Returns a byte per reference position: 0 = no junction,
-    /// 1 = donor (GT), 2 = acceptor (AG), based on strand.
+    /// Build a per-position junction bitmask over a reference window.
+    ///
+    /// Each byte encodes donor/acceptor bits for the position: forward-strand
+    /// donor = 1, acceptor = 2; reverse-strand donor = 8, acceptor = 4.
+    /// Matches `mm_idx_bed_junc()`. Annotations whose endpoints fall outside
+    /// `[st, en)` are skipped.
+    ///
+    /// # Parameters
+    /// * `rid` - 0-based reference id; out-of-range returns an all-zero buffer
+    /// * `st` - inclusive start of the reference window
+    /// * `en` - exclusive end of the reference window
+    /// * `_rev` - unused (junction bits stay in genomic-strand space; DP handles read orientation)
     pub fn get_junc_array(&self, rid: u32, st: i32, en: i32, _rev: bool) -> Vec<u8> {
         let len = (en - st) as usize;
         let mut junc = vec![0u8; len];
@@ -197,11 +206,16 @@ fn read_bed_intervals(
     Ok(per_ref)
 }
 
-/// Read splice junctions from a BED/BED12 file and annotate the index.
+/// Read splice junctions from a BED/BED12 file and attach them to the index.
 ///
 /// BED12 records contribute introns inferred from gaps between blocks. Records
 /// with fewer than 12 fields are accepted as direct intervals, matching C
-/// minimap2's fallback behavior in mm_idx_bed_read_core().
+/// minimap2's fallback in `mm_idx_bed_read_core()`. Returns the number of
+/// junctions loaded.
+///
+/// # Parameters
+/// * `mi` - index to annotate; `mi.junc_db` is replaced
+/// * `path` - path to a plain or gzipped BED file
 pub fn read_junc_bed(mi: &mut MmIdx, path: &str) -> io::Result<usize> {
     let db = JuncDb {
         juncs: read_bed_intervals(mi, path, true, -1)?,
@@ -234,6 +248,16 @@ fn merge_jump_edges(edges: &mut Vec<JumpEdge>) {
     *edges = merged;
 }
 
+/// Read splice junctions and append bidirectional jump edges for `-j/--pass1` rescue.
+///
+/// For each BED12 intron `(st, en)` two `JumpEdge`s are pushed (`off→off2` and
+/// reverse), then merged across calls. Returns the total edge count.
+///
+/// # Parameters
+/// * `mi` - index to annotate; reuses `mi.jump_db` if present
+/// * `path` - path to a plain or gzipped BED file
+/// * `flag` - `JUNC_ANNO` or `JUNC_MISC`, merged via bitwise OR on duplicates
+/// * `min_sc` - minimum BED score to accept; pass `-1` to disable the cutoff
 pub fn read_jump_bed(mi: &mut MmIdx, path: &str, flag: u16, min_sc: i32) -> io::Result<usize> {
     let intervals = read_bed_intervals(mi, path, true, min_sc)?;
     let mut db = mi.jump_db.take().unwrap_or_else(|| JumpDb {

@@ -39,24 +39,36 @@ pub const SEQ_COMP_TABLE: [u8; 256] = [
 pub const NT4_TO_CHAR: [u8; 5] = [b'A', b'C', b'G', b'T', b'N'];
 
 /// Encode an ASCII base to 2-bit (0-3) or 4 for N/ambiguous.
+///
+/// # Parameters
+/// * `b` - ASCII byte (case-insensitive; U treated as T)
 #[inline]
 pub fn encode_base(b: u8) -> u8 {
     SEQ_NT4_TABLE[b as usize]
 }
 
 /// Complement of an ASCII base.
+///
+/// # Parameters
+/// * `b` - ASCII byte; non-DNA bytes are passed through unchanged
 #[inline]
 pub fn complement(b: u8) -> u8 {
     SEQ_COMP_TABLE[b as usize]
 }
 
 /// Complement of a 2-bit encoded base (0-3). 0↔3, 1↔2.
+///
+/// # Parameters
+/// * `c` - 2-bit base in `[0, 3]`; callers must not pass the N sentinel (4)
 #[inline]
 pub fn complement_nt4(c: u8) -> u8 {
     3 - c
 }
 
 /// Reverse complement a sequence of ASCII bases in-place.
+///
+/// # Parameters
+/// * `seq` - ASCII bases; complemented and reversed in place
 pub fn revcomp_ascii(seq: &mut [u8]) {
     let n = seq.len();
     for i in 0..n / 2 {
@@ -72,6 +84,9 @@ pub fn revcomp_ascii(seq: &mut [u8]) {
 }
 
 /// Reverse complement a sequence of 2-bit encoded bases (0-3).
+///
+/// # Parameters
+/// * `seq` - 2-bit bases (0-3); complemented and reversed in place
 pub fn revcomp_nt4(seq: &mut [u8]) {
     let n = seq.len();
     for i in 0..n / 2 {
@@ -87,6 +102,9 @@ pub fn revcomp_nt4(seq: &mut [u8]) {
 }
 
 /// Reverse a quality string in-place.
+///
+/// # Parameters
+/// * `qual` - phred quality bytes; reversed in place
 pub fn reverse_qual(qual: &mut [u8]) {
     qual.reverse();
 }
@@ -95,12 +113,21 @@ pub fn reverse_qual(qual: &mut [u8]) {
 /// 8 bases per u32, 4 bits each. Matches mm_seq4_set/mm_seq4_get from mmpriv.h.
 pub mod packed {
     /// Set base `c` (0-15) at position `i` in packed sequence.
+    ///
+    /// # Parameters
+    /// * `s` - packed storage; 8 4-bit bases per u32, little-endian nibble order
+    /// * `i` - 0-based base index; word `s[i>>3]` is OR'd (caller must zero first)
+    /// * `c` - 4-bit base value (typically 0-3, or 4 for N)
     #[inline]
     pub fn seq4_set(s: &mut [u32], i: usize, c: u8) {
         s[i >> 3] |= (c as u32) << (((i & 7) << 2) as u32);
     }
 
     /// Get base at position `i` from packed sequence.
+    ///
+    /// # Parameters
+    /// * `s` - packed storage (8 4-bit bases per u32)
+    /// * `i` - 0-based base index
     #[inline]
     pub fn seq4_get(s: &[u32], i: usize) -> u8 {
         ((s[i >> 3] >> ((i & 7) << 2)) & 0xf) as u8
@@ -108,6 +135,9 @@ pub mod packed {
 
     /// Pack an ASCII sequence into 4-bit packed u32 array.
     /// Returns the packed array. Each u32 stores 8 bases.
+    ///
+    /// # Parameters
+    /// * `seq` - ASCII bases; encoded via `SEQ_NT4_TABLE` (N stored as 4)
     pub fn pack_seq(seq: &[u8]) -> Vec<u32> {
         let n_words = seq.len().div_ceil(8);
         let mut packed = vec![0u32; n_words];
@@ -119,6 +149,10 @@ pub mod packed {
     }
 
     /// Unpack a 4-bit packed sequence to 2-bit encoded bases.
+    ///
+    /// # Parameters
+    /// * `packed` - packed storage (8 4-bit bases per u32)
+    /// * `len` - number of bases to extract from offset 0
     pub fn unpack_seq(packed: &[u32], len: usize) -> Vec<u8> {
         let mut seq = Vec::with_capacity(len);
         for i in 0..len {
@@ -128,7 +162,10 @@ pub mod packed {
     }
 }
 
-/// Compare read names, ignoring /1 or /2 suffixes.
+/// Effective read-name length, excluding a trailing `/[0-9]` mate suffix.
+///
+/// # Parameters
+/// * `s` - read name bytes (typically from FASTQ header)
 pub fn qname_len(s: &[u8]) -> usize {
     let l = s.len();
     if l >= 3 && s[l - 1] >= b'0' && s[l - 1] <= b'9' && s[l - 2] == b'/' {
@@ -138,6 +175,11 @@ pub fn qname_len(s: &[u8]) -> usize {
     }
 }
 
+/// Compare two read names, ignoring trailing `/1` or `/2` mate suffixes.
+///
+/// # Parameters
+/// * `s1` - first read name
+/// * `s2` - second read name
 pub fn qname_same(s1: &[u8], s2: &[u8]) -> bool {
     let l1 = qname_len(s1);
     let l2 = qname_len(s2);

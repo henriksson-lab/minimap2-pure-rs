@@ -23,6 +23,9 @@ pub struct BseqFile {
 
 impl BseqFile {
     /// Open a FASTA/FASTQ file (gzip auto-detected via magic bytes).
+    ///
+    /// # Parameters
+    /// * `path` - input filename, or "-" for stdin
     pub fn open(path: &str) -> io::Result<Self> {
         let file: Box<dyn Read> = if path == "-" {
             Box::new(io::stdin())
@@ -181,6 +184,10 @@ impl BseqFile {
     }
 
     /// Read a batch of sequences up to chunk_size total bases.
+    ///
+    /// # Parameters
+    /// * `chunk_size` - target total sequence length (bases) per batch; batch stops once reached
+    /// * `with_qual` - keep FASTQ quality strings if true, else drop them to save memory
     pub fn read_batch(&mut self, chunk_size: i64, with_qual: bool) -> io::Result<Vec<BseqRecord>> {
         let mut records = Vec::new();
         let mut total_len: i64 = 0;

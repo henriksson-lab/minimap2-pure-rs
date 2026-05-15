@@ -36,7 +36,7 @@ pub struct AlignerBuilder {
 }
 
 impl Aligner {
-    /// Create a new builder.
+    /// Create a new builder with default index and mapping options.
     pub fn builder() -> AlignerBuilder {
         AlignerBuilder {
             idx_opt: IdxOpt::default(),
@@ -46,76 +46,112 @@ impl Aligner {
         }
     }
 
-    /// Map a single query sequence. Returns alignment regions.
+    /// Map a single anonymous query sequence and return its alignment regions.
+    ///
+    /// # Parameters
+    /// * `seq` - query sequence as ASCII bases (`A`/`C`/`G`/`T`/`N`); case-insensitive
     pub fn map(&self, seq: &[u8]) -> Vec<AlignReg> {
         let result = map::map_query(&self.idx, &self.map_opt, "", seq);
         result.regs
     }
 
-    /// Map a named query sequence.
+    /// Map a named query sequence. The full `MapResult` (regs + auxiliary state) is returned.
+    ///
+    /// # Parameters
+    /// * `name` - query name (used in PAF/SAM output and for hashing)
+    /// * `seq` - query sequence as ASCII bases
     pub fn map_named(&self, name: &str, seq: &[u8]) -> map::MapResult {
         map::map_query(&self.idx, &self.map_opt, name, seq)
     }
 
-    /// Format results as PAF lines.
+    /// Format the result of `map_named` as one PAF line per mapping region.
+    ///
+    /// # Parameters
+    /// * `name` - query name (PAF column 1)
+    /// * `seq` - query sequence (used to derive query length and, with `OUT_CG`, CIGAR context)
+    /// * `result` - the `MapResult` returned by `map_named`
     pub fn format_paf(&self, name: &str, seq: &[u8], result: &map::MapResult) -> Vec<String> {
         map::format_paf(&self.idx, &self.map_opt, name, seq, result)
     }
 
-    /// Get the number of reference sequences.
+    /// Return the number of reference sequences in the index.
     pub fn n_seq(&self) -> usize {
         self.idx.seqs.len()
     }
 
-    /// Get the name of a reference sequence by index.
+    /// Look up a reference sequence name by its target id.
+    ///
+    /// # Parameters
+    /// * `rid` - reference id (0..n_seq); matches `AlignReg::rid`
     pub fn seq_name(&self, rid: usize) -> &str {
         &self.idx.seqs[rid].name
     }
 
-    /// Get the length of a reference sequence.
+    /// Look up a reference sequence length (in bases) by its target id.
+    ///
+    /// # Parameters
+    /// * `rid` - reference id (0..n_seq)
     pub fn seq_len(&self, rid: usize) -> u32 {
         self.idx.seqs[rid].len
     }
 }
 
 impl AlignerBuilder {
-    /// Set a preset (e.g., "map-ont", "map-hifi", "sr", "asm5").
+    /// Apply a minimap2 preset. Silently ignores unknown names.
+    ///
+    /// # Parameters
+    /// * `name` - one of `map-ont`, `map-pb`, `map-hifi`, `map-ccs`, `sr`, `asm5`, `asm10`,
+    ///   `asm20`, `ava-ont`, `ava-pb`, `splice`, `splice:hq`, `splice:sr`, `cdna`,
+    ///   `lr:hq`, `lr:hqae`, `map-iclr`, `map-iclr-prerender`
     pub fn preset(mut self, name: &str) -> Self {
         options::set_opt(Some(name), &mut self.idx_opt, &mut self.map_opt).ok();
         self
     }
 
-    /// Set the path to the reference FASTA or .mmi index.
+    /// Set the path used at `build()` time. May be a FASTA/FASTQ reference or a prebuilt `.mmi` index.
+    ///
+    /// # Parameters
+    /// * `path` - filesystem path to the reference FASTA or `.mmi` index file
     pub fn index(mut self, path: &str) -> Self {
         self.index_path = Some(path.to_string());
         self
     }
 
-    /// Enable CIGAR output.
+    /// Enable CIGAR generation (`MapFlags::CIGAR | MapFlags::OUT_CG`).
     pub fn with_cigar(mut self) -> Self {
         self.cigar = true;
         self
     }
 
-    /// Set k-mer size.
+    /// Set the minimizer k-mer size used when building the index.
+    ///
+    /// # Parameters
+    /// * `k` - k-mer length; minimap2 defaults range from 15 (long-read) to 21 (sr)
     pub fn k(mut self, k: i16) -> Self {
         self.idx_opt.k = k;
         self
     }
 
-    /// Set minimizer window size.
+    /// Set the minimizer window size used when building the index.
+    ///
+    /// # Parameters
+    /// * `w` - window size in k-mers (one minimizer is picked per window)
     pub fn w(mut self, w: i16) -> Self {
         self.idx_opt.w = w;
         self
     }
 
-    /// Set number of secondary alignments to report.
+    /// Set the number of secondary alignments to report.
+    ///
+    /// # Parameters
+    /// * `n` - maximum secondary alignments per primary (`-N` in the CLI)
     pub fn best_n(mut self, n: i32) -> Self {
         self.map_opt.best_n = n;
         self
     }
 
-    /// Build the aligner (loads/builds the index).
+    /// Finalize the builder. Loads the prebuilt index or builds one from the FASTA path,
+    /// then calls `mapopt_update` so options like `mid_occ` are derived from the index.
     pub fn build(mut self) -> Result<Aligner, String> {
         let path = self
             .index_path

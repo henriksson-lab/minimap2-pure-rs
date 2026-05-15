@@ -64,6 +64,14 @@ impl TinyQueue {
 /// - `p[i].y = rid << 32 | last_pos << 1 | strand`
 ///
 /// Results are appended to `p`.
+///
+/// # Parameters
+/// * `seq` - ASCII DNA sequence (A/C/G/T/N); non-ACGT breaks the k-mer chain
+/// * `w` - window size (>0, <256)
+/// * `k` - k-mer size (>0, <=28)
+/// * `rid` - 0-based reference id stored in the high 32 bits of each `y`
+/// * `is_hpc` - if true, collapse homopolymer runs before hashing
+/// * `p` - output vec; new minimizers are appended (existing entries preserved)
 pub fn mm_sketch(seq: &[u8], w: usize, k: usize, rid: u32, is_hpc: bool, p: &mut Vec<Mm128>) {
     assert!(!seq.is_empty() && w > 0 && w < 256 && k > 0 && k <= 28);
 

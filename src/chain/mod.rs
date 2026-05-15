@@ -15,6 +15,9 @@ pub struct ChainResult {
 
 /// Fast approximate log2. Matches mg_log2() from mmpriv.h.
 /// NB: doesn't work when x < 2.
+///
+/// # Parameters
+/// * `x` - input value (must be >= 2.0 for correct results)
 #[inline]
 pub fn mg_log2(x: f32) -> f32 {
     let bits = x.to_bits();
@@ -34,6 +37,17 @@ pub fn mg_log2(x: f32) -> f32 {
 /// Input anchor encoding:
 ///   a[].x: rev<<63 | tid<<32 | tpos
 ///   a[].y: flags<<40 | q_span<<32 | q_pos
+///
+/// # Parameters
+/// * `ai` - target anchor (the "i" anchor, later in the chain)
+/// * `aj` - candidate predecessor anchor (the "j" anchor)
+/// * `max_dist_x` - max query-coordinate gap between two anchors
+/// * `max_dist_y` - max reference-coordinate gap between two anchors
+/// * `bw` - chaining bandwidth (max diagonal deviation `|dr - dq|`)
+/// * `chn_pen_gap` - linear gap penalty coefficient
+/// * `chn_pen_skip` - linear skip (per-minimizer) penalty coefficient
+/// * `is_cdna` - true for cDNA/splice presets; allows long ref gaps
+/// * `n_seg` - number of query segments (>1 for paired/grouped fragments)
 #[inline]
 pub fn comput_sc(
     ai: &Mm128,
@@ -89,6 +103,14 @@ pub fn comput_sc(
 }
 
 /// Simplified scoring for RMQ chaining. Matches comput_sc_simple() from lchain.c.
+///
+/// Returns `(score, is_exact, dd)` where `dd = |dr - dq|` is the diagonal width.
+///
+/// # Parameters
+/// * `ai` - target anchor (the "i" anchor)
+/// * `aj` - candidate predecessor anchor (the "j" anchor)
+/// * `chn_pen_gap` - linear gap penalty coefficient
+/// * `chn_pen_skip` - linear skip (per-minimizer) penalty coefficient
 #[inline]
 pub fn comput_sc_simple(
     ai: &Mm128,

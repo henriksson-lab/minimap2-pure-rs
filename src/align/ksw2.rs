@@ -67,14 +67,22 @@ impl Default for KswResult {
 }
 
 impl KswResult {
+    /// Construct an empty result, matching `ksw_reset_extz` from ksw2.h.
     pub fn new() -> Self {
         Self::default()
     }
 }
 
-/// Low-level 16-bit local alignment for inversion detection.
-/// Equivalent of minimap2's ksw_ll_i16.
-/// Returns (score, query_end, target_end).
+/// Low-level 16-bit local alignment for inversion detection; Rust port of
+/// `ksw_ll_i16` from `minimap2/ksw2_ll_sse.c`. Returns `(score, query_end, target_end)`.
+///
+/// # Parameters
+/// * `query` - query sequence with `0 <= query[i] < m` (4-bit encoded)
+/// * `target` - target sequence with `0 <= target[i] < m` (4-bit encoded)
+/// * `m` - number of residue types (alphabet size)
+/// * `mat` - m*m scoring matrix in row-major one-dimension array
+/// * `gapo` - gap-open penalty (a gap of length l costs `-(gapo + l*gape)`)
+/// * `gape` - gap-extension penalty
 pub fn ksw_ll_i16(
     query: &[u8],
     target: &[u8],
@@ -275,7 +283,13 @@ unsafe fn hmax_epi16(mut x: __m128i) -> i16 {
     _mm_extract_epi16::<0>(x) as i16
 }
 
-/// Push a CIGAR operation, merging with the last if same op.
+/// Push a CIGAR operation, merging with the last if same op; Rust port of
+/// `ksw_push_cigar` from `minimap2/ksw2.h`.
+///
+/// # Parameters
+/// * `cigar` - BAM-encoded CIGAR buffer (op in low 4 bits, length in high 28)
+/// * `op` - CIGAR operation code (0=M, 1=I, 2=D, 3=N)
+/// * `len` - run length to append
 pub(crate) fn push_cigar_fn(cigar: &mut Vec<u32>, op: u32, len: i32) {
     if let Some(last) = cigar.last_mut() {
         if (*last & 0xf) == op {
@@ -306,22 +320,21 @@ fn apply_zdrop(ez: &mut KswResult, h: i32, i: i32, j: i32, zdrop: i32, e: i8) ->
     false
 }
 
-/// Scalar banded extension alignment with single affine gap penalty.
+/// Scalar banded NW-like extension with a single affine gap penalty; Rust port
+/// of `ksw_extz2_sse` from `minimap2/ksw2_extz2_sse.c` (used as fallback when
+/// SSE2 is unavailable).
 ///
-/// This is a scalar equivalent of ksw_extz2_sse. It performs banded DP alignment
-/// with optional CIGAR backtracking, Z-drop, and end bonus.
-///
-/// # Arguments
-/// * `query` - query sequence (0-3 encoded)
-/// * `target` - target sequence (0-3 encoded)
-/// * `m` - alphabet size (typically 5 for DNA)
-/// * `mat` - m*m scoring matrix
-/// * `q` - gap open penalty
-/// * `e` - gap extension penalty
-/// * `w` - bandwidth (-1 for full)
-/// * `zdrop` - Z-drop threshold (-1 to disable)
-/// * `end_bonus` - bonus for reaching the end
-/// * `flag` - KSW flags
+/// # Parameters
+/// * `query` - query sequence with `0 <= query[i] < m` (4-bit encoded: A=0,C=1,G=2,T=3,N=4)
+/// * `target` - target sequence with `0 <= target[i] < m` (4-bit encoded)
+/// * `m` - number of residue types (alphabet size, typically 5 for ACGTN)
+/// * `mat` - m*m scoring matrix in row-major one-dimension array
+/// * `q` - gap-open penalty; a gap of length l costs `-(q + l*e)`
+/// * `e` - gap-extension penalty
+/// * `w` - band width; `<0` to disable banding
+/// * `zdrop` - off-diagonal drop-off to stop extension (positive; `<0` to disable)
+/// * `end_bonus` - bonus added when extension reaches either end of the query
+/// * `flag` - `KSW_EZ_*` flags (extension-only, score-only, reverse-cigar, etc.)
 pub fn ksw_extz2(
     query: &[u8],
     target: &[u8],
@@ -556,10 +569,24 @@ pub fn ksw_extz2(
     ez
 }
 
-/// Scalar banded extension with dual affine gap penalty.
+/// Scalar banded NW-like extension with a dual affine gap penalty; Rust port
+/// of `ksw_extd2_sse` from `minimap2/ksw2_extd2_sse.c`. The minimum of two
+/// affine gap costs `(q, e)` and `(q2, e2)` is used for each gap length, modelling
+/// the long-gap regime of ONT/PacBio reads.
 ///
-/// Supports two gap penalty sets: (q, e) and (q2, e2).
-/// This is a scalar equivalent of ksw_extd2_sse.
+/// # Parameters
+/// * `query` - query sequence with `0 <= query[i] < m` (4-bit encoded)
+/// * `target` - target sequence with `0 <= target[i] < m` (4-bit encoded)
+/// * `m` - number of residue types (alphabet size)
+/// * `mat` - m*m scoring matrix in row-major one-dimension array
+/// * `q` - first gap-open penalty
+/// * `e` - first gap-extension penalty
+/// * `q2` - second gap-open penalty (for the long-gap affine piece)
+/// * `e2` - second gap-extension penalty
+/// * `w` - band width; `<0` to disable banding
+/// * `zdrop` - off-diagonal drop-off to stop extension (positive; `<0` to disable)
+/// * `end_bonus` - bonus added when extension reaches either end of the query
+/// * `flag` - `KSW_EZ_*` flags
 pub fn ksw_extd2(
     query: &[u8],
     target: &[u8],
@@ -791,12 +818,24 @@ pub fn ksw_extd2(
     ez
 }
 
-/// Scalar splice-aware extension alignment.
+/// Scalar splice-aware extension alignment; partial Rust port of
+/// `ksw_exts2_sse` from `minimap2/ksw2_exts2_sse.c`. Ordinary affine
+/// insertion/deletion gaps use `(q, e)`, while long reference skips (introns)
+/// use `q2` plus donor/acceptor splice signal penalties.
 ///
-/// This models the extra long-deletion splice state from minimap2's
-/// `ksw_exts2`: ordinary affine insertion/deletion gaps use `q/e`, while long
-/// reference skips use `q2` plus donor/acceptor splice signal penalties. It is
-/// intentionally scalar and is only dispatched for splice mode.
+/// # Parameters
+/// * `query` - query sequence with `0 <= query[i] < m` (4-bit encoded)
+/// * `target` - target sequence with `0 <= target[i] < m` (4-bit encoded)
+/// * `m` - number of residue types (alphabet size)
+/// * `mat` - m*m scoring matrix in row-major one-dimension array
+/// * `q` - gap-open penalty for ordinary indels
+/// * `e` - gap-extension penalty for ordinary indels
+/// * `q2` - gap-open penalty for the long-deletion (intron) state
+/// * `noncan` - non-canonical splice site penalty
+/// * `w` - band width; `<0` to disable banding
+/// * `zdrop` - off-diagonal drop-off to stop extension (positive; `<0` to disable)
+/// * `end_bonus` - bonus added when extension reaches either end of the query
+/// * `flag` - `KSW_EZ_*` flags (including `SPLICE_FOR`/`SPLICE_REV`/`SPLICE_FLANK`)
 pub fn ksw_exts2(
     query: &[u8],
     target: &[u8],
@@ -1040,13 +1079,29 @@ pub fn ksw_exts2(
     ez
 }
 
-/// Rotated anti-diagonal DP version of ksw_exts2.
+/// Rotated anti-diagonal scalar DP version of `ksw_exts2_sse`. Faithfully
+/// follows `minimap2/ksw2_exts2_sse.c` — same u/v/x/y/x2 array layout, same
+/// per-cell `d` byte encoding (state in bits 0-2, continuation flags in bits
+/// 3-5), and same `ksw_backtrack` continuation logic, but byte-by-byte instead
+/// of SSE. Used as the non-x86 fallback for splice mode so CIGAR-shape parity
+/// with C is preserved.
 ///
-/// Faithfully follows minimap2/ksw2_exts2_sse.c — same u/v/x/y/x2 array layout,
-/// same per-cell `d` byte encoding (state in bits 0-2, continuation flags in
-/// bits 3-5), and same ksw_backtrack continuation logic. Scalar (one byte at a
-/// time) instead of SSE. Replaces the standard (i, j) DP for splice mode so
-/// CIGAR-shape parity with C SIMD ksw_exts2 is preserved.
+/// # Parameters
+/// * `query` - query sequence with `0 <= query[i] < m` (4-bit encoded)
+/// * `target` - target sequence with `0 <= target[i] < m` (4-bit encoded)
+/// * `m` - number of residue types (alphabet size)
+/// * `mat` - m*m scoring matrix in row-major one-dimension array
+/// * `q` - gap-open penalty for ordinary indels
+/// * `e` - gap-extension penalty for ordinary indels
+/// * `q2` - gap-open penalty for the long-deletion (intron) state
+/// * `noncan` - non-canonical splice site penalty
+/// * `_w` - band width (currently unused; rotated DP is effectively unbanded)
+/// * `zdrop` - off-diagonal drop-off to stop extension (positive; `<0` to disable)
+/// * `end_bonus` - bonus added when extension reaches either end of the query
+/// * `junc_bonus` - bonus added at annotated junction positions
+/// * `junc_pen` - penalty applied at non-junction positions when `junc` is set
+/// * `junc` - optional per-base junction annotation (donor/acceptor flags)
+/// * `flag` - `KSW_EZ_*` flags (including `SPLICE_FOR`/`SPLICE_REV`/`SPLICE_FLANK`)
 pub fn ksw_exts2_rot(
     query: &[u8],
     target: &[u8],

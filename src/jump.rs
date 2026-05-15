@@ -16,7 +16,18 @@ struct JumpCandidate {
     mm: i32,
 }
 
-/// Extend alignment across splice junctions.
+/// Extend a region's alignment across annotated splice junctions on both sides.
+///
+/// Matches `mm_jump_split()` from jump.c. Applies left and right rescue using
+/// the index's `JumpDb` (`mi->J` in C); no-op if no jump database is loaded.
+///
+/// # Parameters
+/// * `mi` - minimap2 index (must hold a `jump_db`)
+/// * `opt` - mapping options (`a`, `b`, `jump_min_match`)
+/// * `qlen` - query length in bases
+/// * `qseq` - query sequence in 2-bit encoding (`0..=3` plus 4 for `N`)
+/// * `r` - region to extend in place (CIGAR, coordinates, scores updated)
+/// * `ts_strand` - transcript strand: `>0` forward only, `<0` reverse only, `0` either
 pub fn jump_split(
     mi: &MmIdx,
     opt: &MapOpt,

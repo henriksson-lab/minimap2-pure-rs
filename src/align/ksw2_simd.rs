@@ -113,6 +113,7 @@ fn backtrack_rotated(
     cigar
 }
 
+/// Runtime check: true if SSE2 is available on the current CPU.
 pub fn has_sse2() -> bool {
     #[cfg(target_arch = "x86_64")]
     {
@@ -124,11 +125,13 @@ pub fn has_sse2() -> bool {
     }
 }
 
+/// Runtime check: true if SSE4.1 is available on the current CPU.
 #[cfg(target_arch = "x86_64")]
 pub fn has_sse41() -> bool {
     is_x86_feature_detected!("sse4.1")
 }
 
+/// Runtime check: true if AVX2 is available; honors `MM2RS_DISABLE_AVX2`.
 #[cfg(target_arch = "x86_64")]
 pub fn has_avx2() -> bool {
     if std::env::var_os("MM2RS_DISABLE_AVX2").is_some() {
@@ -2193,7 +2196,24 @@ unsafe fn extd2_sse41_only<const WITH_CIGAR: bool>(
     )
 }
 
-/// Dispatch for dual-gap: SSE4.1 → SSE2 → scalar fallback.
+/// Dual-gap-cost banded extension; dispatches SSE4.1 -> SSE2 (`extd2_sse2`) ->
+/// scalar (`ksw_extd2`). Rust port of `ksw_extd2_sse` from
+/// `minimap2/ksw2_extd2_sse.c`; this is the default-preset path because
+/// `q != q2`.
+///
+/// # Parameters
+/// * `query` - query sequence with `0 <= query[i] < m` (4-bit encoded)
+/// * `target` - target sequence with `0 <= target[i] < m` (4-bit encoded)
+/// * `m` - number of residue types (alphabet size)
+/// * `mat` - m*m scoring matrix in row-major one-dimension array
+/// * `q` - first gap-open penalty
+/// * `e` - first gap-extension penalty
+/// * `q2` - second gap-open penalty (long-gap affine piece)
+/// * `e2` - second gap-extension penalty
+/// * `w` - band width; `<0` to disable banding
+/// * `zdrop` - off-diagonal drop-off to stop extension (positive; `<0` to disable)
+/// * `end_bonus` - bonus added when extension reaches either end of the query
+/// * `flag` - `KSW_EZ_*` flags
 pub fn ksw_extd2_dispatch(
     query: &[u8],
     target: &[u8],
@@ -3794,7 +3814,26 @@ unsafe fn exts2_sse41(
     ez
 }
 
-/// Dispatch for splice (exts2): SIMD path → scalar rotated DP fallback.
+/// Splice-aware extension; dispatches SSE4.1 -> SSE2 (`exts2_sse2`) -> scalar
+/// rotated DP (`ksw_exts2_rot`). Rust port of `ksw_exts2_sse` from
+/// `minimap2/ksw2_exts2_sse.c`.
+///
+/// # Parameters
+/// * `query` - query sequence with `0 <= query[i] < m` (4-bit encoded)
+/// * `target` - target sequence with `0 <= target[i] < m` (4-bit encoded)
+/// * `m` - number of residue types (alphabet size)
+/// * `mat` - m*m scoring matrix in row-major one-dimension array
+/// * `q` - gap-open penalty for ordinary indels
+/// * `e` - gap-extension penalty for ordinary indels
+/// * `q2` - gap-open penalty for the long-deletion (intron) state
+/// * `noncan` - non-canonical splice site penalty
+/// * `w` - band width; `<0` to disable banding
+/// * `zdrop` - off-diagonal drop-off to stop extension (positive; `<0` to disable)
+/// * `end_bonus` - bonus added when extension reaches either end of the query
+/// * `junc_bonus` - bonus added at annotated junction positions
+/// * `junc_pen` - penalty applied at non-junction positions when `junc` is set
+/// * `junc` - optional per-base junction annotation (donor/acceptor flags)
+/// * `flag` - `KSW_EZ_*` flags (including `SPLICE_FOR`/`SPLICE_REV`/`SPLICE_FLANK`)
 pub fn ksw_exts2_dispatch(
     query: &[u8],
     target: &[u8],
@@ -3842,7 +3881,21 @@ pub fn ksw_exts2_dispatch(
     )
 }
 
-/// Dispatch: SIMD for single-gap, scalar fallback otherwise.
+/// Single-gap-cost banded extension; dispatches SSE2 (`extz2_sse2`) -> scalar
+/// (`ksw_extz2`). Rust port of `ksw_extz2_sse` from
+/// `minimap2/ksw2_extz2_sse.c`; selected when `q == q2 && e == e2`.
+///
+/// # Parameters
+/// * `query` - query sequence with `0 <= query[i] < m` (4-bit encoded)
+/// * `target` - target sequence with `0 <= target[i] < m` (4-bit encoded)
+/// * `m` - number of residue types (alphabet size)
+/// * `mat` - m*m scoring matrix in row-major one-dimension array
+/// * `q` - gap-open penalty; a gap of length l costs `-(q + l*e)`
+/// * `e` - gap-extension penalty
+/// * `w` - band width; `<0` to disable banding
+/// * `zdrop` - off-diagonal drop-off to stop extension (positive; `<0` to disable)
+/// * `end_bonus` - bonus added when extension reaches either end of the query
+/// * `flag` - `KSW_EZ_*` flags
 pub fn ksw_extz2_dispatch(
     query: &[u8],
     target: &[u8],

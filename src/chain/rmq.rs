@@ -127,6 +127,18 @@ impl RmqTree {
 ///
 /// Uses range-minimum queries for faster predecessor search compared to DP.
 /// Better for very large anchor sets (>1000).
+///
+/// # Parameters
+/// * `max_dist` - max reference gap for the outer RMQ window
+/// * `max_dist_inner` - max reference gap for the inner refinement window (0 disables)
+/// * `bw` - chaining bandwidth (max diagonal deviation `|dr - dq|`)
+/// * `max_chn_skip` - max consecutive non-improving skips in inner-tree refinement
+/// * `cap_rmq_size` - cap on active RMQ tree size; older anchors evicted past this
+/// * `min_cnt` - minimum anchors required to keep a chain
+/// * `min_sc` - minimum chain score to keep a chain
+/// * `chn_pen_gap` - linear gap penalty coefficient
+/// * `chn_pen_skip` - linear skip (per-minimizer) penalty coefficient
+/// * `a` - sorted anchor array; `x = rev<<63 | tid<<32 | tpos`, `y = flags|seg_id<<48|q_span<<32|q_pos`
 pub fn lchain_rmq(
     mut max_dist: i32,
     mut max_dist_inner: i32,

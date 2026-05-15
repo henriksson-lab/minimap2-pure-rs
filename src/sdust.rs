@@ -17,10 +17,10 @@ struct PerfIntv {
 ///
 /// Returns a list of masked intervals as `(start, end)` pairs (0-based, end exclusive).
 ///
-/// # Arguments
-/// * `seq` - input sequence (ASCII)
+/// # Parameters
+/// * `seq` - input sequence (ASCII); non-ACGT resets the scan
 /// * `threshold` - score threshold (default 20 in minimap2)
-/// * `window` - window size (default 64 in minimap2)
+/// * `window` - window size in bases (default 64 in minimap2)
 pub fn sdust(seq: &[u8], threshold: i32, window: i32) -> Vec<(u32, u32)> {
     let mut buf = SdustBuf::new();
     sdust_core(seq, threshold, window, &mut buf);

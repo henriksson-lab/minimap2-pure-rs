@@ -31,8 +31,17 @@ fn get_mini_idx(qlen: i32, a: &Mm128, mini_pos: &[u64]) -> i32 {
     -1
 }
 
-/// Estimate sequence divergence for alignment regions.
-/// Matches mm_est_err() from esterr.c.
+/// Estimate sequence divergence (`r.div`) for each region from minimizer density.
+///
+/// Matches `mm_est_err()` from esterr.c. Sets `r.div = -1.0` when the region
+/// has no anchors or its start anchor cannot be located in `mini_pos`.
+///
+/// # Parameters
+/// * `mi` - minimap2 index (used for reference lengths)
+/// * `qlen` - query length
+/// * `regs` - regions to annotate in place (`r.div`)
+/// * `a` - anchor array backing the regions
+/// * `mini_pos` - per-minimizer `(q_span<<32) | q_pos` entries from `collect_matches`; must be sorted by `q_pos`
 pub fn est_err(mi: &MmIdx, qlen: i32, regs: &mut [AlignReg], a: &[Mm128], mini_pos: &[u64]) {
     let n = mini_pos.len();
     if n == 0 {

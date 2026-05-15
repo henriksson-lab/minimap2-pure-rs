@@ -39,10 +39,14 @@ pub struct SeedResult {
 
 /// Filter query minimizers by occurrence frequency.
 ///
-/// Removes minimizers that appear more than `q_occ_max` times AND more than
-/// `q_occ_frac` fraction of total minimizers.
+/// Removes minimizers that appear more than `q_occ_max` times AND constitute
+/// more than `q_occ_frac` of all query minimizers. Matches `mm_seed_mz_flt()`
+/// from seed.c.
 ///
-/// Matches mm_seed_mz_flt() from seed.c.
+/// # Parameters
+/// * `mv` - query minimizers (`Mm128.x = hash<<8 | q_span`); filtered in place
+/// * `q_occ_max` - minimum occurrence count to be eligible for filtering (no-op if `<= 0`)
+/// * `q_occ_frac` - minimum fraction of total minimizers; below this, no filtering
 pub fn seed_mz_flt(mv: &mut Vec<Mm128>, q_occ_max: i32, q_occ_frac: f32) {
     if mv.len() as i32 <= q_occ_max || q_occ_frac <= 0.0 || q_occ_max <= 0 {
         return;
@@ -240,15 +244,17 @@ fn heap_sift_down(a: &mut [u64], mut i: usize, n: usize) {
 
 /// Collect seed matches from the index, with occurrence filtering.
 ///
-/// Matches mm_collect_matches() from seed.c.
+/// Matches `mm_collect_matches()` from seed.c. The returned `mini_pos` only
+/// contains minimizers that both had hits in the index and passed the
+/// occurrence cutoffs — required for `est_err` parity with C.
 ///
-/// # Arguments
-/// * `mi` - the minimap2 index
-/// * `mv` - query minimizers
-/// * `qlen` - query length
-/// * `max_occ` - max occurrence for a minimizer (higher are filtered or selected)
-/// * `max_max_occ` - absolute maximum occurrence (always filtered above this)
-/// * `dist` - distance parameter for adaptive selection
+/// # Parameters
+/// * `mi` - minimap2 index
+/// * `mv` - query minimizers from `mm_sketch`
+/// * `qlen` - query length in bases
+/// * `max_occ` - soft occurrence cap; above this, seeds are filtered or thinned via `seed_select`
+/// * `max_max_occ` - hard occurrence cap; seeds above this are always dropped
+/// * `dist` - target spacing (bp) for adaptive high-occ selection; `<= 0` disables selection
 #[inline(never)]
 pub fn collect_matches(
     mi: &MmIdx,
@@ -354,15 +360,6 @@ pub fn collect_matches(
     }
 }
 
-/// Expand seeds into anchor array (Mm128 format) for chaining.
-///
-/// Matches collect_seed_hits() from map.c.
-///
-/// Output encoding:
-/// - `a[i].x = rev << 63 | rid << 32 | ref_pos` (ref_pos has strand bit stripped)
-/// - `a[i].y = flags | seg_id << 48 | q_span << 32 | q_pos` (q_pos has strand bit stripped; reverse strand gets coordinate flip)
-///
-/// `qlen` is needed to flip reverse-strand query coordinates.
 #[inline]
 fn skip_seed(
     mi: &MmIdx,
@@ -402,6 +399,18 @@ fn skip_seed(
     (false, is_self)
 }
 
+/// Expand seeds into anchor array (`Mm128`) for chaining.
+///
+/// Matches `collect_seed_hits()` from map.c. Output encoding:
+/// - `a[i].x = rev<<63 | rid<<32 | ref_pos` (ref_pos has the strand bit stripped via `>>1`)
+/// - `a[i].y = flags | seg_id<<48 | q_span<<32 | q_pos` (q_pos has strand bit stripped; reverse strand has the query coordinate flipped against `qlen`)
+///
+/// # Parameters
+/// * `mi` - minimap2 index (read for per-bucket position arrays)
+/// * `seeds` - seeds from `collect_matches`; filtered entries (`flt`) are skipped
+/// * `qname` - query name for `NO_DIAG`/`NO_DUAL` self-mapping suppression; `None` disables
+/// * `qlen` - query length; needed to flip reverse-strand query coordinates
+/// * `flag` - mapping flags; honors `REV_ONLY`/`FOR_ONLY`/`NO_DIAG`/`NO_DUAL`
 #[inline(never)]
 pub fn expand_seeds_to_anchors(
     mi: &MmIdx,
@@ -495,12 +504,19 @@ pub fn expand_seeds_to_anchors(
     anchors
 }
 
-/// Expand seeds using C minimap2's collect_seed_hits_heap() ordering.
+/// Expand seeds using C minimap2's `collect_seed_hits_heap()` ordering.
 ///
-/// This is used by the short-read preset via MM_F_HEAP_SORT. It merges target
-/// positions across query minimizers with a heap, writes forward-strand anchors
-/// from the front and reverse-strand anchors from the back, then moves reverse
-/// anchors after forward anchors.
+/// Used by the short-read preset via `MM_F_HEAP_SORT`. Merges target positions
+/// across query minimizers with a heap, writes forward-strand anchors from the
+/// front and reverse-strand anchors from the back, then moves reverse anchors
+/// after forward anchors so the result is sorted by `x` without an extra pass.
+///
+/// # Parameters
+/// * `mi` - minimap2 index
+/// * `seeds` - seeds from `collect_matches` (filter status ignored; C heap variant skips no entries here)
+/// * `qname` - query name for `NO_DIAG`/`NO_DUAL` suppression; `None` disables
+/// * `qlen` - query length; flips reverse-strand query coordinates
+/// * `flag` - mapping flags (`REV_ONLY`/`FOR_ONLY`/`NO_DIAG`/`NO_DUAL`)
 #[inline(never)]
 pub fn expand_seeds_to_anchors_heap(
     mi: &MmIdx,

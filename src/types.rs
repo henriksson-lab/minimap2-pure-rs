@@ -17,6 +17,11 @@ pub struct Mm128 {
 }
 
 impl Mm128 {
+    /// Construct a 128-bit minimizer/seed pair from raw halves.
+    ///
+    /// # Parameters
+    /// * `x` - high half: minimizer hash + span, or seed (`rev<<63 | rid<<32 | ref_pos`)
+    /// * `y` - low half: position + strand bits, or seed (`flags | seg_id<<48 | q_span<<32 | q_pos`)
     #[inline]
     pub fn new(x: u64, y: u64) -> Self {
         Self { x, y }
@@ -49,23 +54,34 @@ pub struct IdxSeq {
 pub struct Cigar(pub Vec<u32>);
 
 impl Cigar {
+    /// Construct an empty CIGAR.
     pub fn new() -> Self {
         Self(Vec::new())
     }
 
+    /// Append one BAM-encoded CIGAR element `(len << 4) | op`.
+    ///
+    /// # Parameters
+    /// * `op` - CIGAR operation (M/I/D/N/S/H/P/=/X)
+    /// * `len` - operation length in bases (must fit in 28 bits)
     pub fn push(&mut self, op: CigarOp, len: u32) {
         self.0.push((len << 4) | (op as u32));
     }
 
+    /// Number of CIGAR operations.
     pub fn len(&self) -> usize {
         self.0.len()
     }
 
+    /// `true` when the CIGAR contains no operations.
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
-    /// Decode a single CIGAR element into (operation, length).
+    /// Decode a single BAM-encoded CIGAR element into its `(op, len)` pair.
+    ///
+    /// # Parameters
+    /// * `cigar_val` - the packed `(len << 4) | op` value
     #[inline]
     pub fn decode(cigar_val: u32) -> (CigarOp, u32) {
         let op = CigarOp::from_u8((cigar_val & 0xf) as u8).unwrap();
@@ -73,7 +89,7 @@ impl Cigar {
         (op, len)
     }
 
-    /// Format CIGAR as a human-readable string (e.g., "10M2I5M").
+    /// Render the CIGAR as a human-readable string such as `10M2I5M`.
     pub fn format(&self) -> String {
         let mut s = String::new();
         for &c in &self.0 {

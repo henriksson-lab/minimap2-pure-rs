@@ -34,6 +34,12 @@ pub struct MmIdx {
 
 impl MmIdx {
     /// Initialize an empty index. Matches mm_idx_init().
+    ///
+    /// # Parameters
+    /// * `w` - minimizer window size (clamped to >= 1)
+    /// * `k` - minimizer k-mer size in bases
+    /// * `bucket_bits` - bits used to select bucket from minimizer hash (capped at 2*k)
+    /// * `flag` - index flags (HPC, NO_SEQ, NO_NAME, ...)
     pub fn new(w: i32, k: i32, bucket_bits: i32, flag: IdxFlags) -> Self {
         let b = if k * 2 < bucket_bits {
             k * 2
@@ -66,6 +72,9 @@ impl MmIdx {
     ///
     /// `minier` is the full minimizer hash (before bucket selection).
     /// Returns (count, positions_slice).
+    ///
+    /// # Parameters
+    /// * `minier` - full minimizer hash (hash<<8 | span >> 8), selects bucket via low bits
     pub fn get(&self, minier: u64) -> (i32, &[u64]) {
         let mask = (1u64 << self.bucket_bits) - 1;
         let bucket_idx = (minier & mask) as usize;
@@ -75,6 +84,12 @@ impl MmIdx {
 
     /// Get a subsequence from the packed reference. Matches mm_idx_getseq().
     /// Returns 2-bit encoded bases (0-3) in `buf`, or -1 on error.
+    ///
+    /// # Parameters
+    /// * `rid` - 0-based reference sequence id
+    /// * `st` - start offset on forward strand (0-based, inclusive)
+    /// * `en` - end offset on forward strand (exclusive; clamped to seq length)
+    /// * `buf` - output buffer for 2-bit bases; must hold at least `en-st` elements
     pub fn getseq(&self, rid: u32, st: u32, en: u32, buf: &mut [u8]) -> i32 {
         if rid as usize >= self.seqs.len() || st >= self.seqs[rid as usize].len {
             return -1;
@@ -93,6 +108,12 @@ impl MmIdx {
     }
 
     /// Get a reverse-complement subsequence. Matches mm_idx_getseq_rev().
+    ///
+    /// # Parameters
+    /// * `rid` - 0-based reference sequence id
+    /// * `st` - start offset on forward strand (0-based, inclusive)
+    /// * `en` - end offset on forward strand (exclusive)
+    /// * `buf` - output buffer for 2-bit revcomp bases (length >= en-st)
     pub fn getseq_rev(&self, rid: u32, st: u32, en: u32, buf: &mut [u8]) -> i32 {
         if rid as usize >= self.seqs.len() || st >= self.seqs[rid as usize].len {
             return -1;
@@ -113,6 +134,13 @@ impl MmIdx {
     }
 
     /// Get a subsequence, forward or reverse complement. Matches mm_idx_getseq2().
+    ///
+    /// # Parameters
+    /// * `is_rev` - if true return reverse-complemented bases, else forward strand
+    /// * `rid` - 0-based reference sequence id
+    /// * `st` - forward-strand start offset (0-based, inclusive)
+    /// * `en` - forward-strand end offset (exclusive)
+    /// * `buf` - output buffer for 2-bit bases (length >= en-st)
     pub fn getseq2(&self, is_rev: bool, rid: u32, st: u32, en: u32, buf: &mut [u8]) -> i32 {
         if is_rev {
             self.getseq_rev(rid, st, en, buf)
@@ -138,12 +166,18 @@ impl MmIdx {
     }
 
     /// Look up a sequence by name. Matches mm_idx_name2id().
+    ///
+    /// # Parameters
+    /// * `name` - reference sequence name; returns its 0-based rid if known
     pub fn name2id(&self, name: &str) -> Option<u32> {
         self.name_map.as_ref()?.get(name).copied()
     }
 
     /// Calculate max occurrence threshold from fractional cutoff.
     /// Matches mm_idx_cal_max_occ().
+    ///
+    /// # Parameters
+    /// * `f` - fraction in (0,1] of high-occurrence minimizers to filter out; <=0 disables
     pub fn cal_max_occ(&self, f: f32) -> i32 {
         if f <= 0.0 {
             return i32::MAX;
@@ -228,6 +262,15 @@ impl MmIdx {
     }
 
     /// Build an index from a FASTA/FASTQ file. Matches mm_idx_gen().
+    ///
+    /// # Parameters
+    /// * `path` - input FASTA/FASTQ path ("-" for stdin; gzip auto-detected)
+    /// * `w` - minimizer window size
+    /// * `k` - minimizer k-mer size (<=28)
+    /// * `bucket_bits` - first-level hash table bits
+    /// * `flag` - index flags (HPC, NO_SEQ, NO_NAME)
+    /// * `mini_batch_size` - bases per reader batch (pipeline granularity)
+    /// * `batch_size` - max total bases to index in this call (single-part cutoff)
     pub fn build_from_file(
         path: &str,
         w: i32,
@@ -355,6 +398,14 @@ impl MmIdx {
     /// Build all index parts from a FASTA/FASTQ file using a C minimap2-style
     /// batch boundary. Each part contains whole records and may exceed
     /// `batch_size` by the final record that crosses the boundary.
+    ///
+    /// # Parameters
+    /// * `path` - input FASTA/FASTQ path ("-" for stdin; gzip auto-detected)
+    /// * `w` - minimizer window size
+    /// * `k` - minimizer k-mer size
+    /// * `bucket_bits` - first-level hash table bits
+    /// * `flag` - index flags (HPC, NO_SEQ, NO_NAME)
+    /// * `batch_size` - target bases per part; a record that overflows still closes the part
     pub fn build_parts_from_file(
         path: &str,
         w: i32,
@@ -447,6 +498,14 @@ impl MmIdx {
     }
 
     /// Build an index from in-memory sequences. Matches mm_idx_str().
+    ///
+    /// # Parameters
+    /// * `w` - minimizer window size
+    /// * `k` - minimizer k-mer size
+    /// * `is_hpc` - use homopolymer-compressed k-mers if true
+    /// * `bucket_bits` - first-level hash bits; negative selects default (14)
+    /// * `seqs` - ASCII sequences (A/C/G/T/N); each becomes one reference
+    /// * `names` - optional names matching `seqs` length; None disables name index
     pub fn build_from_str(
         w: i32,
         k: i32,
@@ -514,6 +573,9 @@ impl MmIdx {
     ///
     /// Matches `mm_idx_alt_read()`: each non-empty line contributes the first
     /// whitespace-delimited token as a contig name.
+    ///
+    /// # Parameters
+    /// * `path` - ALT list file ("-" for stdin; gzip auto-detected). One contig name per line; tokens after whitespace ignored
     pub fn read_alt_file(&mut self, path: &str) -> std::io::Result<usize> {
         let input: Box<dyn Read> = if path == "-" {
             Box::new(std::io::stdin())

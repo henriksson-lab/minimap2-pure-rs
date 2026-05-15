@@ -90,8 +90,13 @@ pub enum CigarOp {
 }
 
 impl CigarOp {
+    /// BAM-order CIGAR operation characters indexed by op code (0=M ... 9=B).
     pub const CHARS: &[u8] = b"MIDNSHP=XB";
 
+    /// Build a `CigarOp` from its numeric BAM code, returning `None` for unknown codes (>=9).
+    ///
+    /// # Parameters
+    /// * `v` - BAM operation code in the range 0..=8
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
             0 => Some(Self::Match),
@@ -107,6 +112,7 @@ impl CigarOp {
         }
     }
 
+    /// Return the printable ASCII character (`'M'`, `'I'`, `'D'`, ...) for this op.
     pub fn to_char(self) -> u8 {
         Self::CHARS[self as usize]
     }

@@ -158,9 +158,19 @@ impl Default for MapOpt {
     }
 }
 
-/// Apply a preset to index and mapping options.
-/// Pass `None` to reset to defaults.
-/// Returns `Ok(())` on success, `Err(preset_name)` if unknown.
+/// Apply a named preset to index and mapping options. Mirrors `mm_set_opt()`.
+///
+/// Supported preset names:
+/// `map-ont`, `lr`, `map-pb`, `map10k`, `map-hifi`, `map-ccs`, `lr:hq`, `lr:hqae`,
+/// `map-iclr`, `map-iclr-prerender`, `ava-ont`, `ava-pb`, `asm5`, `asm10`, `asm20`,
+/// `sr` (alias `short`), `splice`, `splice:hq`, `splice:sr`, `cdna`.
+///
+/// # Parameters
+/// * `preset` - preset name; pass `None` to reset both option structs to defaults
+/// * `io` - index options struct mutated in place
+/// * `mo` - mapping options struct mutated in place
+///
+/// Returns `Ok(())` on success, or `Err(name)` carrying the unknown preset string.
 pub fn set_opt(preset: Option<&str>, io: &mut IdxOpt, mo: &mut MapOpt) -> Result<(), String> {
     match preset {
         None => {
@@ -376,9 +386,15 @@ pub fn set_opt(preset: Option<&str>, io: &mut IdxOpt, mo: &mut MapOpt) -> Result
     Ok(())
 }
 
-/// Update mapping options based on the index. Mirrors mm_mapopt_update().
+/// Refine mapping options against a built index. Mirrors `mm_mapopt_update()`.
 ///
-/// Computes `mid_occ` from the index if not set, and ensures `bw_long >= bw`.
+/// Computes `mid_occ` from the index minimizer-frequency distribution if not already set,
+/// clamps it to `[min_mid_occ, max_mid_occ]`, and ensures `bw_long >= bw`. Adds
+/// `MapFlags::SPLICE` automatically if either strand flag is set.
+///
+/// # Parameters
+/// * `opt` - mapping options to update in place
+/// * `mi` - the built index (used to derive `mid_occ` from minimizer occurrence stats)
 pub fn mapopt_update(opt: &mut MapOpt, mi: &crate::index::MmIdx) {
     if opt.flag.contains(MapFlags::SPLICE_FOR) || opt.flag.contains(MapFlags::SPLICE_REV) {
         opt.flag |= MapFlags::SPLICE;
@@ -397,7 +413,11 @@ pub fn mapopt_update(opt: &mut MapOpt, mi: &crate::index::MmIdx) {
     }
 }
 
-/// Compute max splice score bonus. Mirrors mm_max_spsc_bonus().
+/// Compute the maximum splice-site score bonus used during splice alignment.
+/// Mirrors `mm_max_spsc_bonus()`.
+///
+/// # Parameters
+/// * `mo` - mapping options (reads `q` and `q2` gap-open penalties)
 pub fn max_spsc_bonus(mo: &MapOpt) -> i32 {
     let mut max_sc = (mo.q2 + 1) / 2 - 1;
     let alt = mo.q2 - mo.q;
@@ -407,8 +427,12 @@ pub fn max_spsc_bonus(mo: &MapOpt) -> i32 {
     max_sc
 }
 
-/// Validate option combinations. Mirrors mm_check_opt().
-/// Returns Ok(()) if valid, Err(msg) if not.
+/// Validate that a combination of index and mapping options is internally consistent.
+/// Mirrors `mm_check_opt()`. Returns the first violated invariant as an error message.
+///
+/// # Parameters
+/// * `io` - index options
+/// * `mo` - mapping options
 pub fn check_opt(io: &IdxOpt, mo: &MapOpt) -> Result<(), String> {
     if mo.bw > mo.bw_long {
         return Err(format!(

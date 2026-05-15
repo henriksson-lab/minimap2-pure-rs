@@ -21,10 +21,20 @@ pub struct SplitQueryRecord {
     pub regs: Vec<AlignReg>,
 }
 
+/// Build the per-part split temp-file path: `<prefix>.<part:04>.tmp`.
+///
+/// # Parameters
+/// * `prefix` - shared filename prefix supplied by the user
+/// * `part` - 0-based index part number
 pub fn split_tmp_path(prefix: &str, part: usize) -> PathBuf {
     PathBuf::from(format!("{}.{:04}.tmp", prefix, part))
 }
 
+/// Write the split-part header (k + sequence metadata) to a writer.
+///
+/// # Parameters
+/// * `writer` - destination writer; wrapped in a BufWriter
+/// * `mi` - index part whose k-mer size and sequences are recorded
 pub fn write_split_header<W: Write>(writer: &mut W, mi: &MmIdx) -> io::Result<()> {
     let mut writer = BufWriter::new(writer);
     writer.write_all(&(mi.k as u32).to_le_bytes())?;
@@ -38,6 +48,12 @@ pub fn write_split_header<W: Write>(writer: &mut W, mi: &MmIdx) -> io::Result<()
     writer.flush()
 }
 
+/// Create a per-part split temp file and write its header.
+///
+/// # Parameters
+/// * `prefix` - shared filename prefix
+/// * `part` - 0-based index part number
+/// * `mi` - index part to header-stamp
 pub fn create_split_tmp(prefix: &str, part: usize, mi: &MmIdx) -> io::Result<File> {
     let path = split_tmp_path(prefix, part);
     let mut file = File::create(path)?;
@@ -45,6 +61,10 @@ pub fn create_split_tmp(prefix: &str, part: usize, mi: &MmIdx) -> io::Result<Fil
     Ok(file)
 }
 
+/// Read a split-part header (k-mer size + sequence metadata).
+///
+/// # Parameters
+/// * `reader` - source reader positioned at the start of a split-part file
 pub fn read_split_header<R: Read>(reader: &mut R) -> io::Result<SplitPartHeader> {
     let mut reader = BufReader::new(reader);
     let k = read_u32(&mut reader)?;
@@ -67,6 +87,11 @@ pub fn read_split_header<R: Read>(reader: &mut R) -> io::Result<SplitPartHeader>
     Ok(SplitPartHeader { k, seqs })
 }
 
+/// Read all split-part headers for an existing run.
+///
+/// # Parameters
+/// * `prefix` - shared filename prefix
+/// * `n_parts` - number of parts to load (0..n_parts)
 pub fn read_split_headers(prefix: &str, n_parts: usize) -> io::Result<Vec<SplitPartHeader>> {
     let mut headers = Vec::with_capacity(n_parts);
     for part in 0..n_parts {
@@ -76,6 +101,11 @@ pub fn read_split_headers(prefix: &str, n_parts: usize) -> io::Result<Vec<SplitP
     Ok(headers)
 }
 
+/// Remove all split-part temp files for a run (ignores missing files).
+///
+/// # Parameters
+/// * `prefix` - shared filename prefix
+/// * `n_parts` - number of parts to delete (0..n_parts)
 pub fn remove_split_tmps(prefix: &str, n_parts: usize) -> io::Result<()> {
     for part in 0..n_parts {
         let path = split_tmp_path(prefix, part);
@@ -88,6 +118,12 @@ pub fn remove_split_tmps(prefix: &str, n_parts: usize) -> io::Result<()> {
     Ok(())
 }
 
+/// Serialize a per-query split record (regions for one read against one part).
+///
+/// # Parameters
+/// * `writer` - destination writer
+/// * `record` - per-query result block to write
+/// * `with_cigar` - include the optional AlignExtra (CIGAR + DP stats) per region
 pub fn write_split_query_record<W: Write>(
     writer: &mut W,
     record: &SplitQueryRecord,
@@ -102,6 +138,11 @@ pub fn write_split_query_record<W: Write>(
     Ok(())
 }
 
+/// Deserialize a per-query split record written by `write_split_query_record`.
+///
+/// # Parameters
+/// * `reader` - source reader positioned at the start of one record
+/// * `with_cigar` - must match the value used when writing
 pub fn read_split_query_record<R: Read>(
     reader: &mut R,
     with_cigar: bool,
@@ -121,6 +162,15 @@ pub fn read_split_query_record<R: Read>(
     })
 }
 
+/// Merge per-part hits for one query into a unified region set; re-runs
+/// hit filtering / MAPQ to mirror the C single-pass output.
+///
+/// # Parameters
+/// * `records` - one record per index part, in part order
+/// * `rid_shifts` - additive offsets applied to `rid` of part `i` (must align with `records`)
+/// * `opt` - mapping options (preset thresholds, flags)
+/// * `idx_k` - k-mer size of the merged index (any part — all use the same k)
+/// * `qlen` - query length in bases
 pub fn merge_split_query_records(
     records: &[SplitQueryRecord],
     rid_shifts: &[u32],

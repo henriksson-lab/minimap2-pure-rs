@@ -83,7 +83,14 @@ fn sort_seed_anchors(opt: &MapOpt, anchors: &mut Vec<Mm128>) {
 
 /// Map a single query sequence against the index.
 ///
-/// This is the core mapping function, equivalent to mm_map_frag_core() for a single segment.
+/// Equivalent to `mm_map_frag_core()` for a single segment: sketch → seed →
+/// chain → align → MAPQ. Returns raw regions plus the repeat-length estimate.
+///
+/// # Parameters
+/// * `mi` - minimap2 index built by `MmIdx::build_from_file` / `build_from_str`
+/// * `opt` - mapping parameters (preset-tuned; `MapFlags` drives the pipeline)
+/// * `qname` - query name; used for log messages, SAM QNAME, and `NO_DIAG`/`NO_DUAL` self-hit filtering
+/// * `qseq` - query sequence in ASCII (ACGT/acgt/N); `N` is encoded as 4 internally
 pub fn map_query(mi: &MmIdx, opt: &MapOpt, qname: &str, qseq: &[u8]) -> MapResult {
     let qlen = qseq.len() as i32;
     if qlen == 0 {
@@ -369,11 +376,17 @@ pub fn map_query(mi: &MmIdx, opt: &MapOpt, qname: &str, qseq: &[u8]) -> MapResul
     }
 }
 
-/// Map a multi-segment fragment, such as paired-end reads.
+/// Map a multi-segment fragment (e.g. paired-end reads) as one chained unit.
 ///
-/// This mirrors the multi-segment branch of C minimap2's mm_map_frag_core():
+/// Mirrors the multi-segment branch of C minimap2's `mm_map_frag_core()`:
 /// segment minimizers are chained together first, then split back into
 /// per-segment chains for alignment and pairing.
+///
+/// # Parameters
+/// * `mi` - minimap2 index
+/// * `opt` - mapping parameters; `pe_ori` controls per-segment orientation
+/// * `qname` - shared query name for all segments (after `/1`/`/2` stripping)
+/// * `qseqs` - per-segment query sequences (ASCII); empty input yields empty output
 pub fn map_frag_queries(mi: &MmIdx, opt: &MapOpt, qname: &str, qseqs: &[&[u8]]) -> Vec<MapResult> {
     let n_segs = qseqs.len();
     if n_segs == 0 {
@@ -766,7 +779,14 @@ fn split_fragment_regs(
         .collect()
 }
 
-/// Format mapping results as PAF lines.
+/// Format mapping results as PAF lines (one line per emitted region).
+///
+/// # Parameters
+/// * `mi` - minimap2 index (provides reference names and lengths)
+/// * `opt` - mapping parameters; flags select tags (CS/MD/DS) and PAF variants
+/// * `qname` - query name written to the first PAF column
+/// * `qseq` - query sequence in ASCII; used to regenerate cs/MD/DS tags
+/// * `result` - regions from `map_query`
 pub fn format_paf(
     mi: &MmIdx,
     opt: &MapOpt,
@@ -777,6 +797,15 @@ pub fn format_paf(
     format_paf_with_comment(mi, opt, qname, qseq, None, result)
 }
 
+/// Format mapping results as PAF, optionally appending a FASTQ/FASTA comment.
+///
+/// # Parameters
+/// * `mi` - minimap2 index
+/// * `opt` - mapping parameters; `COPY_COMMENT` triggers comment append
+/// * `qname` - query name
+/// * `qseq` - query sequence in ASCII
+/// * `comment` - optional FASTA/FASTQ comment to append when `COPY_COMMENT` is set
+/// * `result` - regions from `map_query`
 pub fn format_paf_with_comment(
     mi: &MmIdx,
     opt: &MapOpt,
@@ -788,6 +817,17 @@ pub fn format_paf_with_comment(
     format_paf_segment_with_comment(mi, opt, qname, qseq, comment, result, 0, 0)
 }
 
+/// Format PAF for one segment of a multi-segment fragment.
+///
+/// # Parameters
+/// * `mi` - minimap2 index
+/// * `opt` - mapping parameters
+/// * `qname` - query name
+/// * `qseq` - query sequence for this segment (ASCII)
+/// * `comment` - optional FASTA/FASTQ comment
+/// * `result` - regions from `map_frag_queries` for this segment
+/// * `n_seg` - total number of segments in the fragment (0 for single-segment)
+/// * `seg_idx` - 0-based segment index within the fragment
 pub fn format_paf_segment_with_comment(
     mi: &MmIdx,
     opt: &MapOpt,

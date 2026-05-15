@@ -71,7 +71,11 @@ pub mod prelude {
     pub use crate::options::{mapopt_update, IdxOpt, MapOpt};
     pub use crate::types::AlignReg;
 
-    /// Set up options with a preset. Returns (IdxOpt, MapOpt).
+    /// Build a fresh `(IdxOpt, MapOpt)` pair pre-configured for the named preset.
+    ///
+    /// # Parameters
+    /// * `name` - preset name accepted by [`crate::options::set_opt`] (e.g. `map-ont`,
+    ///   `map-hifi`, `sr`, `asm5`, `splice`); see that function for the full list
     pub fn preset(name: &str) -> Result<(IdxOpt, MapOpt), String> {
         let mut io = IdxOpt::default();
         let mut mo = MapOpt::default();

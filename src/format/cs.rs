@@ -4,9 +4,15 @@ use std::fmt::Write;
 
 const NT_CHARS: &[u8] = b"acgtn";
 
-/// Generate the cs tag for an alignment.
+/// Generate the `cs` tag describing per-base differences along a CIGAR-aware alignment.
 ///
-/// If `no_iden` is true, uses ':' instead of '=' for matches (short cs).
+/// Returns `None` if no CIGAR is attached to the region.
+///
+/// # Parameters
+/// * `mi` - index used to fetch the reference subsequence covered by `[r.rs, r.re)`
+/// * `r` - mapping region (must have `extra.cigar` set)
+/// * `qseq` - query sequence as 0-3 encoded bases, oriented to match the alignment
+/// * `no_iden` - when `true`, emit short cs with `:LEN` instead of `=BASES` for matches
 pub fn gen_cs(
     mi: &MmIdx,
     r: &AlignReg,
@@ -152,9 +158,16 @@ fn write_indel_ds(s: &mut String, len: usize, seq: &[u8], ll: usize, lr: usize) 
     }
 }
 
-/// Generate the ds tag for an alignment.
+/// Generate the `ds` tag — a cs-like representation that annotates indels with
+/// flanking tandem-repeat context (brackets mark the ambiguous repeat extent).
 ///
-/// `ds` is a cs-like tag that annotates indels with local repeat context.
+/// Returns `None` if no CIGAR is attached.
+///
+/// # Parameters
+/// * `mi` - index used to fetch the reference subsequence covered by `[r.rs, r.re)`
+/// * `r` - mapping region (must have `extra.cigar` set)
+/// * `qseq` - query sequence as 0-3 encoded bases, oriented to match the alignment
+/// * `no_iden` - when `true`, emit `:LEN` instead of `=BASES` for matches
 pub fn gen_ds(mi: &MmIdx, r: &AlignReg, qseq: &[u8], no_iden: bool) -> Option<String> {
     let p = r.extra.as_ref()?;
     let mut s = String::with_capacity(256);
@@ -277,7 +290,14 @@ pub fn gen_ds(mi: &MmIdx, r: &AlignReg, qseq: &[u8], no_iden: bool) -> Option<St
     Some(s)
 }
 
-/// Generate the MD tag for an alignment.
+/// Generate the SAM `MD` tag describing the reference relative to the query.
+///
+/// Returns `None` if no CIGAR is attached.
+///
+/// # Parameters
+/// * `mi` - index used to fetch the reference subsequence covered by `[r.rs, r.re)`
+/// * `r` - mapping region (must have `extra.cigar` set)
+/// * `qseq` - query sequence as 0-3 encoded bases, oriented to match the alignment
 pub fn gen_md(mi: &MmIdx, r: &AlignReg, qseq: &[u8]) -> Option<String> {
     let p = r.extra.as_ref()?;
     let mut s = String::with_capacity(128);

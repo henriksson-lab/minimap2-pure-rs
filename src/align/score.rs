@@ -4,6 +4,13 @@
 /// The last row/column (N) gets sc_ambi.
 ///
 /// This is used by minimap2 for standard alignment.
+///
+/// # Parameters
+/// * `m` - matrix dimension (5 for DNA: A=0,C=1,G=2,T=3,N=4)
+/// * `mat` - output: row-major `m*m` scoring matrix indexed by 4-bit ACGTN codes
+/// * `a` - match score (positive)
+/// * `b` - mismatch penalty magnitude (stored negated)
+/// * `sc_ambi` - ambiguous-base (N) penalty magnitude (stored negated)
 pub fn gen_simple_mat(m: i32, mat: &mut Vec<i8>, a: i32, b: i32, sc_ambi: i32) {
     let m = m as usize;
     mat.clear();
@@ -23,7 +30,15 @@ pub fn gen_simple_mat(m: i32, mat: &mut Vec<i8>, a: i32, b: i32, sc_ambi: i32) {
 
 /// Generate a scoring matrix with transition/transversion distinction.
 ///
-/// Transitions (A↔G, C↔T) get a different penalty than transversions.
+/// Transitions (A<->G, C<->T) get a different penalty than transversions.
+///
+/// # Parameters
+/// * `m` - matrix dimension (5 for DNA: A=0,C=1,G=2,T=3,N=4)
+/// * `mat` - output: row-major `m*m` scoring matrix indexed by 4-bit ACGTN codes
+/// * `a` - match score (positive)
+/// * `b` - transversion mismatch penalty magnitude (stored negated)
+/// * `transition` - transition penalty offset; transition score = -(b - transition)
+/// * `sc_ambi` - ambiguous-base (N) penalty magnitude (stored negated)
 pub fn gen_ts_mat(m: i32, mat: &mut Vec<i8>, a: i32, b: i32, transition: i32, sc_ambi: i32) {
     let m = m as usize;
     mat.clear();
